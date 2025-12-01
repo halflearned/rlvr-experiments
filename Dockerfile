@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# add symlink
+RUN ln -s /usr/bin/python3.11 /usr/bin/python
 
 # Install rust (needed for torchtitan -> tiktoken)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh

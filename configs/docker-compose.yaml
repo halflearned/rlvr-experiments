@@ -1,23 +1,23 @@
-version: "3.9"
-
 services:
   vllm:
     image: rlvr-experiments:latest
     container_name: inference-server
-    command: python entrypoints/inference.py configs/job.yaml
-    ports:
-      - "8000:8000"                    
+    command: python entrypoints/inference.py configs/job.yaml                  
     environment:
       - NVIDIA_VISIBLE_DEVICES=0,1       
       - VLLM_WORKER_MULTIPROC=1
+      - PYTHONPATH=/workspace/src
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: [gpu]
+    working_dir: /workspace
+
     volumes:
-      - ./models:/models               
-      - ./src:/workspace/src 
+      - ../:/workspace
+    ports:
+      - "8000:8000"  
     networks:
       - rlvr-net
     healthcheck:
@@ -34,15 +34,15 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=2,3           
       - VLLM_BASE_URL=http://vllm:8000/v1 
+      - PYTHONPATH=/workspace/src
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: [gpu]
+    working_dir: /workspace
     volumes:
-      - ./models:/models
-      - ./src:/workspace/src
-      - ./data:/data                 
+      - ../:/workspace
     networks:
       - rlvr-net
 
