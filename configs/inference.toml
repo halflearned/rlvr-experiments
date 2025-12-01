@@ -1,0 +1,13 @@
+[uvicorn]
+host = "0.0.0.0"
+port = 8000
+log_level = "info"
+
+[vllm]
+model = "Qwen/Qwen3-0.6B"
+tensor_parallel_size = 1  # TODO: allow for more!
+max_model_len = 4096
+gpu_memory_utilization = 0.7
+enable_prefix_caching = true
+trust_remote_code = true
+enforce_eager = true  # TODO: remove!

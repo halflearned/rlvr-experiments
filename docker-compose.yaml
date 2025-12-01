@@ -1,0 +1,50 @@
+# common configurations for both vllm and trainer services
+x-common-config: &common-config
+  image: rlvr-experiments:latest
+  ipc: host
+  working_dir: /workspace
+  volumes:
+    - .:/workspace
+  networks:
+    - rlvr-net
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - capabilities: [gpu]
+
+x-common-env: &common-env
+  PYTHONPATH: /workspace/src
+
+services:
+  vllm:
+    <<: *common-config
+    container_name: inference-server
+    command: python -u entrypoints/inference.py configs/inference.toml
+    environment:
+      <<: *common-env
+      VLLM_TORCH_COMPILE_LEVEL: 0 
+      NVIDIA_VISIBLE_DEVICES: 0,1
+      VLLM_WORKER_MULTIPROC: 1
+      VLLM_LOGGING_LEVEL: DEBUG
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  trainer:
+    <<: *common-config 
+    container_name: titan-trainer
+    command: python entrypoints/training.py configs/training.toml
+    environment:
+      <<: *common-env
+      NVIDIA_VISIBLE_DEVICES: 2,3
+      VLLM_BASE_URL: http://vllm:8000/v1
+
+networks:
+  rlvr-net:
+    driver: bridge
