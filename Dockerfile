@@ -25,7 +25,7 @@ RUN uv pip install --system --no-cache -r pyproject.toml
 
 # Build flash-attn from source
 ENV MAX_JOBS=32
-RUN uv pip install --system --no-cache --no-build-isolation flash-attn==2.7.4.post1
+RUN uv pip install --system --no-cache --no-build-isolation flash-attn
 
 # Run the launch script
 CMD ["sleep", "infinity"]
