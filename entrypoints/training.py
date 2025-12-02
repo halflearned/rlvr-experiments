@@ -20,6 +20,44 @@ def register_gsm8k():
 
 register_gsm8k()
 
+
+import os
+import requests
+from openai import OpenAI
+from time import sleep
+
+def wait_for_vllm(max_retries=60, delay=2):
+    base_url = os.environ.get("VLLM_BASE_URL", "http://vllm:8000/v1")
+    health_url = base_url.replace("/v1", "/health")
+
+    for i in range(max_retries):
+        try:
+            if requests.get(health_url, timeout=2).status_code == 200:
+                return
+        except Exception:
+            pass
+        sleep(delay)
+
+    raise RuntimeError(f"vLLM not ready after {max_retries * delay} seconds")
+
+
+def call_vllm(prompt):
+    base_url = os.environ.get("VLLM_BASE_URL", "http://vllm:8000/v1")
+    client = OpenAI(base_url=base_url, api_key="dummy")
+    resp = client.chat.completions.create(
+        model="Qwen/Qwen3-0.6B",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=64,
+        temperature=0,
+    )
+    return resp.choices[0].message.content
+
+
+
+wait_for_vllm()
+print(f"vLLM rollout: {call_vllm('Say hello from the RLVR trainer.')[:200]!r}")
+
+
 # -------- trainer stuff
 from torchtitan.train import Trainer
 from torchtitan.tools.logging import init_logger

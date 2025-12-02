@@ -7,10 +7,6 @@ readme = "README.md"
 dependencies = [
     "torch",
     "torchtitan",
-    "vllm",
-    "fastapi>=0.123.0",
-    "uvicorn>=0.38.0",
-    "omegaconf>=2.3.0",
     "openai>=2.8.1",
 ]
 
