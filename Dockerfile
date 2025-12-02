@@ -14,18 +14,14 @@ RUN ln -s /usr/bin/python3.11 /usr/bin/python
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.cargo/bin:$PATH"
 
-# Install uv (needed for this package)
+# install uv (needed for this package)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy project files
+# copy project files
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies from pyproject.toml
+# install dependencies from pyproject.toml
 RUN uv pip install --system --no-cache -r pyproject.toml
 
-# Build flash-attn from source
-ENV MAX_JOBS=32
-RUN uv pip install --system --no-cache --no-build-isolation flash-attn
-
-# Run the launch script
+# dummy command, this will keep the container running. docker compose overrides this.
 CMD ["sleep", "infinity"]

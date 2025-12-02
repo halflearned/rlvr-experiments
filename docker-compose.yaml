@@ -39,7 +39,7 @@ services:
   trainer:
     <<: *common-config 
     container_name: titan-trainer
-    command: python entrypoints/training.py configs/training.toml
+    command: torchrun --standalone --nnodes=1 --nproc_per_node=2 entrypoints/training.py configs/training.toml
     environment:
       <<: *common-env
       NVIDIA_VISIBLE_DEVICES: 2,3
