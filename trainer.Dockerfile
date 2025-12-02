@@ -21,7 +21,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 
 # install dependencies from pyproject.toml
-RUN uv pip install --system --no-cache -r pyproject.toml
+RUN uv pip install --system --no-cache ".[training]"
 
 # dummy command, this will keep the container running. docker compose overrides this.
 CMD ["sleep", "infinity"]

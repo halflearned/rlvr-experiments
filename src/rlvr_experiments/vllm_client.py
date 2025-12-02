@@ -60,34 +60,36 @@ class VLLMClient:
         temperature: float = 1.0,
         top_p: float = 1.0,
         max_tokens: int = 16,
-        **kwargs,
+        repetition_penalty: float = 1.0,
+        top_k: int = -1,
+        min_p: float = 0.0,
+        truncate_prompt_tokens: int | None = None,
+        **generation_kwargs,
     ) -> dict:
-        """Generate completions using standard vLLM OpenAI API."""
-        url = f"{self.base_url}/v1/completions"
-        
-        # Handle single prompt or list
+        """
+        Call custom /generate/ endpoint on the vLLM server.
+
+        Returns the raw JSON (prompt_ids, completion_ids, logprobs) from the server.
+        """
+        url = f"{self.base_url}/generate/"
+
         if isinstance(prompts, str):
             prompts = [prompts]
-        
-        all_results = []
-        for prompt in prompts:
-            response = self.session.post(
-                url,
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "n": n,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "max_tokens": max_tokens,
-                    **kwargs,
-                },
-                timeout=120,
-            )
-            
-            if response.status_code == 200:
-                all_results.append(response.json())
-            else:
-                raise Exception(f"Request failed: {response.status_code}, {response.text}")
-        
-        return all_results
+
+        payload = {
+            "prompts": prompts,
+            "n": n,
+            "repetition_penalty": repetition_penalty,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "max_tokens": max_tokens,
+            "truncate_prompt_tokens": truncate_prompt_tokens,
+            "generation_kwargs": generation_kwargs,
+        }
+
+        response = self.session.post(url, json=payload, timeout=120)
+        if response.status_code != 200:
+            raise Exception(f"Request failed: {response.status_code}, {response.text}")
+        return response.json()
