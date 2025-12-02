@@ -1,9 +1,10 @@
 [vllm_server]
-model = "Qwen/Qwen3-0.6B"
-
 host = "0.0.0.0"
 port = 8000
+log_level = "info"
 
+[model_params]
+model = "Qwen/Qwen3-0.6B"
 max_model_len = 1024
 tensor_parallel_size = 1
 gpu_memory_utilization = 0.7

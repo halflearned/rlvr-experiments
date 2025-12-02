@@ -18,7 +18,7 @@ x-common-env: &common-env
 services:
   vllm:
     <<: *common-config
-    image: vllm/vllm-openai:v0.11.2
+    image: rlvr-inference:latest
     container_name: inference-server
     entrypoint: []
     command: ["python3", "-u", "entrypoints/inference.py", "configs/inference.toml"]

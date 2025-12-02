@@ -49,11 +49,11 @@ def main() -> None:
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
 
-    cmd = build_vllm_command(cfg)
+    from rlvr_experiments.vllm_server import create_app
+    import uvicorn
+    app = create_app(cfg["model_params"])
 
-    print("Launching vLLM server with command:")
-    print("  " + " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    uvicorn.run(app, host=cfg["vllm_server"]["host"], port=cfg["vllm_server"]["port"], log_level=cfg["vllm_server"]["log_level"])
 
 
 if __name__ == "__main__":

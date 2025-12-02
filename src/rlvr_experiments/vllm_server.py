@@ -3,7 +3,7 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import List, Sequence
 
 import torch
 
@@ -14,7 +14,7 @@ from fastapi import FastAPI  # type: ignore
 from pydantic import BaseModel  # type: ignore
 import uvicorn  # type: ignore
 
-from vllm import LLM
+from vllm import LLM, SamplingParams
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.parallel_state import get_world_group
 from vllm.distributed.utils import StatelessProcessGroup
@@ -120,90 +120,6 @@ class WeightSyncWorkerExtension:
             logger.info("Closed weight update communicator in worker")
 
 
-# ---------------------------------------------------------------------------
-# CLI args
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ScriptArgs:
-    model: str = field(
-        metadata={"help": "HF model ID or local path (e.g. Qwen/Qwen3-0.6B)."}
-    )
-    host: str = field(
-        default="0.0.0.0",
-        metadata={"help": "Host to bind the HTTP server on."},
-    )
-    port: int = field(
-        default=8000,
-        metadata={"help": "Port to bind the HTTP server on."},
-    )
-    tensor_parallel_size: int = field(
-        default=1,
-        metadata={"help": "vLLM tensor parallel degree."},
-    )
-    gpu_memory_utilization: float = field(
-        default=0.7,
-        metadata={"help": "vLLM gpu_memory_utilization."},
-    )
-    dtype: str = field(
-        default="bfloat16",
-        metadata={"help": "Model dtype for vLLM (e.g. float16, bfloat16, auto)."},
-    )
-    max_model_len: int | None = field(
-        default=1024,
-        metadata={"help": "Max model length for vLLM (context length)."},
-    )
-    enforce_eager: bool = field(
-        default=False,
-        metadata={"help": "If True, disable CUDA graphs and run in eager mode."},
-    )
-    kv_cache_dtype: str = field(
-        default="auto",
-        metadata={"help": "KV cache dtype (auto, float16, bfloat16, etc.)."},
-    )
-    trust_remote_code: bool = field(
-        default=False,
-        metadata={"help": "Allow remote code when loading models."},
-    )
-    log_level: str = field(
-        default="info",
-        metadata={"help": "uvicorn log level."},
-    )
-
-
-def parse_args() -> ScriptArgs:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--tensor-parallel-size", type=int, default=1)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)
-    parser.add_argument("--dtype", type=str, default="bfloat16")
-    parser.add_argument("--max-model-len", type=int, default=1024)
-    parser.add_argument("--enforce-eager", action="store_true")
-    parser.add_argument("--kv-cache-dtype", type=str, default="auto")
-    parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--log-level", type=str, default="info")
-    ns = parser.parse_args()
-    return ScriptArgs(
-        model=ns.model,
-        host=ns.host,
-        port=ns.port,
-        tensor_parallel_size=ns.tensor_parallel_size,
-        gpu_memory_utilization=ns.gpu_memory_utilization,
-        dtype=ns.dtype,
-        max_model_len=ns.max_model_len,
-        enforce_eager=ns.enforce_eager,
-        kv_cache_dtype=ns.kv_cache_dtype,
-        trust_remote_code=ns.trust_remote_code,
-        log_level=ns.log_level,
-    )
-
-
-# ---------------------------------------------------------------------------
-# HTTP schema
-# ---------------------------------------------------------------------------
-
 class InitCommunicatorRequest(BaseModel):
     host: str          # client rendezvous host (reachable from workers)
     port: int          # client rendezvous port
@@ -217,28 +133,29 @@ class UpdateWeightsRequest(BaseModel):
     shape: list[int]
 
 
-# ---------------------------------------------------------------------------
-# Main setup
-# ---------------------------------------------------------------------------
 
-def create_app(script_args: ScriptArgs) -> FastAPI:
+
+def sanitize_logprob(logprob):
+    import math
+
+    value = logprob.logprob
+    if math.isnan(value):
+        logger.warning(f"Generated NaN logprob, token logprob '{logprob}' will be ignored")
+        return None
+
+    return value
+
+
+def create_app(vllm_args) -> FastAPI:
     # Instantiate vLLM engine with our worker extension
-    logger.info("Initializing vLLM LLM(model=%s)...", script_args.model)
     llm = LLM(
-        model=script_args.model,
-        tensor_parallel_size=script_args.tensor_parallel_size,
-        gpu_memory_utilization=script_args.gpu_memory_utilization,
-        dtype=script_args.dtype,
-        max_model_len=script_args.max_model_len,
-        enforce_eager=script_args.enforce_eager,
-        kv_cache_dtype=script_args.kv_cache_dtype,
-        trust_remote_code=script_args.trust_remote_code,
-        worker_extension_cls=WeightSyncWorkerExtension,
+        **vllm_args,
+        worker_extension_cls="rlvr_experiments.vllm_server.WeightSyncWorkerExtension",
     )
     # At this point, vLLM will have spawned its engine workers.
 
     # Number of engine ranks = TP * DP; here DP is effectively 1
-    engine_world_size = script_args.tensor_parallel_size
+    engine_world_size = vllm_args.get("tensor_parallel_size", 1) * 1  # TODO: Assuming DP=1 for now 
 
     app = FastAPI()
 
@@ -279,6 +196,7 @@ def create_app(script_args: ScriptArgs) -> FastAPI:
         After this returns, the client must call NCCL broadcast with
         the actual tensor contents.
         """
+        # TODO: will need to remap names back to HF namespace!
         llm.collective_rpc(
             method="update_named_param",
             args=(req.name, req.dtype, tuple(req.shape)),
@@ -293,14 +211,91 @@ def create_app(script_args: ScriptArgs) -> FastAPI:
         llm.collective_rpc(method="close_communicator", args=())
         return {"message": "Closing communicator"}
 
+
+    from vllm.sampling_params import GuidedDecodingParams  # only if you want regex; can omit
+
+
+    class GenerateRequest(BaseModel):
+        prompts: list[str]
+        n: int = 1
+        repetition_penalty: float = 1.0
+        temperature: float = 1.0
+        top_p: float = 1.0
+        top_k: int = -1
+        min_p: float = 0.0
+        max_tokens: int = 16
+        truncate_prompt_tokens: int | None = None
+        guided_decoding_regex: str | None = None
+        # keep this for future flexibility, but optional for now
+        generation_kwargs: dict = field(default_factory=dict)
+
+
+    class GenerateResponse(BaseModel):
+        prompt_ids: list[list[int]]
+        completion_ids: list[list[int]]
+        logprobs: list[list[float]]
+        
+
+    @app.post("/generate/", response_model=GenerateResponse)
+    async def generate(request: GenerateRequest):
+        """
+        Simple text-generation endpoint for vLLM.
+
+        - Accepts plain prompts.
+        - Returns token ids and logprobs similar to TRL's vllm-serve.
+        """
+
+        # (optional) guided decoding
+        if request.guided_decoding_regex is not None:
+            guided_decoding = GuidedDecodingParams(regex=request.guided_decoding_regex)
+        else:
+            guided_decoding = None
+
+        generation_kwargs = {
+            "n": request.n,
+            "repetition_penalty": request.repetition_penalty,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "top_k": request.top_k,
+            "min_p": request.min_p,
+            "max_tokens": request.max_tokens,
+            "truncate_prompt_tokens": request.truncate_prompt_tokens,
+            "guided_decoding": guided_decoding,
+            "logprobs": 0,  # vLLM: 0 = return logprobs for sampled tokens
+        }
+        generation_kwargs.update(request.generation_kwargs)
+
+        sampling_params = SamplingParams(**generation_kwargs)
+
+        # Directly call vLLM; no custom DP pipes
+        outputs = llm.generate(request.prompts, sampling_params)
+
+        # Shape semantics intentionally match TRL:
+        # - prompt_ids: one per input prompt
+        # - completion_ids/logprobs: flattened across all completions
+        prompt_ids: list[list[int]] = [out.prompt_token_ids for out in outputs]
+
+        completion_ids: list[list[int]] = []
+        logprobs: list[list[float]] = []
+
+        for out in outputs:            # one per prompt
+            for comp in out.outputs:   # one per completion
+                completion_ids.append(list(comp.token_ids))
+                # comp.logprobs is a list[dict[token_id -> TokenLogProb]]
+                comp_logprobs: list[float] = []
+                for lp_dict in comp.logprobs:
+                    tok_lp = next(iter(lp_dict.values()))
+                    val = sanitize_logprob(tok_lp)
+                    if val is not None:
+                        comp_logprobs.append(val)
+                logprobs.append(comp_logprobs)
+
+        return GenerateResponse(
+            prompt_ids=prompt_ids,
+            completion_ids=completion_ids,
+            logprobs=logprobs,
+        )
+
+
     return app
 
-
-def main():
-    script_args = parse_args()
-    app = create_app(script_args)
-    uvicorn.run(app, host=script_args.host, port=script_args.port, log_level=script_args.log_level)
-
-
-if __name__ == "__main__":
-    main()
