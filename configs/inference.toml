@@ -1,13 +1,12 @@
-[uvicorn]
+[vllm_server]
+model = "Qwen/Qwen3-0.6B"
+
 host = "0.0.0.0"
 port = 8000
-log_level = "info"
 
-[vllm]
-model = "Qwen/Qwen3-0.6B"
-tensor_parallel_size = 1  # TODO: allow for more!
-max_model_len = 4096
+max_model_len = 1024
+tensor_parallel_size = 1
 gpu_memory_utilization = 0.7
-enable_prefix_caching = true
-trust_remote_code = true
-enforce_eager = true  # TODO: remove!
+dtype = "bfloat16"
+enforce_eager = true                   # TODO: why do we need this, why does it break without it?
+logprobs_mode = "processed_logprobs"   # TODO: confirm if we want this or "raw"

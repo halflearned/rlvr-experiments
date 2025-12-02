@@ -24,17 +24,12 @@ services:
     environment:
       <<: *common-env
       VLLM_TORCH_COMPILE_LEVEL: 0 
-      NVIDIA_VISIBLE_DEVICES: 0,1
+      NVIDIA_VISIBLE_DEVICES: 0,1 
+      CUDA_VISIBLE_DEVICES: 0,1
       VLLM_WORKER_MULTIPROC: 1
       VLLM_LOGGING_LEVEL: DEBUG
     ports:
       - "8000:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   trainer:
     <<: *common-config 
@@ -43,6 +38,7 @@ services:
     environment:
       <<: *common-env
       NVIDIA_VISIBLE_DEVICES: 2,3
+      CUDA_VISIBLE_DEVICES: 2,3
       VLLM_BASE_URL: http://vllm:8000/v1
 
 networks:
