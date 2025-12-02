@@ -8,5 +8,4 @@ max_model_len = 1024
 tensor_parallel_size = 1
 gpu_memory_utilization = 0.7
 dtype = "float16"
-# enforce_eager = true                   # TODO: why do we need this, why does it break without it?
-#logprobs_mode = "processed_logprobs"   # TODO: confirm if we want this or "raw"
+logprobs_mode = "processed_logprobs"     # TODO: confirm if we want this or "raw"

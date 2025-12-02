@@ -49,7 +49,9 @@ def call_vllm(prompt):
         messages=[{"role": "user", "content": prompt}],
         max_tokens=64,
         temperature=0,
+        logprobs=True,
     )
+    print("GOT RESPONSE FROM VLLM:", resp)
     return resp.choices[0].message.content
 
 
