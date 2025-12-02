@@ -2023,6 +2023,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "omegaconf" },
+    { name = "openai" },
     { name = "torch" },
     { name = "torchtitan" },
     { name = "uvicorn" },
@@ -2033,6 +2034,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.123.0" },
     { name = "omegaconf", specifier = ">=2.3.0" },
+    { name = "openai", specifier = ">=2.8.1" },
     { name = "torch" },
     { name = "torchtitan" },
     { name = "uvicorn", specifier = ">=0.38.0" },
