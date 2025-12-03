@@ -18,10 +18,12 @@ ENV PATH="/root/.cargo/bin:$PATH"
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # copy project files
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml ./
 
-# install dependencies from pyproject.toml
-RUN uv pip install --system --no-cache ".[training]"
+# TODO: move these back to pyproject.toml
+RUN uv pip install --system vllm==0.11.2 
+RUN uv pip install --system torch==2.9
+RUN uv pip install --system torchtitan
 
 # dummy command, this will keep the container running. docker compose overrides this.
 CMD ["sleep", "infinity"]

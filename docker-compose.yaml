@@ -26,14 +26,14 @@ services:
       <<: *common-env
       NVIDIA_VISIBLE_DEVICES: 0,1 
       CUDA_VISIBLE_DEVICES: 0,1
-      VLLM_WORKER_MULTIPROC: 1
+      VLLM_WORKER_MULTIPROC: 1  #  spawn?
       VLLM_LOGGING_LEVEL: DEBUG
     ports:
       - "8000:8000"
 
   trainer:
     <<: *common-config 
-    image: rlvr-experiments:latest
+    image: rlvr-training:latest
     container_name: titan-trainer
     command: torchrun --standalone --nnodes=1 --nproc_per_node=2 entrypoints/training.py configs/training.toml
     environment:

@@ -4,7 +4,8 @@ FROM vllm/vllm-openai:v0.11.2
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # copy project files
-COPY pyproject.toml uv.lock ./
+# not copying uv.lock as we want to make sure not to overwrite the torch version
+COPY pyproject.toml ./
 
 # install dependencies from pyproject.toml
 RUN uv pip install --system --no-cache ".[inference]"
