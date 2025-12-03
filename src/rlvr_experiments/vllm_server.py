@@ -36,6 +36,15 @@ class WeightSyncWorkerExtension:
     communicator = None   # type: ignore
     client_rank = None    # type: ignore
 
+    def __init__(self, *args, **kwargs):
+        # This is the critical “am I even alive?” log
+        try:
+            rank = get_world_group().rank
+        except Exception:
+            rank = "UNKNOWN"
+        logger.warning("HELLO WORLD!!! WSWE.__init__ called on rank=%s device=%s", rank, getattr(self, "device", None))
+
+
     def init_communicator(self, host: str, port: int, world_size: int, client_device_uuid: str) -> None:
         """
         Initialize the NCCL communicator for this worker.
@@ -47,6 +56,7 @@ class WeightSyncWorkerExtension:
             client_device_uuid: UUID of the client's CUDA device, to ensure
                                 we don't share a device between client and worker.
         """
+        print(f"Initializing weight communicator on worker rank {get_world_group().rank}...")
         if self.communicator is not None:
             raise RuntimeError("Weight update group already initialized. Call close_communicator first.")
 
@@ -151,6 +161,7 @@ def create_app(vllm_args) -> FastAPI:
     llm = LLM(
         **vllm_args,
         worker_extension_cls="rlvr_experiments.vllm_server.WeightSyncWorkerExtension",
+        trust_remote_code=True,
     )
     # At this point, vLLM will have spawned its engine workers.
 
@@ -179,6 +190,8 @@ def create_app(vllm_args) -> FastAPI:
         """
         Initialize NCCL communicator across all engine ranks + client.
         """
+        logger.warning("HTTP /init_communicator called: host=%s port=%s", req.host, req.port)
+
         # Ignore req.world_size and recompute deterministically
         world_size = engine_world_size + 1
 
@@ -186,6 +199,8 @@ def create_app(vllm_args) -> FastAPI:
             method="init_communicator",
             args=(req.host, req.port, world_size, req.client_device_uuid),
         )
+        logger.warning("HTTP /init_communicator done: host=%s port=%s", req.host, req.port)
+
         return {"message": "Initializing communicator", "world_size": world_size}
 
     @app.post("/update_named_param/")
