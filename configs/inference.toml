@@ -2,6 +2,7 @@
 host = "0.0.0.0"
 port = 8000
 log_level = "info"
+model = "Qwen/Qwen3-0.6B"  # TODO: fix the duplicate
 
 [model_params]
 model = "Qwen/Qwen3-0.6B"

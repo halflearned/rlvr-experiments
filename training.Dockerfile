@@ -22,8 +22,9 @@ COPY pyproject.toml ./
 
 # TODO: move these back to pyproject.toml
 RUN uv pip install --system vllm==0.11.2 
-RUN uv pip install --system torch==2.9
-RUN uv pip install --system torchtitan
+RUN uv pip install --system torch==2.9.0
+RUN uv pip install --system torchtitan==0.2.0
+RUN uv pip install --system trl
 
 # dummy command, this will keep the container running. docker compose overrides this.
 CMD ["sleep", "infinity"]

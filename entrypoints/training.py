@@ -21,11 +21,11 @@ def register_gsm8k():
 register_gsm8k()
 
 
-from rlvr_experiments.vllm_client import VLLMClient
+from trl.extras.vllm_client import VLLMClient
 print("Creating vLLM client...")
-client = VLLMClient(base_url="http://vllm:8000", model="Qwen/Qwen3-0.6B")
+client = VLLMClient(base_url="http://vllm:8000", connection_timeout=120)
 print("Calling vLLM...")
-output = client.generate("Say hello from the RLVR trainer.")
+output = client.generate(prompts=["Say hello from the RLVR trainer."])
 print("vLLM call succeeded.", output)
 
 

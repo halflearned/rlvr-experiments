@@ -10,11 +10,12 @@ def build_vllm_command(cfg: dict) -> list[str]:
     model = server_cfg["model"]
     host = server_cfg.get("host", "0.0.0.0")
     port = server_cfg.get("port", 8000)
-    module = server_cfg.get(
-        "module", "vllm.entrypoints.openai.api_server"
-    )
+    # module = server_cfg.get(
+    #     "module", "vllm.entrypoints.openai.api_server"
+    # )
 
-    cmd: list[str] = [sys.executable, "-m", module]
+    #cmd: list[str] = [sys.executable, "-m", module]
+    cmd = ["trl", "vllm-serve"]
 
     # required args
     cmd += ["--model", str(model)]
@@ -49,11 +50,14 @@ def main() -> None:
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
 
-    from rlvr_experiments.vllm_server import create_app
-    import uvicorn
-    app = create_app(cfg["model_params"])
+    from subprocess import run
+    run(build_vllm_command(cfg))
 
-    uvicorn.run(app, host=cfg["vllm_server"]["host"], port=cfg["vllm_server"]["port"], log_level=cfg["vllm_server"]["log_level"])
+    #from rlvr_experiments.vllm_server import create_app
+    #import uvicorn
+    #app = create_app(cfg["model_params"])
+
+    #uvicorn.run(app, host=cfg["vllm_server"]["host"], port=cfg["vllm_server"]["port"], log_level=cfg["vllm_server"]["log_level"])
 
 
 if __name__ == "__main__":
