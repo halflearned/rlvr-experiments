@@ -10,6 +10,7 @@ COPY pyproject.toml ./
 # install dependencies from pyproject.toml
 RUN uv pip install --system --no-cache ".[inference]"
 
+RUN uv pip install --system trl
 
 CMD ["sleep", "infinity"]
 

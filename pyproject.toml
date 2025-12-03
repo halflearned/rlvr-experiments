@@ -10,10 +10,12 @@ dependencies = []
 inference = [
     "fastapi",
     "uvicorn",
+    "trl",
+    "vllm==0.11.2",  # don't touch this
 ]
 training = [
-    "torch",
-    "torchtitan",
+    "torch==2.9.0",
+    "torchtitan==0.2.0",
     "vllm==0.11.2",
 ]
 
