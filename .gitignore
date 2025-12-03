@@ -103,6 +103,8 @@ model/
 !releases/**
 !release_validation/**
 
+outputs/
+
 # all deepspeed configs
 !**/deepspeed*.json
 !configs/label_mappings/**.json

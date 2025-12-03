@@ -102,7 +102,7 @@ model/
 # Allow all release validation files
 !releases/**
 !release_validation/**
-
+outputs/
 # all deepspeed configs
 !**/deepspeed*.json
 !configs/label_mappings/**.json
