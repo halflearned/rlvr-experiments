@@ -14,7 +14,8 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.checkpoint import CheckpointManager
+# from torchtitan.components.checkpoint import CheckpointManager  # TODO: revert to official after testing
+from .checkpoint import CheckpointManager  # TODO: revert to official after testing
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -302,6 +303,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.step = 0
         self.ntokens_seen = 0
 
+        self.sd_adapter = (
+            self.train_spec.state_dict_adapter(
+                model_args, job_config.model.hf_assets_path
+            )
+            if self.train_spec.state_dict_adapter
+            else None
+        )
+
         self.checkpointer = CheckpointManager(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -309,13 +318,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
-                )
-                if self.train_spec.state_dict_adapter
-                else None
-            ),
+            sd_adapter=self.sd_adapter,
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -332,32 +335,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.training.mixed_precision_param,
             device_type,
         )
-
-        # ------- <NEW> --------
-        from copy import deepcopy
-        print("Creating HF export checkpointer")
-        hf_checkpoint_cfg = deepcopy(job_config.checkpoint)
-        hf_checkpoint_cfg.enable = True 
-        hf_checkpoint_cfg.load_only = False 
-        self.hf_export_checkpointer = CheckpointManager(
-            dataloader=None,
-            model_parts=self.model_parts,  
-            optimizers=None,
-            lr_schedulers=None,
-            states={},
-            checkpoint_config=hf_checkpoint_cfg,
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
-                )
-                if self.train_spec.state_dict_adapter
-                else None
-            ),
-            base_folder=os.path.join(job_config.job.dump_folder, "hf_exports"),
-            ft_manager=self.ft_manager,
-        )
-        print("Created HF export checkpointer")
-        # ------- </NEW> --------
 
 
         # Build validator if validation is configured
@@ -648,60 +625,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
                 # ------- <NEW> --------
                 if self.step % job_config.vllm_update_steps == 0:
-                    logger.info(f"[RLVR] Sync: Saving checkpoint at step {self.step}")
                     from time import time
-                    begin = begin_sync = time()
-                    from torchtitan.components.checkpoint import AsyncMode
-                    # Save to disk first
-                    hfckpt = self.hf_export_checkpointer
-                    assert hasattr(hfckpt, "folder"), f"hf_export_checkpointer must have folder attribute: {dir(hfckpt)}"
-                    hf_ckpt_id = hfckpt._create_checkpoint_id(self.step)
-                    hfckpt.dcp_save(
-                        state_dict=hfckpt.states["model"].state_dict(),
-                        checkpoint_id=hf_ckpt_id,
-                        async_mode=AsyncMode.DISABLED,
-                        enable_garbage_collection=True,
-                        to_hf=True,
-                    )
-                    end = time()
-                    logger.info(f"[RLVR] Sync: HF checkpoint saved at step {self.step} in {end - begin:.2f} seconds: {hf_ckpt_id}")
-                    # Then update vLLM server
+                    begin_sync = time()
+                    logger.info(f"[RLVR] Sync: starting DTensor → vLLM sync at step {self.step}")
+
+
+                    # build titan-style state dict (DTensors as values)
+                    titan_state = {
+                        name: p.data
+                        for name, p in iter_named_params(self.model_parts)
+                    }
+
+                    # convert to HF naming using the adapter (still DTensors where applicable)
+                    #  all ranks should call this so any DTensor ops inside are SPMD.
+                    hf_state = self.sd_adapter.to_hf(titan_state)
+
+                    # All ranks must participate because _gather_param_full_tensor() may
+                    # call DTensor collectives, but only rank 0 talks to vLLM.
                     if dist.get_rank() == 0:
-                        begin = time()
-                        logger.info(
-                            f"[RLVR] Loading HF checkpoint and updating vLLM at step {self.step}"
-                        )
+                        self.vllm_client.init_communicator(device=0)
 
-                        # 2a) Load HF model unsharded on this process
-                        base_model_name = job_config.model.hf_assets_path  # or your HF id
-                        dtype = job_config.training.dtype
-                        from transformers import AutoModelForCausalLM, AutoConfig
-                        config = AutoConfig.from_pretrained(base_model_name)
-                        hf_model = AutoModelForCausalLM.from_pretrained(
-                            hf_ckpt_id,
-                            config=config,
-                            torch_dtype=dtype,
-                            device_map="cpu",  # or a dedicated GPU if you prefer
-                        )
-                        hf_model.eval()
-                        end = time()
-                        logger.info(f"[RLVR] Loaded HF checkpoint in {end - begin:.2f} seconds.")
-                        begin = time()
-                        logger.info(f"[RLVR] Sync: Updating vLLM checkpoint at step {self.step}")
-                        self.vllm_client.init_communicator(device=0) 
-                        for name, tensor in hf_model.named_parameters():
-                            tensor = tensor.to(0)  # TODO: dtype?
-                            self.vllm_client.update_named_param(name, tensor)
+                    # Iterate over parameters and gather them one by one.
+                    for hf_name, value in hf_state.items():
+                        if not value.requires_grad:
+                            continue  # skip non-trainable params
+                        
+                        full_tensor = gather_full_tensor(value)
+
+                        if dist.get_rank() == 0:
+                            full_tensor = full_tensor.to(0, non_blocking=True)
+                            self.vllm_client.update_named_param(hf_name, full_tensor)
+
+                    if dist.get_rank() == 0:
                         self.vllm_client.close_communicator()
-                        end = time()
-                        logger.info(f"[RLVR] vLLM checkpoint update done in {end - begin:.2f} seconds.")
 
+                    dist.barrier()
                     end_sync = time()
                     logger.info(
-                        f"[RLVR] Sync: Total checkpoint sync at step {self.step} done in {end_sync - begin_sync:.2f} seconds."
-                        " That's how much you're paying in I/O..."
+                        f"[RLVR] Sync: DTensor per-param gather + vLLM update at step {self.step} "
+                        f"finished in {end_sync - begin_sync:.2f} seconds."
                     )
-                    dist.barrier()
 
                 # ------- </NEW> --------
 
@@ -781,3 +744,34 @@ if __name__ == "__main__":
         trainer.close()
         torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
+
+
+from torch.distributed._tensor.api import DTensor
+
+
+def gather_full_tensor(value) -> torch.Tensor | None:
+    if isinstance(value, DTensor):
+        full = value.full_tensor()
+    else:
+        full = value
+
+    if dist.get_rank() == 0:
+        return full.detach().clone()
+    else:
+        return None
+
+
+def iter_named_params(model_parts: list[torch.nn.Module]) -> Iterable[tuple[str, torch.nn.Parameter]]:
+    """
+    Iterate over all parameters across model_parts with a single flat name space.
+    For non-PP setups, this is just model_parts[0].
+    """
+    if len(model_parts) == 1:
+        # No PP
+        yield from model_parts[0].named_parameters()
+    else:
+        # Simple prefixing per PP stage; you can replace this later
+        for i, m in enumerate(model_parts):
+            prefix = f"pp{i}."
+            for name, p in m.named_parameters():
+                yield prefix + name, p

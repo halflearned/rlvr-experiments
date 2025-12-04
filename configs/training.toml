@@ -2,7 +2,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "Qwen 3 0.6B training"
+description = "Qwen3 training"
 
 [profiling]
 enable_profiling = false
