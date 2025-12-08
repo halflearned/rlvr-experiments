@@ -10,12 +10,9 @@ def build_vllm_command(cfg: dict) -> list[str]:
     model = server_cfg["model"]
     host = server_cfg.get("host", "0.0.0.0")
     port = server_cfg.get("port", 8000)
-    # module = server_cfg.get(
-    #     "module", "vllm.entrypoints.openai.api_server"
-    # )
 
-    #cmd: list[str] = [sys.executable, "-m", module]
-    cmd = ["trl", "vllm-serve"]
+    cmd = ["python3", "src/vllm_utils/server.py"]  # TODO: better path handling
+
 
     # required args
     cmd += ["--model", str(model)]
@@ -24,7 +21,7 @@ def build_vllm_command(cfg: dict) -> list[str]:
 
     # other args
     skip_keys = {"model", "host", "port", "module"}
-    for key, value in server_cfg.items():
+    for key, value in server_cfg.items():  # TODO: fix, this isn't actually looping thru params
         if key in skip_keys:
             continue
         if value is None:
@@ -52,12 +49,6 @@ def main() -> None:
 
     from subprocess import run
     run(build_vllm_command(cfg))
-
-    #from rlvr_experiments.vllm_server import create_app
-    #import uvicorn
-    #app = create_app(cfg["model_params"])
-
-    #uvicorn.run(app, host=cfg["vllm_server"]["host"], port=cfg["vllm_server"]["port"], log_level=cfg["vllm_server"]["log_level"])
 
 
 if __name__ == "__main__":

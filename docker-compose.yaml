@@ -24,10 +24,15 @@ services:
     command: ["python3", "-u", "entrypoints/inference.py", "configs/inference.toml"]
     environment:
       <<: *common-env
-      NVIDIA_VISIBLE_DEVICES: 0,1 
-      CUDA_VISIBLE_DEVICES: 0,1
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
       VLLM_WORKER_MULTIPROC: 1  #  spawn?
       VLLM_LOGGING_LEVEL: DEBUG
+      NCCL_DEBUG: INFO
+      NCCL_DEBUG_SUBSYS: INIT,GRAPH,COMM
+      NCCL_ASYNC_ERROR_HANDLING: 1
+      TORCH_NCCL_BLOCKING_WAIT: 1
+      VLLM_USE_V1: 0  # temporary workaround for vLLM v1 issues
     ports:
       - "8000:8000"
 
