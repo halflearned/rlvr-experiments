@@ -26,22 +26,45 @@ class VLLMSyncWeightUpdate(WeightUpdate):
         # TODO:
         # * REQUIRED: Needs to stop vllm engine until all weights are pushed, likely also clear kv cache
         # * Push batches of parameters together if they're small
-        # * Don't gather on all ranks?
+        # * Don't gather on all ranks? [low priority]
         # * Parallelize the pushing across gpus, not just rank 0
         # * When parallelizing, bin by size not just name
+        updated_params = []
+        from time import perf_counter
+        if dist.get_rank() == 0:
+            start_time = perf_counter()
+            print(f"[rank 0] Starting to push weights to vLLM server...")
         for name, value in state_dict.items():
-            # skip non-trainable params
-            if not value.requires_grad:
-                continue  
+            
+            # TODO: skip non-trainable params
+            # Right now, all params are non-trainable once we grab them.
+            # if not value.requires_grad:
+            #     print("Skipping non-trainable param:", name)
+            #     continue  
             
             # gather DTensor
             full_tensor = gather_full_tensor(value)
 
             # push to all clients
             if dist.get_rank() == 0:
+                print(f"[rank 0] Pushing parameter: {name} with shape {full_tensor.shape}")
                 full_tensor = full_tensor.to(0, non_blocking=True)
                 for vllm_client in self.vllm_clients:
+                    print(f"[rank 0] Updating param {name} on vLLM client...")
+                    from time import time
+                    start_time = time()
                     vllm_client.update_named_param(name, full_tensor)
+                    end_time = time()
+
+                    print(f"[rank 0] Updated param {name} on vLLM client in {end_time - start_time:.2f} seconds.")
+                updated_params.append(name)
+
+
+        if dist.get_rank() == 0:
+            end_time = perf_counter()
+            print(f"[rank 0] Finished pushing weights to vLLM server in {end_time - start_time:.2f} seconds.")
+
+        dist.barrier()  # ensure all ranks sync here
 
     def close(self):
         if dist.get_rank() == 0:
@@ -68,10 +91,3 @@ def gather_full_tensor(value) -> torch.Tensor | None:
     else:
         return None
 
-
-# TODO: use this later
-import hashlib
-def get_responsible_rank(param_name):
-    # Deterministic hashing: Every node agrees on who owns 'layers.0.weight'
-    hash_val = int(hashlib.sha256(param_name.encode('utf-8')).hexdigest(), 16)
-    return hash_val % dist.get_world_size()

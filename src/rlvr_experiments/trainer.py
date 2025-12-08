@@ -4,6 +4,7 @@ import os
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.checkpoint.state_dict import get_model_state_dict
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -13,7 +14,6 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-
 
 class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
 
@@ -228,11 +228,14 @@ class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
         Returns a HuggingFace-style state dict (values may still be DTensors).
         """
         titan_state = {
-            name: p.data for name, p in iter_named_params(self.model_parts)
+            k: v
+            for sd in map(get_model_state_dict, self.model_parts)
+            for k, v in sd.items()
         }
         if not self.sd_adapter:
             raise RuntimeError("No StateDictAdapter found for this model.")
-        return self.sd_adapter.to_hf(titan_state)
+        hf_sd = self.sd_adapter.to_hf(titan_state)
+        return hf_sd
 
     def load_checkpoint(self, step: int | None = None):
         """
@@ -251,17 +254,3 @@ class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
         if self.checkpointer:
             self.checkpointer.close()
 
-
-# --- Helper Functions ---
-
-def iter_named_params(
-    model_parts: list[torch.nn.Module],
-) -> Iterable[Tuple[str, torch.nn.Parameter]]:
-    if len(model_parts) == 1:
-        # Single-part model (no PP)
-        yield from model_parts[0].named_parameters()
-    else:
-        # Fallback for hypothetical multi-part models (non-PP)
-        for i, m in enumerate(model_parts):
-            for name, p in m.named_parameters():
-                yield f"part{i}.{name}", p
