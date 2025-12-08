@@ -16,9 +16,10 @@ class WeightUpdate:
 class VLLMSyncWeightUpdate(WeightUpdate):
 
     def __init__(self, vllm_clients):
+        print("NEW VLLMSyncWeightUpdate created")
         self.vllm_clients = vllm_clients
         if dist.get_rank() == 0:
-            for vllm_client in self.clients:
+            for vllm_client in self.vllm_clients:
                 vllm_client.init_communicator(device=0)
 
     def push_weights(self, state_dict):
