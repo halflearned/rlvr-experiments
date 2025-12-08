@@ -30,7 +30,7 @@ warmup_steps = 2
 
 [training]
 local_batch_size = 4
-seq_len = 4096
+seq_len = 2000
 max_norm = 1.0  # grad norm clipping
 steps = 3
 dataset = "gsm8k"
@@ -39,7 +39,7 @@ dataset = "gsm8k"
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 2
+tensor_parallel_degree = 4
 context_parallel_degree = 1
 
 [checkpoint]
