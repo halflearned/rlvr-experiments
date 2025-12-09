@@ -1,6 +1,10 @@
 import random
 import re
 
+class DummyReward:
+    def __call__(self, prompt: str, response: str, target: str) -> float:
+        return random.uniform(0.0, 1.0)
+
 
 class MathReward:
     """
