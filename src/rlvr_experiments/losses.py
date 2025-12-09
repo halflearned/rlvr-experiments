@@ -2,7 +2,7 @@ import torch
         
 
 class GRPOLoss(torch.nn.Module):
-    """GRPO loss according to deekseekmath paper """
+    """ following the deekseekmath paper """
     def __init__(self, beta: float, eps: float = 0.0):
         super().__init__()
         self.beta = beta

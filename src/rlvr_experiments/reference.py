@@ -1,21 +1,20 @@
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict
 
 import os
 import torch
-import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.checkpoint.state_dict import get_model_state_dict
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.ft import FTManager
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
-from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.logging import logger
 
-class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
+
+class TitanReferenceModel(torch.distributed.checkpoint.stateful.Stateful):
 
     @record
     def __init__(self, job_config: JobConfig):
@@ -59,9 +58,6 @@ class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
                 "set parallelism.context_parallel_degree = 0."
             )
 
-        # 4. Fault tolerance manager (needed by optimizers, etc.)
-        self.ft_manager = FTManager(job_config.fault_tolerance)
-
         # 5. TrainSpec / model args / tokenizer
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
         self.model_args = self.train_spec.model_args[job_config.model.flavor]
@@ -96,21 +92,6 @@ class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
         self.model_parts = [model]
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
-        # 8. Optimizers and LR schedulers
-        self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config.optimizer, self.parallel_dims, self.ft_manager
-        )
-        self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
-        )
-
-        # Post-optimizer hook (e.g., float8 amax/scale updates)
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
-            )
-        )
-
         # 9. Checkpointer / state
         self.step = 0
         if self.train_spec.state_dict_adapter is None:
@@ -144,19 +125,9 @@ class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
             self.parallel_dims, job_config.training.mixed_precision_param, device_type
         )
 
-        logger.info("TitanRLTrainer initialized (no PP/CP).")
 
-    # ---------------------------------------------------------------------
-    # RL-facing API
-    # ---------------------------------------------------------------------
-
+    # training api
     def forward_step(self, input_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Computes the forward pass and returns logits (or model outputs).
-        Expects:
-            input_dict["input"]: token IDs [B, T]
-            plus any extra model kwargs (attention_mask, position_ids, etc.)
-        """
         inputs = input_dict["input"].to(self.device)
 
         extra_inputs = {
@@ -175,47 +146,13 @@ class TitanRLTrainer(torch.distributed.checkpoint.stateful.Stateful):
             )
 
         with self.train_context_mgr(None):
-            with self.maybe_enable_amp:
+            with self.maybe_enable_amp, torch.no_grad():
                 logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         return logits
 
-    def backward_step(self, loss: torch.Tensor) -> None:
-        """
-        Computes backward pass on an external loss.
-        Assumes forward_step has already built the autograd graph.
-        """
-        # No CP: pass None into train_context_mgr
-        with self.train_context_mgr(None):
-            loss.backward()
 
-    def optimizer_step(self) -> float:
-        """
-        Gradient clipping + optimizer step + LR step + zero_grad.
-        Returns:
-            grad_norm (float): Global gradient norm after clipping.
-        """
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
-            foreach=True,
-            pp_mesh=None,  # PP disabled
-            ep_enabled=self.parallel_dims.ep_enabled,
-        )
-
-        # Ensure async checkpoint staging (if any) is done
-        self.checkpointer.maybe_wait_for_staging()
-
-        self.optimizers.step()
-        self.lr_schedulers.step()
-        self.optimizers.zero_grad()
-
-        self.step += 1
-        return grad_norm.item()
-
-    # ---------------------------------------------------------------------
-    # Checkpoint / state helpers
-    # ---------------------------------------------------------------------
+    # checkpointing and state management
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step}
