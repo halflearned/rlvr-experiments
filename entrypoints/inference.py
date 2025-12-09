@@ -11,7 +11,7 @@ def build_vllm_command(cfg: dict) -> list[str]:
     host = server_cfg.get("host", "0.0.0.0")
     port = server_cfg.get("port", 8000)
 
-    cmd = ["python3", "src/vllm_utils/server.py"]  # TODO: better path handling
+    cmd = ["python3", "src/rlvr_experiments/vllm_server.py"]  # TODO: better path handling
 
 
     # required args

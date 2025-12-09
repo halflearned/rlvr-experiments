@@ -1,4 +1,5 @@
 
+
 import os
 from torchtitan.tools.logging import init_logger
 from rlvr_experiments.datasets.gsm8k import register_gsm8k
@@ -14,7 +15,8 @@ register_gsm8k()
 from rlvr_experiments.trainer import TitanRLTrainer
 from torchtitan.config import ConfigManager
 from rlvr_experiments.weight_update import VLLMSyncWeightUpdate
-
+from rlvr_experiments.vllm_client import VLLMClient
+import torch.distributed as dist
 
 
 def build_titan_dataloader(trainer):
@@ -49,7 +51,7 @@ trainer = TitanRLTrainer(job_config)
         
 
 print("Initializing client to push weights to vLLM server...")
-from trl.extras.vllm_client import VLLMClient
+
 client = VLLMClient(base_url="http://vllm:8000", connection_timeout=3000)
 weight_updater = VLLMSyncWeightUpdate([client])
 print("Pushing weights to vLLM server...")
@@ -57,8 +59,8 @@ print("Pushing weights to vLLM server...")
 print(f"[rank: {rank}] Trainer built, preparing dataloader...")
 dataloader = build_titan_dataloader(trainer)
 print(f"[rank: {rank}] Dataloader built, starting training loop...")
-for input_dict, labels in dataloader:
-    
+for i, (input_dict, labels) in enumerate(dataloader):
+
     print(f"[rank: {rank}] Starting training step...")
     logits = trainer.forward_step(input_dict)
     print(f"[rank: {rank}] Forward step complete.")
@@ -67,24 +69,24 @@ for input_dict, labels in dataloader:
     trainer.optimizer_step()
     print(f"[rank: {rank}] Backward and optimizer step complete.")
 
-    print(f"[rank: {rank}] Generating with vLLM client to test...")
-    # output = client.generate(
-    #     prompts=["Write a 100-line poem about the sea."],
-    #     n=1,
-    #     max_tokens=256,
-    #     temperature=0.,
-    # )
-    # print(f"[rank: {rank}] Generation complete.")
-    # print("Generated output[0]:", output["completion_ids"][0][:10])
-    # #print("Generated output[1]:", output["completion_ids"][1][:10])
-    # print("Generated output[0]:", output["logprobs"][0][:10])
-    # #print("Generated output[1]:", output["logprobs"][1][:10])
-    
-    
-    print(f"[rank: {rank}] Pushing weights to vLLM server...")
-    weight_updater.push_weights(trainer.hf_state_dict())
-    print("Weights pushed to vLLM server successfully (hopefully)!")
-    
+    print(f"[rank: {rank}, batch {i}] Generating with vLLM client...")
+    output = client.generate(
+        prompts=["Write a 100-line poem about the sea."],
+        n=1,
+        max_tokens=256,
+        temperature=0.,
+    )
+    print(f"[rank: {rank}, batch {i}] Generation complete.")
+    print("Generated output[0]:", output["completion_ids"][0][:10])
 
+    print(f"[rank: {rank}, batch {i}] Generation complete.")
+    weight_updater.push_weights(trainer.hf_state_dict())
+
+    if i >= 2:
+        print("Breaking early for testing")
+        break 
+
+
+print("all done!")
 
 

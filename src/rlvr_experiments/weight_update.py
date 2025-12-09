@@ -29,11 +29,13 @@ class VLLMSyncWeightUpdate(WeightUpdate):
         # * Don't gather on all ranks? [low priority]
         # * Parallelize the pushing across gpus, not just rank 0
         # * When parallelizing, bin by size not just name
+        dist.barrier()  # ensure all ranks sync here
         updated_params = []
-        from time import perf_counter
+        from time import time
         if dist.get_rank() == 0:
-            start_time = perf_counter()
+            start_time = time()
             print(f"[rank 0] Starting to push weights to vLLM server...")
+
         for name, value in state_dict.items():
             
             # TODO: skip non-trainable params
@@ -47,22 +49,15 @@ class VLLMSyncWeightUpdate(WeightUpdate):
 
             # push to all clients
             if dist.get_rank() == 0:
-                print(f"[rank 0] Pushing parameter: {name} with shape {full_tensor.shape}")
                 full_tensor = full_tensor.to(0, non_blocking=True)
                 for vllm_client in self.vllm_clients:
-                    print(f"[rank 0] Updating param {name} on vLLM client...")
-                    from time import time
-                    start_time = time()
-                    vllm_client.update_named_param(name, full_tensor)
-                    end_time = time()
-
-                    print(f"[rank 0] Updated param {name} on vLLM client in {end_time - start_time:.2f} seconds.")
+                    vllm_client.update_named_param(name, full_tensor)   
                 updated_params.append(name)
 
 
         if dist.get_rank() == 0:
-            end_time = perf_counter()
-            print(f"[rank 0] Finished pushing weights to vLLM server in {end_time - start_time:.2f} seconds.")
+            end_time = time()
+            print(f"[rank 0] Finished pushing {len(updated_params)} weights to vLLM server in {end_time - start_time:.6f} seconds.")
 
         dist.barrier()  # ensure all ranks sync here
 

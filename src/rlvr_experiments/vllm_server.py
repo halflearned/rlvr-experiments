@@ -505,10 +505,10 @@ def main(script_args: ScriptArguments):
     @app.post("/update_named_param/")
     async def update_named_param(request: UpdateWeightsRequest):
         kwargs = {"method": "update_named_param", "args": (request.name, request.dtype, tuple(request.shape))}
-        print("Received update_named_param request for:", request.name)
+        #print("Received update_named_param request for:", request.name)
         for connection in connections:
             connection.send({"type": "fire_and_forget", "method": "collective_rpc", "kwargs": kwargs})
-        print("Sent update_named_param to all connections for:", request.name)
+        #print("Sent update_named_param to all connections for:", request.name)
         return {"message": "Request received, updating named parameter"}
 
     @app.post("/reset_prefix_cache/")
