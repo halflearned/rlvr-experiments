@@ -26,20 +26,18 @@ import torch.distributed.distributed_c10d as c10d
 from torch import nn
 from transformers import is_torch_xpu_available
 
-from ..import_utils import is_requests_available, is_vllm_ascend_available, is_vllm_available
 
 
-if is_requests_available():
-    import requests
-    from requests import ConnectionError
+import requests
+from requests import ConnectionError
 
 
-if is_vllm_available():
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.utils import StatelessProcessGroup
 
-    if is_vllm_ascend_available():
-        from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator as PyNcclCommunicator
+# TODO: what's this?
+#if is_vllm_ascend_available():
+#    from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator as PyNcclCommunicator
 
 
 logger = logging.getLogger(__name__)
@@ -122,11 +120,6 @@ class VLLMClient:
         group_port: int = 51216,
         connection_timeout: float = 0.0,
     ):
-        if not is_requests_available():
-            raise ImportError("requests is not installed. Please install it with `pip install requests`.")
-        if not is_vllm_available():
-            raise ImportError("vLLM is not installed. Please install it with `pip install trl[vllm]`.")
-
         self.session = requests.Session()
 
         if base_url is not None:
