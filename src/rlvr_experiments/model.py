@@ -60,7 +60,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 "set parallelism.context_parallel_degree = 0."
             )
 
-        # 4. TrainSpec / model args / tokenizer
+        # 4. TrainSpec / model args / tokenizer / state dict adapter (BEFORE model creation)
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
         self.model_args = self.train_spec.model_args[job_config.model.flavor]
         self.model_args.update_from_config(job_config)
@@ -70,6 +70,12 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             if self.train_spec.build_tokenizer_fn is not None
             else None
         )
+        
+        if self.train_spec.state_dict_adapter is None:
+            raise ValueError(
+                "TitanModel requires a StateDictAdapter for HF state dict support."
+            )
+        self.sd_adapter = self.train_spec.state_dict_adapter(self.model_args, job_config.model.hf_assets_path)
 
         # 5. Build model on meta device
         logger.info(f"Building {job_config.model.name}...")
@@ -84,11 +90,15 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         model = self.train_spec.parallelize_fn(model, self.parallel_dims, job_config)
 
-        # 7. Initialize weights and move to init device
+        # 7. Initialize weights - use checkpointer to load HF if available
         init_device = "cpu" if job_config.training.enable_cpu_offload else device_type
         model.to_empty(device=init_device)
+        
+        # Initialize with random weights first (required for DCP loading)
+        logger.info("Initializing model with random weights...")
         with torch.no_grad():
             model.init_weights(buffer_device=None)
+        
         model.train()
 
         # Wrap in list for compatibility with Titan utilities
@@ -107,13 +117,8 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             self.parallel_dims, job_config.training.mixed_precision_param, device_type
         )
 
-        # 9. State dict adapter
+        # 9. Step counter
         self.step = 0
-        if self.train_spec.state_dict_adapter is None:
-            raise ValueError(
-                "TitanRLTrainer requires a StateDictAdapter for HF state dict support."
-            )
-        self.sd_adapter = self.train_spec.state_dict_adapter(self.model_args, job_config.model.hf_assets_path)
 
         if self.trainable:
             # 10. Fault tolerance manager (trainable only)
@@ -147,15 +152,27 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 base_folder=job_config.job.dump_folder,
                 ft_manager=self.ft_manager,
             )
+            self.checkpointer.load(step=None)
         else:
             # Non-trainable models don't need optimizers, schedulers, or full checkpointing
             self.ft_manager = None
             self.optimizers = None
             self.lr_schedulers = None
-            self.checkpointer = None
+            self.checkpointer = CheckpointManager(
+                dataloader=None,
+                model_parts=self.model_parts,
+                optimizers=None,
+                lr_schedulers=None,
+                states={"train_state": self},
+                checkpoint_config=job_config.checkpoint,
+                sd_adapter=self.sd_adapter,
+                base_folder=job_config.job.dump_folder,
+                ft_manager=None,
+            )
+            self.checkpointer.load(step=None)
+        
           
 
-    # training api
 
     def forward_step(self, input_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         inputs = input_dict["input"].to(self.device)
