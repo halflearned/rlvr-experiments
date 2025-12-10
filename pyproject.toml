@@ -4,20 +4,28 @@ requires-python = ">=3.11,<3.12"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-dependencies = []
-
-[project.optional-dependencies]
-inference = [
-    "fastapi",
-    "uvicorn",
-    "trl",
-    "vllm==0.11.2",  # don't touch this
-]
-training = [
+dependencies = [
+    "pyyaml>=6.0.3",
+    "ray[default]>=2.51.2",
     "torch==2.9.0",
     "torchtitan==0.2.0",
     "vllm==0.11.2",
+    "fastapi",
+    "uvicorn",
 ]
+
+# [project.optional-dependencies]
+# inference = [
+#     "fastapi",
+#     "uvicorn",
+#     "trl",
+#     "vllm==0.11.2",  # don't touch this
+# ]
+# training = [
+#     "torch==2.9.0",
+#     "torchtitan==0.2.0",
+#     "vllm==0.11.2",
+# ]
 
 [tool.uv]
 package = true
