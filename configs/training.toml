@@ -37,7 +37,7 @@ dataset = "gsm8k"
 
 [parallelism]
 data_parallel_replicate_degree = 1
-data_parallel_shard_degree = -1
+data_parallel_shard_degree = 1
 fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 4
 context_parallel_degree = 1
