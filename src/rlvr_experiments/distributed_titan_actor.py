@@ -134,6 +134,45 @@ class TitanModelRank:
             src_rank=src_rank
         )
     
+    def call_broadcast_weights(self, src_rank: int):
+        """
+        Participate in a broadcast operation.
+        All ranks in the sync group must call this with the same src_rank.
+        """
+        if self.model is None:
+            raise RuntimeError("Model not initialized")
+        
+        # Get parameters
+        params = list(self.model.model_parts[0].parameters())
+        
+        my_rank = self.weight_sync_manager.sync_group_rank
+        
+        print(f"[WeightSync Rank {my_rank}] Broadcasting with src={src_rank}, {len(params)} params")
+        
+        try:
+            for i, param in enumerate(params):
+                # Check if this is a DTensor - if so, get the local tensor
+                if hasattr(param, '_local_tensor'):
+                    # This is a DTensor - broadcast the local shard
+                    local_tensor = param._local_tensor
+                    print(f"[WeightSync Rank {my_rank}] Param {i}: DTensor, local shape={local_tensor.shape}")
+                    self.weight_sync_manager.communicator.broadcast(local_tensor, src=src_rank)
+                else:
+                    # Regular tensor
+                    if not param.is_cuda:
+                        raise RuntimeError(f"Rank {my_rank}: Param {i} is on {param.device}!")
+                    
+                    param_data = param.data.contiguous() if not param.data.is_contiguous() else param.data
+                    self.weight_sync_manager.communicator.broadcast(param_data, src=src_rank)
+            
+            print(f"[WeightSync Rank {my_rank}] Broadcast completed successfully")
+            
+        except Exception as e:
+            print(f"[WeightSync ERROR Rank {my_rank}] Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+    
     # ========== Generic Model Access ==========
     
     def call_method(self, method_name: str, *args, **kwargs):
@@ -202,10 +241,9 @@ class DistributedModelHandle:
     async def sync_weights_to(self, target_model: 'DistributedModelHandle'):
         """
         Fast NCCL weight sync from this model to target model.
-        Both models must have initialized their weight_sync groups first.
         
-        Pattern: Each trainer rank i broadcasts to reference rank i
-        (they receive via the shared sync group communicator)
+        Simple approach: Only trainer rank 0 broadcasts to all ranks.
+        All 16 ranks participate with src_rank=0.
         
         Args:
             target_model: Target model to sync weights to
@@ -216,23 +254,19 @@ class DistributedModelHandle:
                 f"{len(self.actors)} vs {len(target_model.actors)}"
             )
         
-        # Trainer ranks broadcast their weights
-        send_futures = [
-            actor.broadcast_weights_as_sender.remote()
-            for actor in self.actors
-        ]
+        # All ranks participate in broadcast from trainer rank 0 (sync group rank 0)
+        futures = []
         
-        # Reference ranks receive from corresponding trainer ranks
-        # Reference rank i receives from trainer rank i
-        recv_futures = [
-            target_model.actors[i].broadcast_weights_as_receiver.remote(src_rank=i)
-            for i in range(len(target_model.actors))
-        ]
+        # All trainer ranks participate with src=0
+        for actor in self.actors:
+            futures.append(actor.call_broadcast_weights.remote(src_rank=0))
         
-        # Wait for all transfers to complete
-        await asyncio.gather(
-            *[self._ray_to_async(f) for f in send_futures + recv_futures]
-        )
+        # All reference ranks participate with src=0
+        for actor in target_model.actors:
+            futures.append(actor.call_broadcast_weights.remote(src_rank=0))
+        
+        # Wait for broadcast to complete
+        await asyncio.gather(*[self._ray_to_async(f) for f in futures])
     
     async def _ray_to_async(self, object_ref):
         """Convert Ray ObjectRef to async/await"""
