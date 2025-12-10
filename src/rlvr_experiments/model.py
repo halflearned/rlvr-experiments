@@ -18,9 +18,10 @@ from torchtitan.tools.logging import init_logger, logger
 class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
     @record
-    def __init__(self, job_config: JobConfig):
+    def __init__(self, job_config: JobConfig, trainable=True):
         torch._C._log_api_usage_once("torchtitan.train")
         self.job_config = job_config
+        self.trainable = trainable
 
         # 1. Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -50,19 +51,16 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         # Enforce no PP / no CP for RL trainer
         if self.parallel_dims.pp_enabled:
             raise NotImplementedError(
-                "TitanRLTrainer does not support Pipeline Parallelism; "
+                "TitanModel does not support Pipeline Parallelism; "
                 "set parallelism.pipeline_parallel_degree = 0."
             )
         if self.parallel_dims.cp_enabled:
             raise NotImplementedError(
-                "TitanRLTrainer does not support Context Parallelism; "
+                "TitanModel does not support Context Parallelism; "
                 "set parallelism.context_parallel_degree = 0."
             )
 
-        # 4. Fault tolerance manager (needed by optimizers, etc.)
-        self.ft_manager = FTManager(job_config.fault_tolerance)
-
-        # 5. TrainSpec / model args / tokenizer
+        # 4. TrainSpec / model args / tokenizer
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
         self.model_args = self.train_spec.model_args[job_config.model.flavor]
         self.model_args.update_from_config(job_config)
@@ -73,6 +71,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
+        # 5. Build model on meta device
         logger.info(f"Building {job_config.model.name}...")
         with torch.device("meta"), utils.set_default_dtype(
             TORCH_DTYPE_MAP[job_config.training.dtype]
@@ -94,44 +93,8 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         # Wrap in list for compatibility with Titan utilities
         self.model_parts = [model]
-        self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
-        # 8. Optimizers and LR schedulers
-        self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config.optimizer, self.parallel_dims, self.ft_manager
-        )
-        self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
-        )
-
-        # Post-optimizer hook (e.g., float8 amax/scale updates)
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
-            )
-        )
-
-        # 9. Checkpointer / state
-        self.step = 0
-        if self.train_spec.state_dict_adapter is None:
-            raise ValueError(
-                "TitanRLTrainer requires a StateDictAdapter for HF state dict support."
-            )
-        self.sd_adapter = self.train_spec.state_dict_adapter(self.model_args, job_config.model.hf_assets_path)
-
-        self.checkpointer = CheckpointManager(
-            dataloader=None,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
-            checkpoint_config=job_config.checkpoint,
-            sd_adapter=self.sd_adapter,
-            base_folder=job_config.job.dump_folder,
-            ft_manager=self.ft_manager,
-        )
-
-        # 10. Train context / AMP (CP is disabled, so cp_ctx is always None)
+        # 8. Train context / AMP (CP is disabled, so cp_ctx is always None)
         loss_parallel_enabled = (
             self.parallel_dims.tp_enabled
             and not job_config.parallelism.disable_loss_parallel
@@ -144,6 +107,53 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             self.parallel_dims, job_config.training.mixed_precision_param, device_type
         )
 
+        # 9. State dict adapter
+        self.step = 0
+        if self.train_spec.state_dict_adapter is None:
+            raise ValueError(
+                "TitanRLTrainer requires a StateDictAdapter for HF state dict support."
+            )
+        self.sd_adapter = self.train_spec.state_dict_adapter(self.model_args, job_config.model.hf_assets_path)
+
+        if self.trainable:
+            # 10. Fault tolerance manager (trainable only)
+            self.ft_manager = FTManager(job_config.fault_tolerance)
+            self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
+
+            # 11. Optimizers and LR schedulers (trainable only)
+            self.optimizers = self.train_spec.build_optimizers_fn(
+                self.model_parts, job_config.optimizer, self.parallel_dims, self.ft_manager
+            )
+            self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
+                self.optimizers, job_config.lr_scheduler, job_config.training.steps
+            )
+
+            # Post-optimizer hook (e.g., float8 amax/scale updates)
+            self.optimizers.register_step_post_hook(
+                lambda *args, **kwargs: model_converters.post_optimizer_hook(
+                    self.model_parts
+                )
+            )
+
+            # 12. Checkpointer (trainable only)
+            self.checkpointer = CheckpointManager(
+                dataloader=None,
+                model_parts=self.model_parts,
+                optimizers=self.optimizers,
+                lr_schedulers=self.lr_schedulers,
+                states={"train_state": self},
+                checkpoint_config=job_config.checkpoint,
+                sd_adapter=self.sd_adapter,
+                base_folder=job_config.job.dump_folder,
+                ft_manager=self.ft_manager,
+            )
+        else:
+            # Non-trainable models don't need optimizers, schedulers, or full checkpointing
+            self.ft_manager = None
+            self.optimizers = None
+            self.lr_schedulers = None
+            self.checkpointer = None
+          
 
     # training api
 
@@ -172,11 +182,17 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         return logits
 
     def backward_step(self, loss: torch.Tensor) -> None:
+        if not self.trainable:
+            raise RuntimeError("Model is non-trainable; cannot call backward_step().")
+        
         # No CP: pass None into train_context_mgr
         with self.train_context_mgr(None):
             loss.backward()
 
     def optimizer_step(self) -> float:
+        if not self.trainable:
+            raise RuntimeError("Model is non-trainable; cannot call optimizer_step().")
+
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -227,4 +243,3 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
     def close(self) -> None:
         if self.checkpointer:
             self.checkpointer.close()
-
