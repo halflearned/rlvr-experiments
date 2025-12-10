@@ -43,8 +43,9 @@ tensor_parallel_degree = 4
 context_parallel_degree = 1
 
 [checkpoint]
-enable = false
+enable = true
 folder = "checkpoint"
+initial_load_in_hf = true
 interval = 500
 last_save_model_only = false
 export_dtype = "float16"
