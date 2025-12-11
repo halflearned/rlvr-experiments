@@ -3,7 +3,145 @@ import torch
 import asyncio
 from torchtitan.tools.logging import init_logger
 import ray
-from rlvr_experiments.distributed_titan_actor import create_trainer_and_reference_with_sync
+from rlvr_experiments.distributed_titan_actor import DistributedModelHandle, TitanModelRank, ModelGroupSpec
+
+from typing import Tuple, List, Dict
+from rlvr_experiments.vllm_engine_actor import VLLMEngineRank, VLLMHandle
+
+
+def create_trainer_reference_and_vllm_with_sync(
+    config_path: str,
+    ranks_per_model: int = 2,
+    trainer_master_port: int = 29500,
+    reference_master_port: int = 29600,
+    vllm_model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+    vllm_dtype: str = "bfloat16",
+    vllm_max_model_len: int = 4096,
+    vllm_tensor_parallel_size: int = 1,
+    weight_sync_port: int = 51216,
+):
+    """
+    Create trainer, reference, and vLLM groups that all share a single
+    NCCL weight-sync world.
+
+    Layout (sync ranks):
+
+        trainer:   0 .. ranks_per_model-1
+        reference: ranks_per_model .. 2*ranks_per_model-1
+        vLLM:      2*ranks_per_model .. 2*ranks_per_model + vllm_ranks-1
+
+    With ranks_per_model=2 and vllm_ranks=1:
+
+        trainer   -> sync ranks 0,1
+        reference -> sync ranks 2,3
+        vLLM      -> sync rank  4   (the “fifth” rank)
+
+    Args:
+        config_path: Titan config path.
+        ranks_per_model: # ranks for trainer and # ranks for reference each.
+        vllm_ranks: # vLLM engine ranks (usually 1 to start).
+        *_master_port: torch.distributed ports for trainer and reference.
+        vllm_*: vLLM configuration parameters.
+        weight_sync_port: Port for the global NCCL weight-sync communicator.
+
+    Returns:
+        (trainer_handle, reference_handle, vllm_actors)
+
+        trainer_handle  : DistributedModelHandle for trainer.
+        reference_handle: DistributedModelHandle for reference.
+        vllm_actors     : List[ActorHandle] for VLLMEngineRank.
+    """
+    master_addr = ray.util.get_node_ip_address()
+
+    # Global NCCL world size for weight sync.
+    sync_world_size = 2 * ranks_per_model + 1  # + vllm_ranks (1)
+
+    # ---------------- Trainer + Reference (Titan) ---------------- #
+    trainer_specs = ModelGroupSpec(
+        name="trainer",
+        ranks=ranks_per_model,
+        master_port=trainer_master_port,
+        sync_rank_offset=0,
+    )
+    reference_specs = ModelGroupSpec(
+        name="reference",
+        ranks=ranks_per_model,
+        master_port=reference_master_port,
+        sync_rank_offset=ranks_per_model,
+    )
+
+    titan_group_specs = [trainer_specs, reference_specs]
+
+    all_actors: Dict[str, List[ray.actor.ActorHandle]] = {}
+    init_futures = []
+
+    for spec in titan_group_specs:
+        print(
+            f"  - Group '{spec.name}': ranks={spec.ranks}, "
+            f"master_port={spec.master_port}, sync_rank_offset={spec.sync_rank_offset}"
+        )
+
+        group_actors: List[ray.actor.ActorHandle] = []
+        for local_rank in range(spec.ranks):
+            sync_rank = spec.sync_rank_offset + local_rank
+
+            actor = TitanModelRank.options(num_cpus=1).remote(
+                rank=local_rank,
+                world_size=spec.ranks,
+                config_path=config_path,
+                group_name=spec.name,
+            )
+            group_actors.append(actor)
+
+            init_futures.append(
+                actor.initialize_with_weight_sync.remote(
+                    master_addr=master_addr,
+                    master_port=str(spec.master_port),
+                    weight_sync_host=master_addr,
+                    weight_sync_port=weight_sync_port,
+                    weight_sync_world_size=sync_world_size,
+                    weight_sync_rank=sync_rank,
+                )
+            )
+
+        all_actors[spec.name] = group_actors
+
+    # ---------------- vLLM group ---------------- #
+    vllm_sync_rank_offset = 2 * ranks_per_model  # e.g., 4 when ranks_per_model=2
+
+
+    # vllm_actors: List[ray.actor.ActorHandle] = []
+    # for i in range(vllm_ranks):
+    # for now just a single actor
+    sync_rank = vllm_sync_rank_offset
+
+    vllm_actor = VLLMEngineRank.options(
+        num_gpus=vllm_tensor_parallel_size,
+        num_cpus=2  # TODO: adjust
+    ).remote(
+        sync_host=master_addr,
+        sync_port=weight_sync_port,
+        sync_world_size=sync_world_size,
+        sync_rank=sync_rank,
+        model_name=vllm_model_name,
+        dtype=vllm_dtype,
+        max_model_len=vllm_max_model_len,
+        tensor_parallel_size=vllm_tensor_parallel_size,
+    )
+    
+    print("Initializing torch.distributed and weight sync for Titan groups...")
+    ray.get(init_futures)
+    print("✓ Trainer and reference initialized")
+    print(
+        f"✓ vLLM group initialized with sync ranks "
+        f"{vllm_sync_rank_offset}..{vllm_sync_rank_offset + vllm_tensor_parallel_size - 1}"
+    )
+
+    trainer_handle = DistributedModelHandle(all_actors["trainer"], name="trainer")
+    reference_handle = DistributedModelHandle(all_actors["reference"], name="reference")
+    vllm_actor_handle = VLLMHandle(vllm_actor, name="vllm")
+
+    return trainer_handle, reference_handle, vllm_actor_handle
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -18,17 +156,23 @@ async def main():
     
     # Create both models with weight sync enabled
     print("\n" + "="*60)
-    print("Creating trainer and reference models...")
+    print("Creating all models...")
     print("="*60)
-    trainer, reference = create_trainer_and_reference_with_sync(
+    trainer, reference, inference = create_trainer_reference_and_vllm_with_sync(
         config_path=args.config,
-        ranks_per_model=4,
+        ranks_per_model=2,
+        vllm_tensor_parallel_size=2, 
         trainer_master_port=29500,
         reference_master_port=29600,
+        vllm_model_name="Qwen/Qwen3-0.6B",
         weight_sync_port=51216,
     )
-    print("✓ Models initialized")
-    
+    print("✓ All models initialized!")
+
+    # vllm inference
+    output = await inference.generate(["Hello, world!"], sampling_params={"max_tokens": 16})
+    print(f"\nSample vLLM output: {output}")
+
     # Test: Get tokenizer
     print("\nGetting tokenizer...")
     tokenizer = trainer.tokenizer
