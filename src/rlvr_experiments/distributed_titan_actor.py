@@ -29,7 +29,7 @@ import torch
 from rlvr_experiments.weight_sync import WeightSyncManager
 
 
-@ray.remote(num_gpus=1, num_cpus=2)
+@ray.remote(num_gpus=1, num_cpus=8)
 class TitanModelRank:
     """
     Single rank of a distributed TitanModel with optional weight synchronization.
@@ -110,9 +110,6 @@ class TitanModelRank:
     ) -> Dict[str, Any]:
         """
         Initialize both torch.distributed AND the weight-sync communicator.
-
-        This is more efficient (and less error-prone) than calling
-        initialize_process_group() and init_weight_sync() separately.
 
         Args:
             master_addr: Master address for torch.distributed.
@@ -230,6 +227,41 @@ class TitanModelRank:
     def get_rank(self) -> int:
         """Return this actor's rank within its model group."""
         return self.rank
+    
+
+    # More weight sync stuff
+    async def push_weights_trainer_to_vllm(
+        trainer_handle: DistributedModelHandle,
+        vllm_actors: list[ray.actor.ActorHandle],
+        vllm_sync_src_rank: int = 0,
+    ):
+        # Build param metadata from rank 0 trainer model
+        hf_state = await trainer_handle.hf_state_dict()  # if you expose it
+        param_meta = [
+            (name, str(t.dtype).replace("torch.", ""), tuple(t.shape))
+            for name, t in hf_state.items()
+        ]
+
+        # 1) Schedule trainer-side NCCL broadcasts
+        trainer_futures = [
+            actor.call_method.remote(
+                "push_weights_to_vllm", param_meta, vllm_sync_src_rank
+            )
+            for actor in trainer_handle.actors
+        ]
+
+        # 2) Schedule vLLM receives
+        vllm_futures = [
+            vllm.recv_many_named_params.remote(param_meta, src_rank=vllm_sync_src_rank)
+            for vllm in vllm_actors
+        ]
+
+        # Wait for all participants
+        all_futures = trainer_futures + vllm_futures
+        await asyncio.gather(
+            *[trainer_handle._ray_to_async(f) for f in all_futures]
+        )
+
 
 
 class DistributedModelHandle:
@@ -360,7 +392,7 @@ def create_distributed_model(
 
     print(f"Creating {group_name} with {world_size} ranks...")
     actors: List[ray.actor.ActorHandle] = [
-        TitanModelRank.remote(
+        TitanModelRank.options(num_cpus=2).remote(
             rank=rank,
             world_size=world_size,
             config_path=config_path,
@@ -456,41 +488,3 @@ def create_distributed_models_with_sync(
         for name, actors in all_actors.items()
     }
 
-
-def create_trainer_and_reference_with_sync(
-    config_path: str,
-    ranks_per_model: int = 8,
-    trainer_master_port: int = 29500,
-    reference_master_port: int = 29600,
-    weight_sync_port: int = 51216,
-) -> Tuple[DistributedModelHandle, DistributedModelHandle]:
-    """
-    Convenience wrapper: create 'trainer' and 'reference' distributed models
-    in separate torch.distributed worlds, with a shared NCCL weight-sync group.
-
-    Layout:
-        - trainer ranks:   0 .. ranks_per_model - 1
-        - reference ranks: ranks_per_model .. 2 * ranks_per_model - 1
-    """
-    group_specs = [
-        ModelGroupSpec(
-            name="trainer",
-            ranks=ranks_per_model,
-            master_port=trainer_master_port,
-            sync_rank_offset=0,
-        ),
-        ModelGroupSpec(
-            name="reference",
-            ranks=ranks_per_model,
-            master_port=reference_master_port,
-            sync_rank_offset=ranks_per_model,
-        ),
-    ]
-
-    handles = create_distributed_models_with_sync(
-        config_path=config_path,
-        group_specs=group_specs,
-        weight_sync_port=weight_sync_port,
-    )
-
-    return handles["trainer"], handles["reference"]
