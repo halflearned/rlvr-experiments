@@ -3,7 +3,7 @@ import torch
 import asyncio
 from torchtitan.tools.logging import init_logger
 import ray
-from rlvr_experiments.distributed_titan_actor import create_two_distributed_models_with_sync
+from rlvr_experiments.distributed_titan_actor import create_trainer_and_reference_with_sync
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -20,7 +20,7 @@ async def main():
     print("\n" + "="*60)
     print("Creating trainer and reference models...")
     print("="*60)
-    trainer, reference = create_two_distributed_models_with_sync(
+    trainer, reference = create_trainer_and_reference_with_sync(
         config_path=args.config,
         ranks_per_model=4,
         trainer_master_port=29500,

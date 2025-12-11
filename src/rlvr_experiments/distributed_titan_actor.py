@@ -1,58 +1,104 @@
 """
-distributed_titan_actor.py - Clean distributed model with weight sync support
+distributed_titan_actor.py - Distributed Titan model actor with weight sync support.
+
+This module defines:
+  * TitanModelRank    - a Ray actor that hosts a single rank of a TitanModel.
+  * DistributedModelHandle - a convenience wrapper to broadcast method calls
+                             to all ranks in a distributed model.
+  * ModelGroupSpec    - configuration for a group of ranks that form one model.
+  * create_distributed_model / create_distributed_models_with_sync /
+    create_trainer_and_reference_with_sync - helper constructors.
+
+The design allows:
+  * Each model group (trainer, reference, etc.) to have its own
+    torch.distributed world (distinct MASTER_PORTs).
+  * All groups to share a separate NCCL-based weight sync communicator,
+    implemented by WeightSyncManager (see weight_sync.py).
 """
+
+from __future__ import annotations
+
+import asyncio
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
+
 import ray
 import torch
-import torch.distributed as dist
-import os
-import asyncio
-from typing import Tuple
+
 from rlvr_experiments.weight_sync import WeightSyncManager
 
 
 @ray.remote(num_gpus=1, num_cpus=2)
 class TitanModelRank:
-    """Single rank of distributed TitanModel with optional weight sync"""
-    
-    def __init__(self, rank: int, world_size: int, config_path: str, group_name: str = "default"):
+    """
+    Single rank of a distributed TitanModel with optional weight synchronization.
+
+    Each Ray actor:
+      * Initializes its own torch.distributed process group, with WORLD_SIZE
+        equal to the number of ranks in its model group.
+      * Builds a TitanModel configured by a JobConfig.
+      * Optionally initializes a separate NCCL communicator for weight sync.
+    """
+
+    def __init__(
+        self,
+        rank: int,
+        world_size: int,
+        config_path: str,
+        group_name: str = "default",
+    ) -> None:
         """
         Args:
-            rank: Rank within this model's group (0-7)
-            world_size: Size of this model's group (8)
-            group_name: Name for logging ("trainer" or "reference")
+            rank: Rank within this model group (0..world_size-1).
+            world_size: Size of this model group.
+            config_path: Path to the Titan config file (TOML).
+            group_name: Logical name for this model ("trainer", "reference", etc.).
         """
         self.rank = rank
         self.world_size = world_size
         self.group_name = group_name
         self.config_path = config_path
         self.model = None
-        
-        # Weight sync is optional and separate from model
+
+        # Weight sync is optional and separate from torch.distributed.
         self.weight_sync_manager = WeightSyncManager()
-        
-        # Set env vars for this rank
-        os.environ['RANK'] = str(rank)
-        os.environ['LOCAL_RANK'] = '0'  # Always 0 - Ray gives us one GPU visible as cuda:0
-        os.environ['WORLD_SIZE'] = str(world_size)
-        
-    def initialize_process_group(self, master_addr: str, master_port: str):
-        """Initialize torch.distributed and TitanModel"""
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = master_port
-        
-        # Initialize TitanModel - it sees its own world (e.g., 8 ranks)
+
+        # Environment variables for torch.distributed.
+        os.environ["RANK"] = str(rank)
+        # Ray exposes one GPU per actor; treat that as local rank 0.
+        os.environ["LOCAL_RANK"] = "0"
+        os.environ["WORLD_SIZE"] = str(world_size)
+
+    # ------------------------------------------------------------------ #
+    # Initialization
+    # ------------------------------------------------------------------ #
+    def initialize_process_group(self, master_addr: str, master_port: str) -> Dict[str, Any]:
+        """
+        Initialize torch.distributed and construct the TitanModel for this rank.
+
+        This uses a full Titan JobConfig parsed from `config_path`.
+        """
+        os.environ["MASTER_ADDR"] = master_addr
+        os.environ["MASTER_PORT"] = master_port
+
         from rlvr_experiments.model import TitanModel
         from torchtitan.config import ConfigManager
-        
-        job_config = ConfigManager().parse_args(["--job.config-file", self.config_path])
+
+        job_config = ConfigManager().parse_args(
+            ["--job.config-file", self.config_path]
+        )
+
+        # Trainer vs reference: only trainer is trainable.
         self.model = TitanModel(job_config, trainable=(self.group_name == "trainer"))
-        
-        print(f"[{self.group_name}] Rank {self.rank}/{self.world_size} initialized")
-        
+
+        print(
+            f"[{self.group_name}] Rank {self.rank}/{self.world_size} initialized "
+            f"(MASTER_ADDR={master_addr}, MASTER_PORT={master_port})"
+        )
+
         return {"rank": self.rank, "status": "ready"}
-    
-    # ========== Weight Sync Methods (separate from model) ==========
-    
+
     def initialize_with_weight_sync(
         self,
         master_addr: str,
@@ -60,267 +106,358 @@ class TitanModelRank:
         weight_sync_host: str,
         weight_sync_port: int,
         weight_sync_world_size: int,
-        weight_sync_rank: int
-    ):
+        weight_sync_rank: int,
+    ) -> Dict[str, Any]:
         """
-        Initialize both torch.distributed AND weight sync in one call.
-        This is more efficient than calling initialize_process_group and init_weight_sync separately.
-        
+        Initialize both torch.distributed AND the weight-sync communicator.
+
+        This is more efficient (and less error-prone) than calling
+        initialize_process_group() and init_weight_sync() separately.
+
         Args:
-            master_addr: Master address for torch.distributed
-            master_port: Port for torch.distributed
-            weight_sync_host: Host for weight sync group
-            weight_sync_port: Port for weight sync group
-            weight_sync_world_size: Total ranks in weight sync group
-            weight_sync_rank: This rank's position in weight sync group
+            master_addr: Master address for torch.distributed.
+            master_port: Port for torch.distributed.
+            weight_sync_host: Host for sync group (usually same as master_addr).
+            weight_sync_port: Port for sync NCCL group (MUST differ from master_port).
+            weight_sync_world_size: Total ranks in sync group (e.g., 16).
+            weight_sync_rank: This rank's index in the sync group (0..world_size-1).
         """
-        # 1. Initialize torch.distributed and model
+        # 1. Initialize torch.distributed and TitanModel.
         result = self.initialize_process_group(master_addr, master_port)
-        
-        # 2. Initialize weight sync
+
+        # 2. Initialize weight sync communicator on the model's device.
+        if self.model is None:
+            raise RuntimeError("Model must be initialized before weight sync.")
+
         self.weight_sync_manager.init_communicator(
             host=weight_sync_host,
             port=weight_sync_port,
             world_size=weight_sync_world_size,
             my_rank=weight_sync_rank,
-            device=self.model.device
+            device=self.model.device,
         )
-        
+
         result["weight_sync_status"] = "ready"
         result["weight_sync_rank"] = weight_sync_rank
         return result
-    
-    def init_weight_sync(self, host: str, port: int, world_size: int, my_rank: int):
+
+    def init_weight_sync(
+        self,
+        host: str,
+        port: int,
+        world_size: int,
+        my_rank: int,
+    ) -> Dict[str, Any]:
         """
-        Initialize weight sync communicator (separate from torch.distributed).
-        
-        Note: Prefer using initialize_with_weight_sync() for single-pass initialization.
-        
-        Args:
-            host: Master host for sync group
-            port: Port for sync group (different from MASTER_PORT)
-            world_size: Total ranks in sync group (16 for trainer+reference)
-            my_rank: Position in sync group (0-7 for trainer, 8-15 for reference)
+        Initialize ONLY the weight-sync communicator.
+
+        Prefer using initialize_with_weight_sync() when possible so that
+        both torch.distributed and weight sync are set up in a single pass.
         """
+        if self.model is None:
+            raise RuntimeError(
+                "Model not initialized. Call initialize_process_group() first."
+            )
+
         self.weight_sync_manager.init_communicator(
             host=host,
             port=port,
             world_size=world_size,
             my_rank=my_rank,
-            device=self.model.device
+            device=self.model.device,
         )
+
         return {"status": "weight_sync_ready", "rank": my_rank}
-    
-    def broadcast_weights_as_sender(self):
+
+    # ------------------------------------------------------------------ #
+    # Weight sync
+    # ------------------------------------------------------------------ #
+    def call_broadcast_weights(self, src_rank: int) -> Dict[str, Any]:
         """
-        Broadcast this rank's weights to all ranks in the sync group.
-        Called by trainer ranks to send their weights.
-        """
-        self.weight_sync_manager.broadcast_weights(
-            model_parameters=self.model.model_parts[0].parameters(),
-            src_rank=self.weight_sync_manager.sync_group_rank
-        )
-    
-    def broadcast_weights_as_receiver(self, src_rank: int):
-        """
-        Receive weights from a source rank in the sync group.
-        Called by reference ranks to receive weights from trainer.
-        
+        Participate in a weight sync broadcast from a source rank.
+
+        All ranks in the sync group must call this with the same `src_rank`.
+        Under the hood this calls WeightSyncManager.sync_model_from_src(...)
+        on this rank's TitanModel.
+
         Args:
-            src_rank: Source rank to receive from (trainer rank in sync group)
-        """
-        self.weight_sync_manager.broadcast_weights(
-            model_parameters=self.model.model_parts[0].parameters(),
-            src_rank=src_rank
-        )
-    
-    def call_broadcast_weights(self, src_rank: int):
-        """
-        Participate in a broadcast operation.
-        All ranks in the sync group must call this with the same src_rank.
+            src_rank: Source rank in the sync group whose parameters are used.
         """
         if self.model is None:
             raise RuntimeError("Model not initialized")
-        
-        # Get parameters
-        params = list(self.model.model_parts[0].parameters())
-        
-        my_rank = self.weight_sync_manager.sync_group_rank
-        
-        print(f"[WeightSync Rank {my_rank}] Broadcasting with src={src_rank}, {len(params)} params")
-        
+
         try:
-            for i, param in enumerate(params):
-                # Check if this is a DTensor - if so, get the local tensor
-                if hasattr(param, '_local_tensor'):
-                    # This is a DTensor - broadcast the local shard
-                    local_tensor = param._local_tensor
-                    print(f"[WeightSync Rank {my_rank}] Param {i}: DTensor, local shape={local_tensor.shape}")
-                    self.weight_sync_manager.communicator.broadcast(local_tensor, src=src_rank)
-                else:
-                    # Regular tensor
-                    if not param.is_cuda:
-                        raise RuntimeError(f"Rank {my_rank}: Param {i} is on {param.device}!")
-                    
-                    param_data = param.data.contiguous() if not param.data.is_contiguous() else param.data
-                    self.weight_sync_manager.communicator.broadcast(param_data, src=src_rank)
-            
-            print(f"[WeightSync Rank {my_rank}] Broadcast completed successfully")
-            
+            # TitanModel stores its parallelized model as model_parts[0].
+            self.weight_sync_manager.sync_model_from_src(
+                self.model.model_parts[0],
+                src_rank=src_rank,
+            )
+            return {
+                "status": "ok",
+                "rank": self.rank,
+                "sync_group_rank": self.weight_sync_manager.sync_group_rank,
+            }
         except Exception as e:
-            print(f"[WeightSync ERROR Rank {my_rank}] Failed: {e}")
+            print(
+                f"[WeightSync ERROR group={self.group_name} rank={self.rank}] "
+                f"Failed to sync weights: {e}"
+            )
             import traceback
+
             traceback.print_exc()
             raise
-    
-    # ========== Generic Model Access ==========
-    
+
+    # ------------------------------------------------------------------ #
+    # Generic accessors
+    # ------------------------------------------------------------------ #
     def call_method(self, method_name: str, *args, **kwargs):
-        """Generic method forwarder for model methods"""
+        """Generic method forwarder for methods on self.model."""
         if self.model is None:
-            raise RuntimeError("Model not initialized. Call initialize_process_group first.")
+            raise RuntimeError(
+                "Model not initialized. Call initialize_process_group() first."
+            )
         method = getattr(self.model, method_name)
         return method(*args, **kwargs)
-    
+
     def get_attr(self, attr_name: str):
-        """Generic attribute getter for model attributes"""
+        """Generic attribute getter for attributes on self.model."""
         if self.model is None:
-            raise RuntimeError("Model not initialized. Call initialize_process_group first.")
+            raise RuntimeError(
+                "Model not initialized. Call initialize_process_group() first."
+            )
         return getattr(self.model, attr_name)
-    
-    def get_rank(self):
-        """Get this actor's rank"""
+
+    def get_rank(self) -> int:
+        """Return this actor's rank within its model group."""
         return self.rank
 
 
 class DistributedModelHandle:
     """
-    Handle for distributed model that automatically broadcasts method calls to all ranks.
-    Uses __getattr__ magic to forward any method to all actors.
+    Handle for a distributed model that automatically broadcasts method calls to all ranks.
+
+    Uses __getattr__ "magic" to:
+      * Fetch simple attributes (tokenizer, device, etc.) from rank 0 only.
+      * Turn method accesses into async functions that call all actors in parallel.
     """
-    
-    def __init__(self, actors, name: str = "model"):
+
+    def __init__(self, actors: List[ray.actor.ActorHandle], name: str = "model") -> None:
         """
         Args:
-            actors: List of TitanModelRank actors
-            name: Name for this model (for logging)
+            actors: List of TitanModelRank actor handles.
+            name: Human-readable name for this model group ("trainer", "reference").
         """
         self.actors = actors
         self.name = name
         self._world_size = len(actors)
-        
-        # Known simple attributes that should be fetched directly (not called as methods)
-        # TODO: Could make this automatic via inspect
-        self._simple_attrs = {'tokenizer', 'device', 'step', 'job_config', 'model_args'}
-    
-    def __getattr__(self, attr_name):
+
+        # Attributes that should be fetched from rank 0 only (not invoked).
+        self._simple_attrs = {"tokenizer", "device", "step", "job_config", "model_args"}
+
+    def __getattr__(self, attr_name: str):
         """
         Intercept attribute/method access and broadcast to all ranks.
-        Returns an awaitable for method calls, or the value for simple attributes.
+
+        If attr_name is in _simple_attrs, return its value from rank 0.
+        Otherwise, assume it is a method name and return an async wrapper
+        that calls that method on all ranks and returns rank 0's result.
         """
-        # For known simple attributes, fetch directly from rank 0
+        # Simple attribute: fetch from rank 0 only.
         if attr_name in self._simple_attrs:
             return ray.get(self.actors[0].get_attr.remote(attr_name))
-        
-        # For everything else, assume it's a method and return async wrapper
+
+        # Otherwise assume method; return an async function.
         async def distributed_method(*args, **kwargs):
-            # Call method on all ranks
             futures = [
                 actor.call_method.remote(attr_name, *args, **kwargs)
                 for actor in self.actors
             ]
-            
-            # Await all results
-            results = await asyncio.gather(*[self._ray_to_async(f) for f in futures])
-            
-            # Return rank 0's result (convention for distributed training)
+            results = await asyncio.gather(
+                *[self._ray_to_async(f) for f in futures]
+            )
+            # Convention: return rank 0's result.
             return results[0]
-        
+
         return distributed_method
-    
-    async def sync_weights_to(self, target_model: 'DistributedModelHandle'):
+
+    async def sync_weights_to(self, target_model: "DistributedModelHandle") -> None:
         """
-        Fast NCCL weight sync from this model to target model.
-        
-        Simple approach: Only trainer rank 0 broadcasts to all ranks.
-        All 16 ranks participate with src_rank=0.
-        
+        Synchronize weights from this model to target_model via NCCL weight sync.
+
+        Current protocol:
+          * All ranks in BOTH models participate in the same weight-sync world.
+          * We broadcast from sync_group_rank=0 (the first trainer rank).
+          * Each rank calls call_broadcast_weights(src_rank=0) in parallel.
+
         Args:
-            target_model: Target model to sync weights to
+            target_model: The DistributedModelHandle to sync weights to.
         """
         if len(self.actors) != len(target_model.actors):
             raise ValueError(
                 f"Models must have same number of ranks: "
                 f"{len(self.actors)} vs {len(target_model.actors)}"
             )
-        
-        # All ranks participate in broadcast from trainer rank 0 (sync group rank 0)
+
         futures = []
-        
-        # All trainer ranks participate with src=0
+
+        # Trainer ranks (this model): source is sync_group_rank 0.
         for actor in self.actors:
             futures.append(actor.call_broadcast_weights.remote(src_rank=0))
-        
-        # All reference ranks participate with src=0
+
+        # Reference ranks (target model): also participate, receive from src=0.
         for actor in target_model.actors:
             futures.append(actor.call_broadcast_weights.remote(src_rank=0))
-        
-        # Wait for broadcast to complete
+
         await asyncio.gather(*[self._ray_to_async(f) for f in futures])
-    
+
     async def _ray_to_async(self, object_ref):
-        """Convert Ray ObjectRef to async/await"""
+        """Convert a Ray ObjectRef into an awaitable result."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, ray.get, object_ref)
-    
-    def __repr__(self):
+
+    def __repr__(self) -> str:
         return f"DistributedModelHandle(name='{self.name}', world_size={self._world_size})"
+
+
+# ---------------------------------------------------------------------- #
+# Group creation helpers
+# ---------------------------------------------------------------------- #
+@dataclass
+class ModelGroupSpec:
+    """
+    Specification for one distributed model group.
+
+    This is used by create_distributed_models_with_sync to create multiple
+    models (trainer, reference, eval, etc.) that share a single weight-sync
+    communicator but have their own torch.distributed worlds.
+    """
+
+    name: str
+    ranks: int
+    master_port: int
+    sync_rank_offset: int = 0  # starting rank index in the weight-sync world
 
 
 def create_distributed_model(
     config_path: str,
     world_size: int = 8,
     group_name: str = "trainer",
-    master_port: int = 29500
+    master_port: int = 29500,
 ) -> DistributedModelHandle:
     """
-    Create a distributed model across multiple Ray actors.
-    
+    Create a single distributed model (one torch.distributed world) across Ray actors.
+
     Args:
-        config_path: Path to torchtitan config
-        world_size: Number of processes (GPUs)
-        group_name: Name for this model group
-        master_port: Port for torch.distributed coordination
-        
+        config_path: Path to Titan config file.
+        world_size: Number of ranks (actors) in this model group.
+        group_name: Logical group name ("trainer", "reference", etc.).
+        master_port: Port for torch.distributed coordination.
+
     Returns:
-        DistributedModelHandle with clean async interface
+        DistributedModelHandle wrapping all ranks.
     """
     master_addr = ray.util.get_node_ip_address()
-    
+
     print(f"Creating {group_name} with {world_size} ranks...")
-    actors = []
-    for rank in range(world_size):
-        actor = TitanModelRank.remote(
+    actors: List[ray.actor.ActorHandle] = [
+        TitanModelRank.remote(
             rank=rank,
             world_size=world_size,
             config_path=config_path,
-            group_name=group_name
+            group_name=group_name,
         )
-        actors.append(actor)
-    
+        for rank in range(world_size)
+    ]
+
     print(f"Initializing torch.distributed for {group_name}...")
     init_futures = [
         actor.initialize_process_group.remote(master_addr, str(master_port))
         for actor in actors
     ]
     ray.get(init_futures)
-    
+
     print(f"✓ {group_name} initialized with {world_size} ranks")
-    
     return DistributedModelHandle(actors, name=group_name)
 
 
-def create_two_distributed_models_with_sync(
+def create_distributed_models_with_sync(
+    config_path: str,
+    group_specs: List[ModelGroupSpec],
+    weight_sync_port: int,
+) -> Dict[str, DistributedModelHandle]:
+    """
+    Generic creator for multiple distributed model groups that share a single
+    NCCL weight-sync communicator.
+
+    Each group has its own torch.distributed world (different MASTER_PORT),
+    but all actors across all groups join the same weight-sync group.
+
+    Args:
+        config_path: Path to Titan config file.
+        group_specs: List of ModelGroupSpec describing each group.
+        weight_sync_port: Port for the NCCL weight-sync communicator.
+
+    Returns:
+        Dict mapping group name -> DistributedModelHandle.
+    """
+    master_addr = ray.util.get_node_ip_address()
+    sync_world_size = sum(spec.ranks for spec in group_specs)
+
+    print(
+        f"Creating {sync_world_size} actors across {len(group_specs)} groups "
+        f"with weight sync world_size={sync_world_size} on port {weight_sync_port}..."
+    )
+
+    all_actors: Dict[str, List[ray.actor.ActorHandle]] = {}
+    init_futures = []
+
+    for spec in group_specs:
+        print(
+            f"  - Group '{spec.name}': ranks={spec.ranks}, "
+            f"master_port={spec.master_port}, sync_rank_offset={spec.sync_rank_offset}"
+        )
+
+        group_actors: List[ray.actor.ActorHandle] = []
+        for local_rank in range(spec.ranks):
+            sync_rank = spec.sync_rank_offset + local_rank
+
+            actor = TitanModelRank.remote(
+                rank=local_rank,
+                world_size=spec.ranks,
+                config_path=config_path,
+                group_name=spec.name,
+            )
+            group_actors.append(actor)
+
+            init_futures.append(
+                actor.initialize_with_weight_sync.remote(
+                    master_addr=master_addr,
+                    master_port=str(spec.master_port),
+                    weight_sync_host=master_addr,
+                    weight_sync_port=weight_sync_port,
+                    weight_sync_world_size=sync_world_size,
+                    weight_sync_rank=sync_rank,
+                )
+            )
+
+        all_actors[spec.name] = group_actors
+
+    print("Initializing torch.distributed and weight sync for all groups...")
+    ray.get(init_futures)
+    print("✓ All groups initialized")
+    print(
+        f"✓ Weight sync group initialized (world_size={sync_world_size}, "
+        f"port={weight_sync_port})"
+    )
+
+    # Wrap each group in a DistributedModelHandle.
+    return {
+        name: DistributedModelHandle(actors, name=name)
+        for name, actors in all_actors.items()
+    }
+
+
+def create_trainer_and_reference_with_sync(
     config_path: str,
     ranks_per_model: int = 8,
     trainer_master_port: int = 29500,
@@ -328,91 +465,32 @@ def create_two_distributed_models_with_sync(
     weight_sync_port: int = 51216,
 ) -> Tuple[DistributedModelHandle, DistributedModelHandle]:
     """
-    Create trainer and reference models in SEPARATE torch.distributed worlds,
-    with a shared NCCL weight sync group (like vLLM).
-    
-    Single-pass initialization: all actors are initialized with both their
-    torch.distributed groups AND weight sync in one parallel batch.
-    
-    This allows:
-    - Each model to have its own parallelism config (no WORLD_SIZE conflicts)
-    - Fast NCCL weight transfers (100+ GB/s) via separate sync communicator
-    
-    Args:
-        config_path: Path to torchtitan config
-        ranks_per_model: Number of ranks per model (e.g., 8)
-        trainer_master_port: Port for trainer's torch.distributed
-        reference_master_port: Port for reference's torch.distributed
-        weight_sync_port: Port for the weight sync NCCL group
-        
-    Returns:
-        Tuple of (trainer_handle, reference_handle)
+    Convenience wrapper: create 'trainer' and 'reference' distributed models
+    in separate torch.distributed worlds, with a shared NCCL weight-sync group.
+
+    Layout:
+        - trainer ranks:   0 .. ranks_per_model - 1
+        - reference ranks: ranks_per_model .. 2 * ranks_per_model - 1
     """
-    master_addr = ray.util.get_node_ip_address()
-    sync_world_size = ranks_per_model * 2  # 16 total (8 trainer + 8 reference)
-    
-    print(f"Creating {ranks_per_model * 2} actors...")
-    
-    # ========== Create all actors ==========
-    trainer_actors = [
-        TitanModelRank.remote(
-            rank=rank,
-            world_size=ranks_per_model,
-            config_path=config_path,
-            group_name="trainer"
-        )
-        for rank in range(ranks_per_model)
+    group_specs = [
+        ModelGroupSpec(
+            name="trainer",
+            ranks=ranks_per_model,
+            master_port=trainer_master_port,
+            sync_rank_offset=0,
+        ),
+        ModelGroupSpec(
+            name="reference",
+            ranks=ranks_per_model,
+            master_port=reference_master_port,
+            sync_rank_offset=ranks_per_model,
+        ),
     ]
-    
-    reference_actors = [
-        TitanModelRank.remote(
-            rank=rank,
-            world_size=ranks_per_model,
-            config_path=config_path,
-            group_name="reference"
-        )
-        for rank in range(ranks_per_model)
-    ]
-    
-    # ========== Initialize everything in one parallel batch ==========
-    print("Initializing torch.distributed and weight sync for all actors...")
-    
-    init_futures = []
-    
-    # Trainer: sync ranks 0-7
-    for i, actor in enumerate(trainer_actors):
-        init_futures.append(
-            actor.initialize_with_weight_sync.remote(
-                master_addr=master_addr,
-                master_port=str(trainer_master_port),
-                weight_sync_host=master_addr,
-                weight_sync_port=weight_sync_port,
-                weight_sync_world_size=sync_world_size,
-                weight_sync_rank=i  # 0-7
-            )
-        )
-    
-    # Reference: sync ranks 8-15
-    for i, actor in enumerate(reference_actors):
-        init_futures.append(
-            actor.initialize_with_weight_sync.remote(
-                master_addr=master_addr,
-                master_port=str(reference_master_port),
-                weight_sync_host=master_addr,
-                weight_sync_port=weight_sync_port,
-                weight_sync_world_size=sync_world_size,
-                weight_sync_rank=i + ranks_per_model  # 8-15
-            )
-        )
-    
-    # Single wait for everything
-    results = ray.get(init_futures)
-    
-    print(f"✓ Trainer initialized ({ranks_per_model} ranks)")
-    print(f"✓ Reference initialized ({ranks_per_model} ranks)")
-    print(f"✓ Weight sync group initialized ({sync_world_size} ranks on port {weight_sync_port})")
-    
-    return (
-        DistributedModelHandle(trainer_actors, name="trainer"),
-        DistributedModelHandle(reference_actors, name="reference")
+
+    handles = create_distributed_models_with_sync(
+        config_path=config_path,
+        group_specs=group_specs,
+        weight_sync_port=weight_sync_port,
     )
+
+    return handles["trainer"], handles["reference"]
