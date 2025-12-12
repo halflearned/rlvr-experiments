@@ -9,5 +9,5 @@ model = "Qwen/Qwen3-0.6B"
 max_model_len = 1024
 tensor_parallel_size = 1
 gpu_memory_utilization = 0.7
-dtype = "float16"
+dtype = "bfloat16"
 logprobs_mode = "processed_logprobs"     # TODO: confirm if we want this or "raw"
