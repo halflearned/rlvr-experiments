@@ -260,3 +260,5 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
     def close(self) -> None:
         if self.checkpointer:
             self.checkpointer.close()
+
+   
