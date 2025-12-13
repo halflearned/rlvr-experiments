@@ -7,11 +7,9 @@ from torchtitan.tools.logging import init_logger
 
 from rlvr_experiments.distributed_titan_actor import (
     create_titan_group, 
-    sync_titan_to_titan, 
-    sync_titan_to_vllm
 )
 from rlvr_experiments.vllm_engine_actor import VLLMEngineRank, VLLMHandle
-
+from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 
 
 async def main():

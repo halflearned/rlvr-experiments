@@ -10,6 +10,9 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm import SamplingParams
 
+from .syncing import ChunkMeta
+
+
 @ray.remote(num_gpus=1)
 class VLLMEngineRank:
     def __init__(
@@ -78,27 +81,17 @@ class VLLMEngineRank:
         async for out in self.engine.generate(prompt, sp, req_id): final = out
         return final
 
-    async def recv_named_param(self, name: str, dtype_str: str, shape: Tuple[int, ...], src_rank: int = 0) -> None:
-        # Direct await on the client RPC
+    async def recv_chunk(self, chunk: ChunkMeta, dtype_str: str, src_rank: int = 0):
         await self.engine.collective_rpc(
-            "update_weight",
+            "recv_chunk_from_hf",
             kwargs={
-                "name": name,
+                "chunk": chunk,
                 "dtype_str": dtype_str,
-                "shape": shape,
-                "src_rank": src_rank
-            }
+                "src_rank": src_rank,
+            },
         )
 
     def ready(self) -> bool:
-        return True
-    
-    def global_barrier(self):
-        """Force everything on the GPU to stop and wait."""
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        # If you have torch.distributed initialized:
-        # torch.distributed.barrier() 
         return True
 
 

@@ -1,49 +1,90 @@
-import asyncio
-from typing import Tuple
+from typing import Tuple, List, Any
 import torch
 
-# STRICT: We expect vLLM V1 structure.
 from vllm.v1.worker.gpu_worker import Worker
-from rlvr_experiments.weight_sync import WeightSyncManager
+
+from .weight_sync import WeightSyncManager
+from .syncing import ChunkMeta
+
+
 
 class WeightSyncVLLMWorker(Worker):
-    """
-    Custom vLLM V1 Worker.
-    Strictly follows vLLM V1 architecture (subclassing v1.worker.gpu_worker).
-    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_sync = WeightSyncManager()
-        
+
     def init_weight_sync(self, host: str, port: int, world_size: int, rank: int):
-        """
-        RPC Method: Join the Global Weight Sync NCCL group.
-        """
-        # In V1 GPUWorker, 'self.rank' is the global rank within the engine instance.
         my_sync_rank = rank + self.rank
-        
         print(f"[Worker {self.rank}] Joining Weight Sync Group as Rank {my_sync_rank}...")
         self.weight_sync.init_communicator(
-            host=host, 
-            port=port, 
-            world_size=world_size, 
-            my_rank=my_sync_rank, 
-            device=self.device
+            host=host,
+            port=port,
+            world_size=world_size,
+            my_rank=my_sync_rank,
+            device=self.device,
         )
         return True
 
-    def update_weight(self, name: str, dtype_str: str, shape: Tuple[int, ...], src_rank: int):
+    # ---------------------------------------------- #
+    # Existing per-param update_weight(...) omitted
+    # ---------------------------------------------- #
+
+    def recv_chunk_from_hf(
+        self,
+        chunk: Any,          # may be ChunkMeta or a dict
+        dtype_str: str,
+        src_rank: int,
+    ):
+        """
+        vLLM-side chunk receiver:
+        - participates in NCCL broadcast over weight_sync communicator.
+        - slices flat buffer and loads HF weights into vLLM model.
+
+        `chunk` may arrive as a dict due to msgspec serialization, so we
+        normalize both ChunkMeta and dict-shaped inputs.
+        """
+        if not self.weight_sync.is_initialized:
+            raise RuntimeError(f"Worker {self.rank} sync not initialized.")
+
+        # ---- Normalize chunk structure (ChunkMeta or dict) ----
+        if hasattr(chunk, "total_numel") and hasattr(chunk, "params"):
+            total_numel = int(chunk.total_numel)
+            params_iter = chunk.params
+        else:
+            # msgspec / dict case
+            total_numel = int(chunk["total_numel"])
+            params_iter = chunk["params"]
+
+        # Now each entry in params_iter might be ParamMeta or dict.
+        def iter_params():
+            for p in params_iter:
+                if hasattr(p, "name"):
+                    # ParamMeta
+                    name = p.name
+                    numel = int(p.numel)
+                    shape = tuple(p.shape)
+                else:
+                    # dict
+                    name = p["name"]
+                    numel = int(p["numel"])
+                    shape = tuple(p["shape"])
+                yield name, numel, shape
+
         dtype = getattr(torch, dtype_str)
-        staging = torch.empty(shape, dtype=dtype, device=self.device)
-        self.weight_sync.communicator.broadcast(staging, src=src_rank)
+        flat = torch.empty(total_numel, dtype=dtype, device=self.device)
+
+        # NCCL broadcast over the weight-sync communicator
+        self.weight_sync.communicator.broadcast(flat, src=src_rank)
         torch.cuda.current_stream().synchronize()
 
-        # In-place copy to preserve CUDA Graph memory addresses
-        params_dict = dict(self.model_runner.model.named_parameters())
-        if name in params_dict:
-            with torch.no_grad():
-                params_dict[name].copy_(staging)
-        else:
-            # Fallback for complex vLLM internal mappings
-            self.model_runner.model.load_weights(weights=[(name, staging)])
+        offset = 0
+        for name, numel, shape in iter_params():
+            flat_slice = flat[offset : offset + numel]
+            weight = flat_slice.view(shape)
+            offset += numel
+
+            # Load into vLLM model by HF name
+            self.model_runner.model.load_weights(weights=[(name, weight)])
+
+        del flat
         return True
