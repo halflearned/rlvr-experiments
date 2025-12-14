@@ -1,23 +1,28 @@
-from __future__ import annotations
-
 import os
-from typing import Any, Dict, List, Tuple
-
 import ray
 import torch
+
+from typing import Any, Dict, List, Tuple
+
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from .weight_sync import WeightSyncManager
-from .syncing import ParamMeta, ChunkMeta
+from .syncing import ChunkMeta, ParamMeta
+
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @ray.remote(num_gpus=1, num_cpus=2)
 class TitanModelRank:
-    def __init__(self, rank: int, world_size: int, config_path: str, group_name: str = "default") -> None:
+    def __init__(self, rank: int, world_size: int, config_path: str, group_name: str = "default", trainable: bool = True) -> None:
         self.rank = rank
         self.world_size = world_size
         self.group_name = group_name
         self.config_path = config_path
+        self.trainable = trainable # TODO: improve this handling later
 
         self.model = None
         self.sync_managers: Dict[str, WeightSyncManager] = {}
@@ -26,7 +31,7 @@ class TitanModelRank:
         # Titan world env
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["LOCAL_RANK"] = "0"
+        os.environ["LOCAL_RANK"] = "0"  # okay since 1 actor per gpu
 
     # ------------------------------------------------------------------ #
     # Titan init
@@ -35,11 +40,11 @@ class TitanModelRank:
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = master_port
 
-        from rlvr_experiments.model import TitanModel
+        from .model import TitanModel
         from torchtitan.config import ConfigManager
 
         job_config = ConfigManager().parse_args(["--job.config-file", self.config_path])
-        self.model = TitanModel(job_config, trainable=(self.group_name == "trainer"))
+        self.model = TitanModel(job_config, trainable=self.trainable)
 
         print(f"[{self.group_name} Rank {self.rank}] Initialized Titan on port {master_port}")
         return {"status": "ready"}
@@ -280,19 +285,36 @@ class DistributedModelHandle:
         return results[0]
 
 
-def create_titan_group(config_path, name, ranks, port):
+import tempfile
+import tomli_w as toml
+
+def create_titan_group(config: dict, name: str, world_size: int, port: int) -> DistributedModelHandle:
     master_addr = ray.util.get_node_ip_address()
-    actors = [
-        TitanModelRank.options(num_gpus=1).remote(
-            r,            # rank
-            ranks,        # world_size
-            config_path,
-            name,         # group_name: "trainer" or "reference"
-        )
-        for r in range(ranks)
-    ]
-    ray.get([
-        a.initialize_process_group.remote(master_addr, str(port))
-        for a in actors
-    ])
-    return DistributedModelHandle(actors, name=name)
+
+    cfg = dict(config)
+    cfg.pop("trainable", None) 
+
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
+        toml.dump(cfg, f)
+        config_path = f.name
+
+    try:
+        logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port}")
+        actors = [
+            TitanModelRank.options(num_gpus=1, num_cpus=2).remote(
+                rank=r,
+                world_size=world_size,
+                config_path=config_path,
+                group_name=name,
+            )
+            for r in range(world_size)
+        ]
+
+        ray.get([a.initialize_process_group.remote(master_addr, str(port)) for a in actors])
+        return DistributedModelHandle(actors, name=name)
+
+    finally:
+        try:
+            os.remove(config_path)
+        except FileNotFoundError:
+            pass

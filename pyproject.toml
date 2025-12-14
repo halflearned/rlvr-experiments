@@ -12,24 +12,8 @@ dependencies = [
     "vllm==0.11.2",
     "fastapi",
     "uvicorn",
+    "tomli-w>=1.2.0",
 ]
-
-# [project.optional-dependencies]
-# inference = [
-#     "fastapi",
-#     "uvicorn",
-#     "trl",
-#     "vllm==0.11.2",  # don't touch this
-# ]
-# training = [
-#     "torch==2.9.0",
-#     "torchtitan==0.2.0",
-#     "vllm==0.11.2",
-# ]
 
 [tool.uv]
 package = true
-
-[project.scripts]
-run_inference = "entrypoints.inference:main"
-run_training = "entrypoints.training:main"
