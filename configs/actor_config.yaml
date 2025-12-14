@@ -1,4 +1,0 @@
-name: "titan_trainer"
-num_gpus: 8
-num_cpus: 16
-max_concurrency: 1

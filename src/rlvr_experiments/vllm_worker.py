@@ -25,13 +25,10 @@ class WeightSyncVLLMWorker(Worker):
         )
         return True
 
-    # ---------------------------------------------- #
-    # Existing per-param update_weight(...) omitted
-    # ---------------------------------------------- #
 
     def recv_chunk_from_hf(
         self,
-        chunk: Any,          # may be ChunkMeta or a dict
+        chunk: dict | ChunkMeta,
         dtype_str: str,
         src_rank: int,
     ):
