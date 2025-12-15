@@ -1,15 +1,15 @@
 import random
 import re
 
-class DummyReward:
+class DummyVerifier:
     def __call__(self, prompt: str, response: str, target: str) -> float:
         return random.uniform(0.0, 1.0)
 
 
-class MathReward:
+class MathVerifier:
     """
     Reward class for evaluating math correctness.
-    Copied from torchforge.
+    Copied from torchforge's MathReward
     """
 
     def __init__(self, tolerance: float = 1e-6, partial_credit: float = 0.1):
