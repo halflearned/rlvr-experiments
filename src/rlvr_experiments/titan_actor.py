@@ -2,7 +2,7 @@ import os
 import ray
 import torch
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Callable
 
 from torch.distributed.tensor import DTensor, distribute_tensor
 
@@ -78,6 +78,27 @@ class TitanModelRank:
             (k, str(v.dtype).split(".")[-1], tuple(v.shape))
             for k, v in hf_state.items()
         ]
+    
+
+    # ------------------------------------------------------------------ #
+    # Generic attribute/method forwarding
+    # ------------------------------------------------------------------ #
+    def get_attr(self, attr: str):
+        if self.model is None:
+            raise RuntimeError("Model not initialized")
+        return getattr(self.model, attr)
+
+    def call_method(self, attr: str, *args, **kwargs):
+        if self.model is None:
+            raise RuntimeError("Model not initialized")
+        if hasattr(self, attr):
+            fn = getattr(self, attr)
+        else:
+            fn = getattr(self.model, attr)
+        if not callable(fn):
+            raise AttributeError(f"{attr} is not callable")
+        return fn(*args, **kwargs)
+
 
     # ------------------------------------------------------------------ #
     # Sync cache + chunk planning
@@ -263,6 +284,81 @@ class TitanModelRank:
 
         del flat
 
+    def forward_step(self, input_dict):
+        """
+        One name for all models.
+
+        - Trainable models: return raw outputs (may include DTensors).
+        - Non-trainable models: return a plain torch.Tensor materialized on rank 0.
+          Other ranksgit s return None. This method is collective if the output is DTensor.
+        """
+        if self.model is None:
+            raise RuntimeError("Model not initialized")
+
+        out = self.model.forward_step(input_dict)
+
+        # What follows is necessary to handle the fact that different
+        # Titan models may output DTensors that are on different meshes.
+        # This can lead to issues when computing "across" meshes.
+        # So we enforce that only trainable models return DTensors.
+        # (And I suppose we assume there's only one trainable model)
+        # Other models return plain tensors on rank 0 only.
+
+        # Model is trainable: return DTensor output
+        if self.trainable:
+            return out
+        
+        # Non-trainable: export a plain tensor
+        def materialize(value):
+            if isinstance(value, DTensor):
+                # Collective across this model's mesh, so all ranks must call forward().
+                return value.full_tensor().detach()
+            if torch.is_tensor(value):
+                return value.detach()
+            return value
+
+        plain_out = _tree_map(materialize, out)
+
+        # Only leader returns to avoid shipping duplicates.
+        if self.rank == 0:
+            return plain_out
+        else:
+            return None
+
+
+    def compute_loss_and_backward_step(
+        self,
+        loss_fn: Callable[..., torch.Tensor],
+        trainer_output: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> float:
+        device = self.model.device
+
+        def materialize(value: Any, retain_grad: bool = False) -> Any:
+            if isinstance(value, DTensor):
+                tensor = value.full_tensor().to(device)
+                if not retain_grad:
+                    tensor = tensor.detach()
+                return tensor
+            if torch.is_tensor(value):
+                tensor = value.to(device, non_blocking=True)
+                if not retain_grad:
+                    tensor = tensor.detach()
+                return tensor
+            return value
+
+        trainer_output_local = materialize(trainer_output, retain_grad=True)
+        args_local = _tree_map(materialize, args)
+        kwargs_local = _tree_map(materialize, kwargs)
+
+        loss = loss_fn(trainer_output_local, *args_local, **kwargs_local)
+
+        if not torch.is_tensor(loss) or loss.ndim != 0:
+            raise RuntimeError("loss_fn must return a scalar torch.Tensor")
+
+        self.model.backward_step(loss)
+        return float(loss.detach().item())
 
 import asyncio
 
@@ -272,6 +368,20 @@ class DistributedModelHandle:
     def __init__(self, actors: List, name: str = "model"):
         self.actors = actors
         self.name = name
+
+    def __getattr__(self, attr):
+        if attr.startswith("_"):
+            raise AttributeError(attr)
+        if attr in self._simple_attrs:
+            return ray.get(self.actors[0].get_attr.remote(attr))
+
+        async def proxy(*args, **kwargs):
+            results = await asyncio.gather(
+                *[self.resolve(a.call_method.remote(attr, *args, **kwargs)) for a in self.actors]
+            )
+            return results[0]
+
+        return proxy
 
     async def resolve(self, ref):
         if hasattr(ref, "__await__"):
@@ -283,6 +393,10 @@ class DistributedModelHandle:
         futures = [a.get_hf_param_names_and_shapes.remote() for a in self.actors]
         results = await asyncio.gather(*futures)
         return results[0]
+
+        
+
+        
 
 
 import tempfile
@@ -318,3 +432,26 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
             os.remove(config_path)
         except FileNotFoundError:
             pass
+
+
+
+
+
+from typing import Any, Callable
+from dataclasses import is_dataclass, fields
+import torch
+from torch.distributed.tensor import DTensor
+
+def _tree_map(fn, x):
+    if x is None or isinstance(x, (str, bytes, int, float, bool)):
+        return x
+    if isinstance(x, dict):
+        return {k: _tree_map(fn, v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_tree_map(fn, v) for v in x]
+    if isinstance(x, tuple):
+        return tuple(_tree_map(fn, v) for v in x)
+    if is_dataclass(x):
+        vals = {f.name: _tree_map(fn, getattr(x, f.name)) for f in fields(x)}
+        return type(x)(**vals)
+    return fn(x)

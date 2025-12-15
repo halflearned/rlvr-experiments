@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.checkpoint.state_dict import get_model_state_dict
+from torch.distributed.tensor.parallel import loss_parallel
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -14,6 +15,10 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
+
+# from rlvr_experiments.data import build_dataloader_fn as rlvr_loader
+from .ops import compute_logprobs
+
 
 class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
@@ -65,6 +70,9 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         self.model_args = self.train_spec.model_args[job_config.model.flavor]
         self.model_args.update_from_config(job_config)
 
+        # override dataloader to use our own
+        # self.train_spec.build_dataloader_fn = rlvr_loader
+
         self.tokenizer = (
             self.train_spec.build_tokenizer_fn(job_config)
             if self.train_spec.build_tokenizer_fn is not None
@@ -104,7 +112,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         # Wrap in list for compatibility with Titan utilities
         self.model_parts = [model]
 
-        # 8. Train context / AMP (CP is disabled, so cp_ctx is always None)
+        # 8. Train context / AMP (CP is disabled for now)
         loss_parallel_enabled = (
             self.parallel_dims.tp_enabled
             and not job_config.parallelism.disable_loss_parallel
@@ -174,7 +182,10 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
           
 
 
-    def forward_step(self, input_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward_step(
+        self,
+        input_dict: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
         inputs = input_dict["input"].to(self.device)
 
         extra_inputs = {
@@ -192,11 +203,16 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 extra_inputs=extra_inputs,
             )
 
-        with self.train_context_mgr(None):
-            with self.maybe_enable_amp:
-                logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+        with self.train_context_mgr(None), self.maybe_enable_amp:
+            logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            logprobs = compute_logprobs(
+                logits,
+                input_ids=inputs, 
+                align=False  # TODO: False? I guess so since we're only taking vllm response tokens
+            )
 
-        return logits
+        # TODO: possibly return a dict of outputs later
+        return logprobs
 
     def backward_step(self, loss: torch.Tensor) -> None:
         if not self.trainable:

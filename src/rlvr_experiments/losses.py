@@ -10,10 +10,10 @@ class GRPOLoss(torch.nn.Module):
 
     def forward(
         self,
-        rewards,             # [B] or [B, G] or [B, G*...] – scalar per sequence
         trainer_logprobs,    # [B, T] – log π_θ
-        inference_logprobs,  # [B, T] – log π_{θ_old}
         reference_logprobs,  # [B, T] – log π_ref
+        rollout_logprobs,  # [B, T] – log π_{θ_old}
+        rewards,             # [B] or [B, G] or [B, G*...] – scalar per sequence
         padding_mask,        # [B, T], 1 for tokens, 0 for pad
     ):
         # advantage normalization
@@ -23,7 +23,7 @@ class GRPOLoss(torch.nn.Module):
             adv = adv.unsqueeze(-1)  # now same rank as [B, T...]
 
         # importance ratio
-        ratio = torch.exp(trainer_logprobs - inference_logprobs)  # π_θ / π_{θ_old}
+        ratio = torch.exp(trainer_logprobs - rollout_logprobs)  # π_θ / π_{θ_old}
         clipped_ratio = torch.clamp(ratio, 1.0 - self.eps, 1.0 + self.eps)
         
         unclipped_obj = ratio * adv
