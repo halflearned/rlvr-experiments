@@ -39,7 +39,7 @@ roles:
         warmup_steps: 2
 
       training:
-        seq_len: 2000
+        seq_len: 4096
         dtype: "bfloat16"
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
@@ -116,10 +116,14 @@ roles:
     config:
       model: "./assets/hf/Qwen3-0.6B"
       tensor_parallel_size: 4
-      max_model_len: 4096  # note how small
-      gpu_memory_utilization: 0.7
+      max_model_len: 4096
+      gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       logprobs_mode: "processed_logprobs"     # TODO: confirm if we want this or "raw"
+      max_num_seqs: 100
+      max_num_batched_tokens: 32768
+
+      
 
 sync:
   chunk_mb: 100
