@@ -49,7 +49,7 @@ roles:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 2
+        tensor_parallel_degree: 1
         context_parallel_degree: 1
 
       checkpoint:
@@ -87,8 +87,14 @@ roles:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 1   # say
+        tensor_parallel_degree: 1 
         context_parallel_degree: 1
+
+      training:
+        seq_len: 4096
+        dtype: "bfloat16"
+        mixed_precision_param: "bfloat16"
+        mixed_precision_reduce: "float32"
 
       checkpoint:
         # I think we actually won't use this in the end, but ok for now?
@@ -101,8 +107,8 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: "none"
-        selective_ac_option: "op"
+        mode: selective
+        selective_ac_option: op
 
       compile:
         enable: false
@@ -119,7 +125,7 @@ roles:
       max_model_len: 4096
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
-      logprobs_mode: "processed_logprobs"     # TODO: confirm if we want this or "raw"
+      logprobs_mode: "raw_logprobs"
       max_num_seqs: 100
       max_num_batched_tokens: 32768
 

@@ -1,59 +1,75 @@
-import random
 import re
+from typing import Optional
 
-class DummyVerifier:
-    def __call__(self, prompt: str, response: str, target: str) -> float:
-        return random.uniform(0.0, 1.0)
+import torch
 
 
 class MathVerifier:
-    """
-    Reward class for evaluating math correctness.
-    Copied from torchforge's MathReward
-    """
-
-    def __init__(self, tolerance: float = 1e-6, partial_credit: float = 0.1):
+    def __init__(self, tolerance: float = 1e-3):
         self.tolerance = tolerance
-        self.partial_credit = partial_credit
 
-    def __call__(self, prompt: str, response: str, target: str) -> float:
-        """Compute math correctness reward."""
-        target_number = self._to_float(target)
-        if target_number is None:
+    def _extract_boxed_expression(self, response: str) -> Optional[str]:
+        """Extract the contents of the first \boxed{...} with balanced braces."""
+        match = re.search(r"\\boxed\{", response)
+        if not match:
+            return None
+        start = match.end()
+        depth = 1
+        idx = start
+        while idx < len(response) and depth > 0:
+            char = response[idx]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            idx += 1
+        if depth != 0:
+            return None
+        return response[start : idx - 1].strip()
+
+    def _extract_answer_span(self, response: str) -> Optional[str]:
+        tag_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL | re.IGNORECASE)
+        if tag_match:
+            return tag_match.group(1).strip()
+        return self._extract_boxed_expression(response)
+
+    def parse_number(self, answer_str: str) -> float:
+        """Parse a string that might be a number, fraction, or LaTeX fraction."""
+        answer_str = answer_str.strip()
+        
+        # Handle latex like \frac{a}{b} or \dfrac{a}{b}
+        frac_match = re.match(r"\\d?frac\{([^}]+)\}\{([^}]+)\}", answer_str)
+        if frac_match:
+            num = self.parse_number(frac_match.group(1))
+            denom = self.parse_number(frac_match.group(2))
+            return num / denom
+        
+        # Handle simple fractions like "1/3"
+        if '/' in answer_str:
+            num, denom = answer_str.split('/')
+            return float(num) / float(denom)
+        
+        # Handle plain numbers
+        return float(answer_str)
+
+    def verify(self, response: str, target: str) -> float:
+        target_number = float(target)
+        answer_span = self._extract_answer_span(response)
+        if answer_span is None:
+            return 0.0
+        try:
+            model_answer = self.parse_number(answer_span)
+        except (ValueError, TypeError, ZeroDivisionError):
             return 0.0
 
-        # Look for answer in <answer></answer> tags
-        answer_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
+        if abs(target_number - model_answer) < self.tolerance:
+            return 1.0
+        return 0.0
 
-        if answer_match:
-            model_answer = self._to_float(answer_match.group(1).strip())
-            if (
-                model_answer is not None
-                and abs(target_number - model_answer) < self.tolerance
-            ):
-                return 1.0  # Correct answer
-
-        # Check for partial credit: target number appears elsewhere in response
-        response_without_answer_tags = re.sub(
-            r"<answer>.*?</answer>", "", response, flags=re.DOTALL
-        )
-        # Convert to int if it's a whole number to avoid "117.0" vs "117" mismatch
-        target_str = (
-            str(int(target_number))
-            if target_number.is_integer()
-            else str(target_number)
-        )
-        if target_str in response_without_answer_tags:
-            return self.partial_credit
-
-        return 0.0  # No match
-
-    def _to_float(self, text: str) -> float | None:
-        """Convert text to float, return None if invalid."""
-        try:
-            # Remove common non-numeric characters like $, commas, etc.
-            cleaned_text = re.sub(r"[$,\s]", "", text.strip())
-            return float(cleaned_text)
-        except (ValueError, AttributeError):
-            return None
-
+    def verify_batch(self, *, responses=None, targets=None, return_dtype=None):
+        results = [
+            self.verify(r, t) for r, t in zip(responses, targets)
+        ]
+        if return_dtype is not None:
+            return torch.tensor(results, dtype=return_dtype)
+        return results

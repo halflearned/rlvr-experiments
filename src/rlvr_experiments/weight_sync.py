@@ -1,7 +1,7 @@
 """
 weight_sync.py - Separate NCCL communicator for fast weight synchronization.
 
-Inspired by vLLM's weight update mechanism.
+Inspired by vLLM's weight update mechanism in trl.
 
 This module defines WeightSyncManager, which creates an independent NCCL
 communicator (on a different port from torch.distributed) so that different
