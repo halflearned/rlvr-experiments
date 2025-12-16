@@ -16,14 +16,22 @@ class GRPOLoss(torch.nn.Module):
         rewards,             # [B] or [B, G] or [B, G*...] – scalar per sequence
         padding_mask,        # [B, T], 1 for tokens, 0 for pad
     ):
-        # advantage normalization
-        adv = (rewards - rewards.mean()) / (rewards.std(unbiased=False) + 1e-8)
+        trainer_logprobs = trainer_logprobs.float()
+        reference_logprobs = reference_logprobs.float()
+        rollout_logprobs = rollout_logprobs.float()
+        rewards = rewards.float()
+        padding_mask = padding_mask.float()
+
+        # advantage normalization (fp32 to avoid bf16 underflow when rewards have low variance)
+        reward_std = rewards.std(unbiased=False)
+        adv = (rewards - rewards.mean()) / (reward_std.clamp_min(1e-6) + 1e-8)
         # broadcast over tokens if rewards is [B] or [B, G]
         while adv.ndim < trainer_logprobs.ndim:
             adv = adv.unsqueeze(-1)  # now same rank as [B, T...]
 
         # importance ratio
         ratio = torch.exp(trainer_logprobs - rollout_logprobs)  # π_θ / π_{θ_old}
+
         clipped_ratio = torch.clamp(ratio, 1.0 - self.eps, 1.0 + self.eps)
         
         unclipped_obj = ratio * adv

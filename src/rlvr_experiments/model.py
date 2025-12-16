@@ -188,12 +188,17 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
     ) -> torch.Tensor:
         inputs = input_dict["input"].to(self.device)
 
+        reserved_keys = {"input", "completion_ids"}
         extra_inputs = {
             k: v.to(self.device) if isinstance(v, torch.Tensor) else v
             for k, v in input_dict.items()
-            if k != "input"
+            if k not in reserved_keys
         }
         extra_kwargs: Dict[str, Any] = {}
+
+        has_completion_targets = "completion_ids" in input_dict
+        target_ids = input_dict.get("completion_ids", inputs).to(self.device)
+        align_targets = True if has_completion_targets else False
 
         # FlexAttention: build masks if requested by model args
         if getattr(self.model_args, "use_flex_attn", False):
@@ -207,8 +212,8 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
             logprobs = compute_logprobs(
                 logits,
-                input_ids=inputs, 
-                align=False  # TODO: False? I guess so since we're only taking vllm response tokens
+                input_ids=target_ids,
+                align=align_targets,
             )
 
         # TODO: possibly return a dict of outputs later
