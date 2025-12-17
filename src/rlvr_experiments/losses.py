@@ -12,7 +12,7 @@ class GRPOLoss(torch.nn.Module):
         self,
         trainer_logprobs,    # [B, T] – log π_θ
         reference_logprobs,  # [B, T] – log π_ref
-        rollout_logprobs,  # [B, T] – log π_{θ_old}
+        rollout_logprobs,    # [B, T] – log π_{θ_old}
         rewards,             # [B] or [B, G] or [B, G*...] – scalar per sequence
         padding_mask,        # [B, T], 1 for tokens, 0 for pad
     ):

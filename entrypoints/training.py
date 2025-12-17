@@ -3,7 +3,7 @@ import asyncio
 import torch
 
 from rlvr_experiments.runtime import Runtime
-from rlvr_experiments.syncing import sync_titan_to_vllm
+from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.losses import GRPOLoss
 from rlvr_experiments.verifiers import MathVerifier
 from rlvr_experiments.vllm_utils import VLLMOutput
@@ -51,20 +51,34 @@ async def main() -> None:
 
     verifier = MathVerifier()
 
+    avg_rewards = []
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", use_fast=False)
-    system_prompt = r"This math question has been scrambled. Unscrambled and answer with a number within \\boxed{}. "
+    system_prompt = r"Answer this math question with a number within \\boxed{}. "
     problem_prompts = [
-        "what is the integral of x^2 over the unit-interval",
-    ]
+        "Simplify the expression  ((7/12) + (5/18)) / (31/36)"
+    ]   
     problem_answers = [
-        "0.333333",
+        "1",
     ]
-    templates = [apply_template(system_prompt + scramble(p) + "?", tokenizer) for p in problem_prompts]
 
-    num_iterations = 2
+    templates = [apply_template(system_prompt + p + "?", tokenizer) for p in problem_prompts]
+
+    with open("reward_log.txt", "w") as f:
+        f.write("")
+
+    num_iterations = 200
     for i in range(num_iterations):
-        print("\n\n" + "*" * 20 + f" ITERATION {i+1}/10 " + "*" * 20)
+        print("\n\n" + "*" * 20 + f" ITERATION {i+1}/{num_iterations} " + "*" * 20)
+
+        if i % 10 == 0 and i > 0:
+            await sync_titan_to_titan(trainer, reference)
+            print("Synchronized trainer weights to reference model.")
+
+        if i % 5 == 0:
+            # Sync trainer weights to rollout vLLM
+            await sync_titan_to_vllm(trainer, rollout)
+            print("Synchronized trainer weights to rollout model.")
 
         # Generate responses from rollout vLLM
         # https://qwen.readthedocs.io/en/latest/deployment/vllm.html#thinking-non-thinking-modes
@@ -79,17 +93,12 @@ async def main() -> None:
         # Prepare inputs for trainer and reference models
         full_input_ids, completion_ids, completion_mask, completion_logprobs = vllm_output.get_tensors(tokenizer)
 
-        # Get logprobs from trainer and reference models
+        # Get logprobs from reference model
         input_dict = {
             "input": full_input_ids,
             "completion_ids": completion_ids,
         }
-        trainer_logprobs = await trainer.forward_step(input_dict)
-        print("trainer logprobs", trainer_logprobs[0, :10])
-        print("got trainer logprobs.")
-
         reference_logprobs = await reference.forward_step(input_dict)
-        print("reference logprobs", reference_logprobs[0, :10])
         print("got reference logprobs.")
 
         # Compute rewards
@@ -100,22 +109,28 @@ async def main() -> None:
         )
         print(f"rewards: {rewards}")
 
+        avg_rewards.append(rewards.mean().item())
+        print(f"avg rewards so far: {avg_rewards}")
+        with open("reward_log.txt", "a") as f:
+            f.write(f"{rewards.mean().item()}\n")
+
+        if torch.allclose(rewards, rewards[0]):
+            print("All rewards are identical, skipping this batch.")
+            continue
+
+
         # GRPO loss
         loss = await trainer.compute_loss_and_backward_step(
-            loss_fn, trainer_logprobs, reference_logprobs, completion_logprobs,
+            loss_fn, input_dict, reference_logprobs, completion_logprobs,
             rewards, padding_mask=completion_mask
         )
         print(f"computed loss and backward pass. loss: {loss}")
 
         # Update trainer model
-        await trainer.optimizer_step()
-        print("optimizer step done.")
+        grad_norm = await trainer.optimizer_step()
+        print(f"optimizer step done. grad_norm={grad_norm:.6f}")
 
-    # Sync trainer weights to rollout vLLM
-    await sync_titan_to_vllm(trainer, rollout)
-    print("Synchronized trainer weights to rollout vLLM.")
-
-    print("✓ Success.")
+        print("✓ Success.")
 
 
     

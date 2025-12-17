@@ -1,5 +1,4 @@
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 
 class VLLMOutput:
@@ -53,20 +52,38 @@ class VLLMOutput:
             padding=True,
             return_tensors="pt",
         )
-        completion_batch = tokenizer.pad(
-            {"input_ids": self.completion_token_ids()},
-            padding=True,
-            return_tensors="pt",
+
+        completion_token_ids = self.completion_token_ids()
+        raw_completion_logprobs = self.completion_logprobs()
+        max_completion_len = max((len(ids) for ids in completion_token_ids), default=0)
+
+        pad_token_id = tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = tokenizer.eos_token_id
+        if pad_token_id is None:
+            raise ValueError("tokenizer must define pad_token_id or eos_token_id")
+
+        batch_size = len(completion_token_ids)
+        completion_ids = torch.full(
+            (batch_size, max_completion_len),
+            pad_token_id,
+            dtype=torch.long,
         )
-        completion_logprobs = pad_sequence(
-            [torch.tensor(lp) for lp in self.completion_logprobs()],
-            batch_first=True,
-            padding_value=0.0,
-        )
+        completion_mask = torch.zeros((batch_size, max_completion_len), dtype=torch.long)
+        completion_logprobs = torch.zeros((batch_size, max_completion_len), dtype=torch.float32)
+
+        for row, (token_ids, logprobs) in enumerate(zip(completion_token_ids, raw_completion_logprobs)):
+            length = len(token_ids)
+            if length == 0:
+                continue
+            completion_ids[row, -length:] = torch.tensor(token_ids, dtype=torch.long)
+            completion_mask[row, -length:] = 1
+            completion_logprobs[row, -length:] = torch.tensor(logprobs, dtype=torch.float32)
+
         return (
             full_batch["input_ids"],
-            completion_batch["input_ids"],
-            completion_batch["attention_mask"],
+            completion_ids,
+            completion_mask,
             completion_logprobs,
         )
     
