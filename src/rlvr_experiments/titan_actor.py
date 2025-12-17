@@ -333,6 +333,9 @@ class TitanModelRank:
         *args: Any,
         **kwargs: Any,
     ) -> float:
+        if isinstance(trainer_output, dict):
+            trainer_output = self.model.forward_step(trainer_output)
+
         device = self.model.device
 
         def materialize(value: Any, retain_grad: bool = False) -> Any:
