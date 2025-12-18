@@ -44,7 +44,37 @@ class TitanModelRank:
         from torchtitan.config import ConfigManager
 
         job_config = ConfigManager().parse_args(["--job.config-file", self.config_path])
+
+        if self.rank == 0:
+            p = job_config.parallelism
+            tp = int(getattr(p, "tensor_parallel_degree", 1))
+            dp_rep = int(getattr(p, "data_parallel_replicate_degree", 1))
+            dp_shard = int(getattr(p, "data_parallel_shard_degree", 1))
+            expected_ws = dp_rep * dp_shard * tp
+            if expected_ws != int(os.environ["WORLD_SIZE"]):
+                print(
+                    f"[{self.group_name} Rank {self.rank}] WARNING: config/world_size mismatch: "
+                    f"expected_ws={expected_ws} (dp_rep={dp_rep}, dp_shard={dp_shard}, tp={tp}) "
+                    f"but env WORLD_SIZE={os.environ['WORLD_SIZE']} config_path={self.config_path}"
+                )
+            else:
+                print(
+                    f"[{self.group_name} Rank {self.rank}] Loaded config: "
+                    f"dp_rep={dp_rep} dp_shard={dp_shard} tp={tp} "
+                    f"(WORLD_SIZE={os.environ['WORLD_SIZE']}) config_path={self.config_path}"
+                )
+
         self.model = TitanModel(job_config, trainable=self.trainable)
+
+        if self.rank == 0:
+            pd = getattr(self.model, "parallel_dims", None)
+            print(
+                f"[{self.group_name} Rank {self.rank}] TitanModel parallel_dims: "
+                f"dp_rep={getattr(pd, 'dp_replicate', None)} "
+                f"dp_shard={getattr(pd, 'dp_shard', None)} "
+                f"tp={getattr(pd, 'tp', None)} "
+                f"world_size={getattr(pd, 'world_size', None)}"
+            )
 
         print(f"[{self.group_name} Rank {self.rank}] Initialized Titan on port {master_port}")
         return {"status": "ready"}
@@ -307,14 +337,15 @@ class TitanModelRank:
         # Model is trainable: return DTensor output
         if self.trainable:
             return out
-        
+
         # Non-trainable: export a plain tensor
         def materialize(value):
             if isinstance(value, DTensor):
                 # Collective across this model's mesh, so all ranks must call forward().
-                return value.full_tensor().detach()
+                # Clone and move to CPU to ensure clean serialization through Ray
+                return value.full_tensor().detach().clone().cpu()
             if torch.is_tensor(value):
-                return value.detach()
+                return value.detach().clone().cpu()
             return value
 
         plain_out = _tree_map(materialize, out)
@@ -338,29 +369,57 @@ class TitanModelRank:
 
         device = self.model.device
 
-        def materialize(value: Any, retain_grad: bool = False) -> Any:
+        # DEBUG: Check what we're receiving before any processing
+        import os
+        rank = int(os.environ.get("RANK", 0))
+        print(f"[Rank {rank}] === compute_loss_and_backward_step INPUTS ===")
+        print(f"[Rank {rank}] trainer_output type: {type(trainer_output).__name__}")
+        if isinstance(trainer_output, DTensor):
+            print(f"[Rank {rank}] trainer_output: DTensor placements={trainer_output.placements}, shape={trainer_output.shape}")
+        elif torch.is_tensor(trainer_output):
+            print(f"[Rank {rank}] trainer_output: Tensor shape={trainer_output.shape}, device={trainer_output.device}")
+        for i, arg in enumerate(args):
+            if torch.is_tensor(arg):
+                print(f"[Rank {rank}] args[{i}]: Tensor shape={arg.shape}, device={arg.device}, min={arg.min():.4f}, max={arg.max():.4f}, num_zeros={(arg == 0).sum()}")
+            elif isinstance(arg, DTensor):
+                local = arg.to_local()
+                print(f"[Rank {rank}] args[{i}]: DTensor placements={arg.placements}, shape={arg.shape}, local_shape={local.shape}")
+            else:
+                print(f"[Rank {rank}] args[{i}]: {type(arg).__name__}")
+
+        # Move tensors to device, keeping DTensors as-is (loss function will handle extraction)
+        def move_to_device(value: Any, detach: bool = True) -> Any:
             if isinstance(value, DTensor):
-                tensor = value.full_tensor().to(device)
-                if not retain_grad:
-                    tensor = tensor.detach()
-                return tensor
+                # Keep DTensor as-is, loss function will extract to local
+                return value if not detach else value.detach()
             if torch.is_tensor(value):
                 tensor = value.to(device, non_blocking=True)
-                if not retain_grad:
-                    tensor = tensor.detach()
-                return tensor
+                return tensor if not detach else tensor.detach()
             return value
 
-        trainer_output_local = materialize(trainer_output, retain_grad=True)
-        args_local = _tree_map(materialize, args)
-        kwargs_local = _tree_map(materialize, kwargs)
+        # Trainer output keeps gradients (DTensor), everything else is detached
+        trainer_output_local = move_to_device(trainer_output, detach=False)
+        args_local = tuple(move_to_device(arg, detach=True) for arg in args)
+        kwargs_local = {k: move_to_device(v, detach=True) if torch.is_tensor(v) or isinstance(v, DTensor) else v
+                       for k, v in kwargs.items()}
 
-        loss = loss_fn(trainer_output_local, *args_local, **kwargs_local)
+        # Wrap loss computation and backward in train_context to ensure loss_parallel
+        # context is active throughout forward→loss→backward chain (matching torchtitan pattern)
+        with self.model.train_context_mgr(None):
+            loss = loss_fn(trainer_output_local, *args_local, **kwargs_local)
 
-        if not torch.is_tensor(loss) or loss.ndim != 0:
-            raise RuntimeError("loss_fn must return a scalar torch.Tensor")
+            if not torch.is_tensor(loss) or loss.ndim != 0:
+                raise RuntimeError("loss_fn must return a scalar torch.Tensor")
 
-        self.model.backward_step(loss)
+            # When TP > 1, all ranks compute the same loss (replicated logprobs).
+            # We need to scale the loss by TP degree so gradients are properly averaged.
+            # This prevents gradient accumulation across ranks from inflating gradients.
+            tp_degree = self.model.parallel_dims.tp
+            if tp_degree > 1:
+                loss = loss / tp_degree
+
+            loss.backward()
+
         return float(loss.detach().item())
 
 import asyncio
@@ -408,10 +467,21 @@ import tomli_w as toml
 def create_titan_group(config: dict, name: str, world_size: int, port: int) -> DistributedModelHandle:
     master_addr = ray.util.get_node_ip_address()
 
-    cfg = dict(config)
-    cfg.pop("trainable", None) 
+    # `trainable` is an RLVR-only flag that should not be written into the
+    # torchtitan JobConfig TOML, but it must still be propagated to the actor.
+    trainable = bool(config.get("trainable", True))
 
-    with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
+    cfg = dict(config)
+    cfg.pop("trainable", None)
+
+    # NOTE: Ray actors may be scheduled on different nodes. Use a shared filesystem
+    # path (repo/EFS) instead of the per-node default temp dir.
+    config_dir = os.environ.get("RLVR_TITAN_CONFIG_DIR")
+    if config_dir is None:
+        config_dir = os.path.join(os.getcwd(), ".rlvr_titan_job_configs")
+    os.makedirs(config_dir, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=f".{name}.toml", delete=False, dir=config_dir) as f:
         toml.dump(cfg, f)
         config_path = f.name
 
@@ -423,6 +493,7 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
                 world_size=world_size,
                 config_path=config_path,
                 group_name=name,
+                trainable=trainable,
             )
             for r in range(world_size)
         ]
@@ -431,10 +502,12 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
         return DistributedModelHandle(actors, name=name)
 
     finally:
-        try:
-            os.remove(config_path)
-        except FileNotFoundError:
-            pass
+        keep_cfg = os.environ.get("RLVR_KEEP_TITAN_CONFIG") == "1"
+        if not keep_cfg:
+            try:
+                os.remove(config_path)
+            except FileNotFoundError:
+                pass
 
 
 

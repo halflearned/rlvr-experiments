@@ -107,7 +107,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         with torch.no_grad():
             model.init_weights(buffer_device=None)
         
-        model.train()
+       
 
         # Wrap in list for compatibility with Titan utilities
         self.model_parts = [model]
@@ -129,6 +129,8 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         self.step = 0
 
         if self.trainable:
+            model.train()
+
             # 10. Fault tolerance manager (trainable only)
             self.ft_manager = FTManager(job_config.fault_tolerance)
             self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
@@ -162,6 +164,11 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             )
             self.checkpointer.load(step=None)
         else:
+            # Reference / non-trainable models should be deterministic and not build graphs.
+            # Keep them in eval mode and disable gradients to save memory.
+            self.model_parts[0].eval()
+            self.model_parts[0].requires_grad_(False)
+
             # Non-trainable models don't need optimizers, schedulers, or full checkpointing
             self.ft_manager = None
             self.optimizers = None
@@ -210,6 +217,13 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         with self.train_context_mgr(None), self.maybe_enable_amp:
             logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            # DEBUG: Check logits type and shape
+            from torch.distributed.tensor import DTensor
+            rank = int(os.environ.get("RANK", 0))
+            if isinstance(logits, DTensor):
+                print(f"[Model Rank {rank}] logits: DTensor placements={logits.placements}, shape={logits.shape}, local_shape={logits.to_local().shape}")
+            else:
+                print(f"[Model Rank {rank}] logits: Tensor shape={logits.shape}")
             logprobs = compute_logprobs(
                 logits,
                 input_ids=target_ids,

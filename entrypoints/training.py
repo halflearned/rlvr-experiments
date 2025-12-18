@@ -47,6 +47,12 @@ async def main() -> None:
     reference = runtime.roles["reference"]
     rollout = runtime.roles["rollout"]
 
+    # Ensure the reference starts identical to the trainer checkpoint.
+    # This is especially important when trainer TP != reference TP, since any
+    # mismatch at step 0 can make the KL term explode.
+    await sync_titan_to_titan(trainer, reference)
+    print("Synchronized trainer weights to reference model (startup).")
+
     loss_fn = GRPOLoss(beta=0.1, eps=0.2)
 
     verifier = MathVerifier()
@@ -99,7 +105,14 @@ async def main() -> None:
             "completion_ids": completion_ids,
         }
         reference_logprobs = await reference.forward_step(input_dict)
-        print("got reference logprobs.")
+        print(f"got reference logprobs: shape={reference_logprobs.shape}, min={reference_logprobs.min():.4f}, max={reference_logprobs.max():.4f}, num_zeros={(reference_logprobs == 0).sum()}")
+
+        if i == 0:
+            trainer_logprobs_probe = await trainer.forward_step(input_dict)
+            max_abs_diff = (
+                trainer_logprobs_probe.detach().cpu() - reference_logprobs.detach().cpu()
+            ).abs().max().item()
+            print(f"startup trainer/reference logprob max_abs_diff={max_abs_diff:.6f}")
 
         # Compute rewards
         rewards = verifier.verify_batch(
