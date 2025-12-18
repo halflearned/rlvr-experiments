@@ -1,8 +1,16 @@
 import torch
-        
+import torch.nn.functional as F
+
+from .ops import compute_logprobs
+
 
 class GRPOLoss(torch.nn.Module):
-    """ following the deekseekmath paper """
+    """
+    GRPO Loss following the DeepSeekMath paper.
+
+    Takes logits directly (not logprobs) and computes logprobs internally,
+    following the torchforge pattern for proper DTensor gradient handling.
+    """
     def __init__(self, beta: float, eps: float = 0.0):
         super().__init__()
         self.beta = beta
@@ -10,40 +18,50 @@ class GRPOLoss(torch.nn.Module):
 
     def forward(
         self,
-        trainer_logprobs,    # [B, T] – log π_θ
-        reference_logprobs,  # [B, T] – log π_ref
-        rollout_logprobs,    # [B, T] – log π_{θ_old}
-        rewards,             # [B] or [B, G] or [B, G*...] – scalar per sequence
-        padding_mask,        # [B, T], 1 for tokens, 0 for pad
+        logits: torch.Tensor,           # [B, seq_len, vocab] – model output logits
+        response: torch.Tensor,         # [B, T] – completion token ids
+        ref_logprobs: torch.Tensor,     # [B, T] – pre-computed reference log π_ref
+        rollout_logprobs: torch.Tensor, # [B, T] – pre-computed rollout log π_{θ_old}
+        rewards: torch.Tensor,          # [B] – scalar per sequence
+        padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
     ):
-        trainer_logprobs = trainer_logprobs.float()
-        reference_logprobs = reference_logprobs.float()
-        rollout_logprobs = rollout_logprobs.float()
-        rewards = rewards.float()
-        padding_mask = padding_mask.float()
+        # Compute trainer logprobs from logits (keeps gradient flow)
+        trainer_logprobs = compute_logprobs(logits, response)
+
+        # Move other tensors to same device, ensure float32
+        ref_logprobs = ref_logprobs.to(trainer_logprobs.device).float()
+        rollout_logprobs = rollout_logprobs.to(trainer_logprobs.device).float()
+        rewards = rewards.to(trainer_logprobs.device).float()
+        padding_mask = padding_mask.to(trainer_logprobs.device).float()
+
+        # Zero out padded positions BEFORE computing ratios/KL to avoid numerical issues
+        trainer_logprobs_masked = trainer_logprobs * padding_mask
+        ref_logprobs = ref_logprobs * padding_mask
+        rollout_logprobs = rollout_logprobs * padding_mask
 
         # advantage normalization (fp32 to avoid bf16 underflow when rewards have low variance)
         reward_std = rewards.std(unbiased=False)
         adv = (rewards - rewards.mean()) / (reward_std.clamp_min(1e-6) + 1e-8)
-        # broadcast over tokens if rewards is [B] or [B, G]
-        while adv.ndim < trainer_logprobs.ndim:
-            adv = adv.unsqueeze(-1)  # now same rank as [B, T...]
+        # broadcast over tokens if rewards is [B]
+        while adv.ndim < trainer_logprobs_masked.ndim:
+            adv = adv.unsqueeze(-1)
 
         # importance ratio
-        ratio = torch.exp(trainer_logprobs - rollout_logprobs)  # π_θ / π_{θ_old}
+        log_ratio_policy = trainer_logprobs_masked - rollout_logprobs
+        ratio = torch.exp(log_ratio_policy)  # π_θ / π_{θ_old}
 
         clipped_ratio = torch.clamp(ratio, 1.0 - self.eps, 1.0 + self.eps)
-        
+
         unclipped_obj = ratio * adv
         clipped_obj = clipped_ratio * adv
         surrogate = torch.minimum(unclipped_obj, clipped_obj)  # PPO clip
 
         # kl-div per token, unbiased estimator
-        log_ratio_ref = reference_logprobs - trainer_logprobs  # log(π_ref / π_θ)
-        kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0  # KL estimator
+        log_ratio_ref = ref_logprobs - trainer_logprobs_masked  # log(π_ref / π_θ)
+        kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
 
         # per-token loss with mask
-        per_token_loss = -(surrogate - self.beta * kl_t)   
+        per_token_loss = -(surrogate - self.beta * kl_t)
         per_token_loss = per_token_loss * padding_mask
 
         # length normalization
@@ -55,18 +73,39 @@ class GRPOLoss(torch.nn.Module):
         return loss
 
 
-
 class SimpleGRPOLoss(torch.nn.Module):
-    """Simplified GRPO Loss for simplified single step updates
-    Copied from torchforge. In turn, they say: inspired by the Hugging Face TRL implementation
-        https://github.com/huggingface/trl/blob/417915a3e4d3e3bc8d7b196594308b8eabf928be/trl/trainer/grpo_trainer.py#L1624.
+    """
+    Simplified GRPO Loss following the torchforge pattern.
+
+    Takes logits directly and computes logprobs internally for proper gradient handling.
+    Inspired by the Hugging Face TRL implementation:
+    https://github.com/huggingface/trl/blob/417915a3e4d3e3bc8d7b196594308b8eabf928be/trl/trainer/grpo_trainer.py#L1624
     """
 
     def __init__(self, beta: float = 0.1):
         super().__init__()
         self.beta = beta
 
-    def forward(self, logprobs, ref_logprobs, advantages, padding_mask):
+    def forward(
+        self,
+        logits: torch.Tensor,       # [B, seq_len, vocab] – model output logits
+        response: torch.Tensor,     # [B, T] – completion token ids
+        ref_logprobs: torch.Tensor, # [B, T] – pre-computed reference log π_ref
+        advantages: torch.Tensor,   # [B] or [B, 1] – advantages
+        padding_mask: torch.Tensor, # [B, T], 1 for tokens, 0 for pad
+    ):
+        # Compute trainer logprobs from logits (keeps gradient flow)
+        logprobs = compute_logprobs(logits, response)
+
+        # Move other tensors to same device
+        ref_logprobs = ref_logprobs.to(logprobs.device).float()
+        padding_mask = padding_mask.to(logprobs.device).float()
+
+        # Broadcast advantages if needed
+        if advantages.ndim == 1:
+            advantages = advantages.unsqueeze(-1)
+        advantages = advantages.to(logprobs.device).float()
+
         kl = torch.exp(ref_logprobs - logprobs) - (ref_logprobs - logprobs) - 1
         per_token_policy_loss = torch.exp(logprobs - logprobs.detach()) * advantages
         per_token_loss = -(per_token_policy_loss - self.beta * kl)

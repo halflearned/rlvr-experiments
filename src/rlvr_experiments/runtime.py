@@ -63,9 +63,10 @@ class Runtime:
         )
 
     async def start(self, wire=True) -> "Runtime":
-        # Spawn all roles declared in YAML, do not wire anything yet.
-        for name in self.plan.roles.keys():
-            await self.spawn_role(name)
+        # Spawn all roles in parallel - each role uses different GPUs so no collision
+        await asyncio.gather(*[
+            self.spawn_role(name) for name in self.plan.roles.keys()
+        ])
 
         if wire:
             # Wire up all channels
@@ -82,24 +83,30 @@ class Runtime:
 
         if role.kind == "titan":
             port = self.titan_ports[name]
-            handle = create_titan_group(
-                config=role.config,     # dict -> temp TOML inside create_titan_group
-                name=name,
-                world_size=role.world_size,  # Titan world size == number of Ray actors
-                port=port,
+            # Run blocking create_titan_group in thread pool to allow parallel spawning
+            loop = asyncio.get_event_loop()
+            handle = await loop.run_in_executor(
+                None,
+                lambda: create_titan_group(
+                    config=role.config,
+                    name=name,
+                    world_size=role.world_size,
+                    port=port,
+                )
             )
             self.roles[name] = handle
             print(f"[runtime] spawned titan role={name} world_size={role.world_size} rendezvous_port={port}")
             return
 
         if role.kind == "vllm":
-            # TODO: normalize model handling
-            #model_name = self.plan.model.get("hf_model_name", "Qwen/Qwen3-0.6B")
+            # Note: num_gpus=1 is for the coordinator actor only.
+            # vLLM internally spawns additional Ray workers for TP>1.
             actor = VLLMEngineRank.options(num_gpus=1).remote(
-                #model_name=model_name,
                 engine_kwargs=role.config,
             )
-            ray.get(actor.ready.remote())
+            # Run blocking ray.get in thread pool to allow parallel spawning
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: ray.get(actor.ready.remote()))
             self.roles[name] = handle = VLLMHandle(actor, name=name)
             print(f"[runtime] spawned vllm role={name}")
             return

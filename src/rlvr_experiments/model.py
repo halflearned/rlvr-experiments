@@ -5,7 +5,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.checkpoint.state_dict import get_model_state_dict
-from torch.distributed.tensor.parallel import loss_parallel
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -15,9 +14,6 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-
-# from rlvr_experiments.data import build_dataloader_fn as rlvr_loader
-from .ops import compute_logprobs
 
 
 class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
@@ -107,7 +103,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         with torch.no_grad():
             model.init_weights(buffer_device=None)
         
-        model.train()
+       
 
         # Wrap in list for compatibility with Titan utilities
         self.model_parts = [model]
@@ -129,6 +125,8 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         self.step = 0
 
         if self.trainable:
+            model.train()
+
             # 10. Fault tolerance manager (trainable only)
             self.ft_manager = FTManager(job_config.fault_tolerance)
             self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
@@ -162,6 +160,11 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             )
             self.checkpointer.load(step=None)
         else:
+            # Reference / non-trainable models should be deterministic and not build graphs.
+            # Keep them in eval mode and disable gradients to save memory.
+            self.model_parts[0].eval()
+            self.model_parts[0].requires_grad_(False)
+
             # Non-trainable models don't need optimizers, schedulers, or full checkpointing
             self.ft_manager = None
             self.optimizers = None
@@ -186,19 +189,35 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         self,
         input_dict: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
+        """
+        Forward pass through the model, returning logits.
+
+        Args:
+            input_dict: Dictionary with "input" tensor (token ids).
+
+        Returns:
+            logits: [batch_size, seq_len, vocab_size] tensor (may be DTensor with TP)
+        """
         inputs = input_dict["input"].to(self.device)
 
-        reserved_keys = {"input", "completion_ids"}
+        # Pad sequence length to be divisible by TP degree to avoid losing tokens
+        # during sequence sharding with Shard(dim=1)
+        tp_degree = self.parallel_dims.tp
+        original_seq_len = inputs.size(1)
+        pad_len = 0
+        if tp_degree > 1:
+            remainder = original_seq_len % tp_degree
+            if remainder != 0:
+                pad_len = tp_degree - remainder
+                inputs = torch.nn.functional.pad(inputs, (0, pad_len), value=0)
+
+        reserved_keys = {"input"}
         extra_inputs = {
             k: v.to(self.device) if isinstance(v, torch.Tensor) else v
             for k, v in input_dict.items()
             if k not in reserved_keys
         }
         extra_kwargs: Dict[str, Any] = {}
-
-        has_completion_targets = "completion_ids" in input_dict
-        target_ids = input_dict.get("completion_ids", inputs).to(self.device)
-        align_targets = True if has_completion_targets else False
 
         # FlexAttention: build masks if requested by model args
         if getattr(self.model_args, "use_flex_attn", False):
@@ -210,14 +229,17 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         with self.train_context_mgr(None), self.maybe_enable_amp:
             logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-            logprobs = compute_logprobs(
-                logits,
-                input_ids=target_ids,
-                align=align_targets,
-            )
 
-        # TODO: possibly return a dict of outputs later
-        return logprobs
+            # If we padded the input, trim logits back to original sequence length
+            # to maintain correct alignment with target tokens
+            from torch.distributed.tensor import DTensor
+            if pad_len > 0:
+                if isinstance(logits, DTensor):
+                    logits = logits.full_tensor()[:, :original_seq_len, :]
+                else:
+                    logits = logits[:, :original_seq_len, :]
+
+        return logits
 
     def backward_step(self, loss: torch.Tensor) -> None:
         if not self.trainable:

@@ -1,5 +1,6 @@
 import os
 import ray
+import time
 import torch
 
 from typing import Any, Dict, List, Tuple, Callable
@@ -8,6 +9,7 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 
 from .weight_sync import WeightSyncManager
 from .syncing import ChunkMeta, ParamMeta
+from .ops import compute_logprobs
 
 import logging
 
@@ -44,7 +46,37 @@ class TitanModelRank:
         from torchtitan.config import ConfigManager
 
         job_config = ConfigManager().parse_args(["--job.config-file", self.config_path])
+
+        if self.rank == 0:
+            p = job_config.parallelism
+            tp = int(getattr(p, "tensor_parallel_degree", 1))
+            dp_rep = int(getattr(p, "data_parallel_replicate_degree", 1))
+            dp_shard = int(getattr(p, "data_parallel_shard_degree", 1))
+            expected_ws = dp_rep * dp_shard * tp
+            if expected_ws != int(os.environ["WORLD_SIZE"]):
+                print(
+                    f"[{self.group_name} Rank {self.rank}] WARNING: config/world_size mismatch: "
+                    f"expected_ws={expected_ws} (dp_rep={dp_rep}, dp_shard={dp_shard}, tp={tp}) "
+                    f"but env WORLD_SIZE={os.environ['WORLD_SIZE']} config_path={self.config_path}"
+                )
+            else:
+                print(
+                    f"[{self.group_name} Rank {self.rank}] Loaded config: "
+                    f"dp_rep={dp_rep} dp_shard={dp_shard} tp={tp} "
+                    f"(WORLD_SIZE={os.environ['WORLD_SIZE']}) config_path={self.config_path}"
+                )
+
         self.model = TitanModel(job_config, trainable=self.trainable)
+
+        if self.rank == 0:
+            pd = getattr(self.model, "parallel_dims", None)
+            print(
+                f"[{self.group_name} Rank {self.rank}] TitanModel parallel_dims: "
+                f"dp_rep={getattr(pd, 'dp_replicate', None)} "
+                f"dp_shard={getattr(pd, 'dp_shard', None)} "
+                f"tp={getattr(pd, 'tp', None)} "
+                f"world_size={getattr(pd, 'world_size', None)}"
+            )
 
         print(f"[{self.group_name} Rank {self.rank}] Initialized Titan on port {master_port}")
         return {"status": "ready"}
@@ -295,7 +327,13 @@ class TitanModelRank:
         if self.model is None:
             raise RuntimeError("Model not initialized")
 
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
         out = self.model.forward_step(input_dict)
+        torch.cuda.synchronize()
+        t_end = time.perf_counter()
+        if self.rank == 0:
+            print(f"[ACTOR TIMING {self.group_name}] forward_step GPU time: {(t_end - t_start)*1000:.1f}ms")
 
         # What follows is necessary to handle the fact that different
         # Titan models may output DTensors that are on different meshes.
@@ -307,14 +345,15 @@ class TitanModelRank:
         # Model is trainable: return DTensor output
         if self.trainable:
             return out
-        
+
         # Non-trainable: export a plain tensor
         def materialize(value):
             if isinstance(value, DTensor):
                 # Collective across this model's mesh, so all ranks must call forward().
-                return value.full_tensor().detach()
+                # Clone and move to CPU to ensure clean serialization through Ray
+                return value.full_tensor().detach().clone().cpu()
             if torch.is_tensor(value):
-                return value.detach()
+                return value.detach().clone().cpu()
             return value
 
         plain_out = _tree_map(materialize, out)
@@ -325,6 +364,40 @@ class TitanModelRank:
         else:
             return None
 
+    def compute_logprobs_step(self, input_dict: dict, completion_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass + logprobs computation inside the actor.
+
+        Returns only the small [B, T] logprobs tensor instead of full [B, seq_len, vocab] logits.
+        This avoids serializing ~6GB of data through Ray for the reference model.
+        """
+        if self.model is None:
+            raise RuntimeError("Model not initialized")
+
+        torch.cuda.synchronize()
+        t_start = time.perf_counter()
+
+        # Forward pass
+        logits = self.model.forward_step(input_dict)
+
+        # Materialize DTensor if needed
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
+
+        # Compute logprobs inside the actor
+        completion_ids = completion_ids.to(self.model.device)
+        logprobs = compute_logprobs(logits, completion_ids)
+
+        torch.cuda.synchronize()
+        t_end = time.perf_counter()
+        if self.rank == 0:
+            print(f"[ACTOR TIMING {self.group_name}] compute_logprobs_step GPU time: {(t_end - t_start)*1000:.1f}ms")
+
+        # Return small tensor [B, T] instead of huge [B, seq_len, vocab]
+        if self.rank == 0:
+            return logprobs.detach().cpu()
+        else:
+            return None
 
     def compute_loss_and_backward_step(
         self,
@@ -333,34 +406,55 @@ class TitanModelRank:
         *args: Any,
         **kwargs: Any,
     ) -> float:
+        torch.cuda.synchronize()
+        t_total_start = time.perf_counter()
+
         if isinstance(trainer_output, dict):
+            torch.cuda.synchronize()
+            t_fwd_start = time.perf_counter()
             trainer_output = self.model.forward_step(trainer_output)
+            torch.cuda.synchronize()
+            t_fwd_end = time.perf_counter()
+            if self.rank == 0:
+                print(f"[ACTOR TIMING {self.group_name}] compute_loss_and_backward forward: {(t_fwd_end - t_fwd_start)*1000:.1f}ms")
 
         device = self.model.device
 
-        def materialize(value: Any, retain_grad: bool = False) -> Any:
+        # Move tensors to device, keeping DTensors as-is (loss function will handle extraction)
+        def move_to_device(value: Any, detach: bool = True) -> Any:
             if isinstance(value, DTensor):
-                tensor = value.full_tensor().to(device)
-                if not retain_grad:
-                    tensor = tensor.detach()
-                return tensor
+                # Keep DTensor as-is, loss function will extract to local
+                return value if not detach else value.detach()
             if torch.is_tensor(value):
                 tensor = value.to(device, non_blocking=True)
-                if not retain_grad:
-                    tensor = tensor.detach()
-                return tensor
+                return tensor if not detach else tensor.detach()
             return value
 
-        trainer_output_local = materialize(trainer_output, retain_grad=True)
-        args_local = _tree_map(materialize, args)
-        kwargs_local = _tree_map(materialize, kwargs)
+        # Trainer output keeps gradients (DTensor), everything else is detached
+        trainer_output_local = move_to_device(trainer_output, detach=False)
+        args_local = tuple(move_to_device(arg, detach=True) for arg in args)
+        kwargs_local = {k: move_to_device(v, detach=True) if torch.is_tensor(v) or isinstance(v, DTensor) else v
+                       for k, v in kwargs.items()}
 
-        loss = loss_fn(trainer_output_local, *args_local, **kwargs_local)
+        # Wrap loss computation and backward in train_context to ensure proper
+        # context is active throughout forward→loss→backward chain (matching torchtitan pattern)
+        torch.cuda.synchronize()
+        t_loss_bwd_start = time.perf_counter()
+        with self.model.train_context_mgr(None):
+            loss = loss_fn(trainer_output_local, *args_local, **kwargs_local)
 
-        if not torch.is_tensor(loss) or loss.ndim != 0:
-            raise RuntimeError("loss_fn must return a scalar torch.Tensor")
+            if not torch.is_tensor(loss) or loss.ndim != 0:
+                raise RuntimeError("loss_fn must return a scalar torch.Tensor")
 
-        self.model.backward_step(loss)
+            loss.backward()
+        torch.cuda.synchronize()
+        t_loss_bwd_end = time.perf_counter()
+
+        torch.cuda.synchronize()
+        t_total_end = time.perf_counter()
+        if self.rank == 0:
+            print(f"[ACTOR TIMING {self.group_name}] loss+backward: {(t_loss_bwd_end - t_loss_bwd_start)*1000:.1f}ms, total: {(t_total_end - t_total_start)*1000:.1f}ms")
+
         return float(loss.detach().item())
 
 import asyncio
@@ -408,10 +502,21 @@ import tomli_w as toml
 def create_titan_group(config: dict, name: str, world_size: int, port: int) -> DistributedModelHandle:
     master_addr = ray.util.get_node_ip_address()
 
-    cfg = dict(config)
-    cfg.pop("trainable", None) 
+    # `trainable` is an RLVR-only flag that should not be written into the
+    # torchtitan JobConfig TOML, but it must still be propagated to the actor.
+    trainable = bool(config.get("trainable", True))
 
-    with tempfile.NamedTemporaryFile(mode="wb", suffix=".toml", delete=False) as f:
+    cfg = dict(config)
+    cfg.pop("trainable", None)
+
+    # NOTE: Ray actors may be scheduled on different nodes. Use a shared filesystem
+    # path (repo/EFS) instead of the per-node default temp dir.
+    config_dir = os.environ.get("RLVR_TITAN_CONFIG_DIR")
+    if config_dir is None:
+        config_dir = os.path.join(os.getcwd(), ".rlvr_titan_job_configs")
+    os.makedirs(config_dir, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=f".{name}.toml", delete=False, dir=config_dir) as f:
         toml.dump(cfg, f)
         config_path = f.name
 
@@ -423,6 +528,7 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
                 world_size=world_size,
                 config_path=config_path,
                 group_name=name,
+                trainable=trainable,
             )
             for r in range(world_size)
         ]
@@ -431,10 +537,12 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
         return DistributedModelHandle(actors, name=name)
 
     finally:
-        try:
-            os.remove(config_path)
-        except FileNotFoundError:
-            pass
+        keep_cfg = os.environ.get("RLVR_KEEP_TITAN_CONFIG") == "1"
+        if not keep_cfg:
+            try:
+                os.remove(config_path)
+            except FileNotFoundError:
+                pass
 
 
 

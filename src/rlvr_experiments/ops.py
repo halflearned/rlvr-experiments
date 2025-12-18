@@ -16,6 +16,9 @@ def compute_logprobs(
     When `align=True`, assumes `input_ids` contains only the target tokens (e.g., the
     completion portion) and slices the logits so that each row predicts the next token in
     `input_ids`. When `align=False`, assumes logits and input_ids are already one-to-one.
+
+    Supports DTensor inputs - when loss_parallel is enabled (disable_loss_parallel=false),
+    the cross_entropy will handle vocab-sharded logits natively without all-gathers.
     """
     scaled_logits = logits if temperature == 1.0 else logits / temperature
 
@@ -27,7 +30,7 @@ def compute_logprobs(
                 device=input_ids.device,
                 dtype=torch.float32,
             )
-        # logits[:, i] predicts token at position i+1, so drop the last position
+        # logits[:, i] predicts token at position i+1, so slice to align
         sliced_logits = scaled_logits[:, -target_len - 1 : -1, :]
     else:
         sliced_logits = scaled_logits
