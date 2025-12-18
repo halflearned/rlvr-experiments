@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence
 import asyncio
+import time
 import uuid
 import ray
 
@@ -44,11 +45,32 @@ class VLLMEngineRank:
         prompts: Sequence[str],
         **sampling_params: Optional[Dict[str, Any]],
     ):
+        t_start = time.perf_counter()
         sp = SamplingParams(**sampling_params)
         if sp.output_kind is None:
             sp.output_kind = RequestOutputKind.FINAL_ONLY
+        t_sp = time.perf_counter()
+
         tasks = [self._gen_single(p, sp.clone(), str(uuid.uuid4())) for p in prompts]
-        return await asyncio.gather(*tasks)
+        t_tasks = time.perf_counter()
+
+        results = await asyncio.gather(*tasks)
+        t_gen = time.perf_counter()
+
+        # Count total tokens generated
+        total_tokens = sum(
+            len(out.token_ids)
+            for r in results
+            for out in r.outputs
+        )
+
+        print(f"[VLLM TIMING] sp_setup: {(t_sp - t_start)*1000:.1f}ms, "
+              f"task_create: {(t_tasks - t_sp)*1000:.1f}ms, "
+              f"generation: {(t_gen - t_tasks)*1000:.1f}ms, "
+              f"total_tokens: {total_tokens}, "
+              f"n_prompts: {len(prompts)}, n_samples: {sp.n}")
+
+        return results
 
     async def _gen_single(self, prompt, sp, req_id):
         final = None
@@ -85,7 +107,11 @@ class VLLMHandle:
         self.name = name
 
     async def generate(self, prompts, **sampling_params):
-        return await self._actor.generate.remote(prompts, **sampling_params)
-    
+        t_start = time.perf_counter()
+        result = await self._actor.generate.remote(prompts, **sampling_params)
+        t_end = time.perf_counter()
+        print(f"[VLLM HANDLE TIMING] Ray round-trip: {(t_end - t_start)*1000:.1f}ms")
+        return result
+
     async def debug_effective_limits(self):
         return await self._actor.debug_effective_limits.remote()
