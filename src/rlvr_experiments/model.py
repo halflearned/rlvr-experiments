@@ -195,6 +195,20 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
     ) -> torch.Tensor:
         inputs = input_dict["input"].to(self.device)
 
+        # Pad sequence length to be divisible by TP degree to avoid losing tokens
+        # during sequence sharding with Shard(dim=1)
+        tp_degree = self.parallel_dims.tp
+        original_seq_len = inputs.size(1)
+        pad_len = 0
+        if tp_degree > 1:
+            remainder = original_seq_len % tp_degree
+            if remainder != 0:
+                pad_len = tp_degree - remainder
+                # Pad with zeros (will be ignored by attention mask)
+                inputs = torch.nn.functional.pad(inputs, (0, pad_len), value=0)
+                rank = int(os.environ.get("RANK", 0))
+                print(f"[Model Rank {rank}] Padded input from seq_len={original_seq_len} to {inputs.size(1)} (tp_degree={tp_degree})")
+
         reserved_keys = {"input", "completion_ids"}
         extra_inputs = {
             k: v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -217,18 +231,44 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         with self.train_context_mgr(None), self.maybe_enable_amp:
             logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-            # DEBUG: Check logits type and shape
+
+            # DEBUG: Check logits type, shape, AND VALUES to compare across ranks
             from torch.distributed.tensor import DTensor
             rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+            # If we padded the input, trim logits back to original sequence length
+            # to maintain correct alignment with target tokens
+            if pad_len > 0:
+                if isinstance(logits, DTensor):
+                    # For DTensor, trim on the full tensor
+                    logits = logits.full_tensor()[:, :original_seq_len, :]
+                    print(f"[Model Rank {rank}/{world_size}] Trimmed DTensor logits from padded to original_seq_len={original_seq_len}")
+                else:
+                    logits = logits[:, :original_seq_len, :]
+                    print(f"[Model Rank {rank}/{world_size}] Trimmed logits from padded to original_seq_len={original_seq_len}")
+
             if isinstance(logits, DTensor):
-                print(f"[Model Rank {rank}] logits: DTensor placements={logits.placements}, shape={logits.shape}, local_shape={logits.to_local().shape}")
+                print(f"[Model Rank {rank}/{world_size}] logits: DTensor placements={logits.placements}, shape={logits.shape}, local_shape={logits.to_local().shape}")
+                logits_local = logits.to_local()
             else:
-                print(f"[Model Rank {rank}] logits: Tensor shape={logits.shape}")
+                print(f"[Model Rank {rank}/{world_size}] logits: Tensor shape={logits.shape}")
+                logits_local = logits
+            # Print actual values at a fixed position to compare across ranks and with reference
+            if logits_local.shape[1] > 100:
+                sample_pos = 100
+            else:
+                sample_pos = logits_local.shape[1] // 2
+            print(f"[Model Rank {rank}/{world_size}] logits[0,{sample_pos},:5] = {logits_local[0, sample_pos, :5].tolist()}")
+            print(f"[Model Rank {rank}/{world_size}] logits[0,{sample_pos},-5:] = {logits_local[0, sample_pos, -5:].tolist()}")
+            # DEBUG: Show what we're passing to compute_logprobs
+            print(f"[Model Rank {rank}/{world_size}] BEFORE compute_logprobs: logits.shape={logits.shape if isinstance(logits, torch.Tensor) else logits.to_local().shape}, target_ids.shape={target_ids.shape}, align={align_targets}")
             logprobs = compute_logprobs(
                 logits,
                 input_ids=target_ids,
                 align=align_targets,
             )
+            print(f"[Model Rank {rank}/{world_size}] AFTER compute_logprobs: logprobs.shape={logprobs.shape}, logprobs[0,:5]={logprobs[0,:5].tolist()}")
 
         # TODO: possibly return a dict of outputs later
         return logprobs

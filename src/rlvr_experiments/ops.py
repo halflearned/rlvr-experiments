@@ -40,7 +40,13 @@ def compute_logprobs(
                 dtype=torch.float32,
             )
         # logits[:, i] predicts token at position i+1, so drop the last position
+        # DEBUG: Print slicing details
+        logits_seq_len = scaled_logits.size(1)
+        slice_start = logits_seq_len - target_len - 1
+        slice_end = logits_seq_len - 1
+        print(f"[compute_logprobs Rank {rank}] ALIGN: logits_seq_len={logits_seq_len}, target_len={target_len}, slice=[{slice_start}:{slice_end}]")
         sliced_logits = scaled_logits[:, -target_len - 1 : -1, :]
+        print(f"[compute_logprobs Rank {rank}] sliced_logits shape={sliced_logits.shape}, sample[0,0,:3]={sliced_logits[0,0,:3]}")
     else:
         sliced_logits = scaled_logits
 
