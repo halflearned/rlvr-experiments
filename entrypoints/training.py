@@ -52,17 +52,15 @@ async def continuous_rollout_producer(
     verifier,
     sampling_params: dict,
     version: int,
-    stop_event: asyncio.Event,
 ) -> None:
     """
     Continuously generates rollouts and pushes them to the buffer.
-    Checks stop_event before each batch and exits when set.
+    Automatically stops when sync_titan_to_vllm is called.
     """
     set_current_task_name("rollout")
 
     while True:
-        # Check stop signal before starting a new batch
-        if stop_event.is_set():
+        if rollout.is_stopped():
             print("[ROLLOUT PRODUCER] Stop signal received, exiting.")
             break
 
@@ -159,11 +157,7 @@ async def main() -> None:
     reference = runtime.roles["reference"]
     rollout = runtime.roles["rollout"]
     buffer = runtime.buffer
-
-    # Ensure the reference starts identical to the trainer checkpoint.
-    await sync_titan_to_titan(trainer, reference)
-    print("Synchronized trainer weights to reference model (startup).")
-
+    
     loss_fn = GRPOLoss(beta=0.1, eps=0.2)
     verifier = MathVerifier()
     avg_rewards = []
@@ -196,9 +190,8 @@ async def main() -> None:
         print("=" * 60)
 
         current_version = epoch  # Version tracks weight version
-        stop_event = asyncio.Event()
 
-        rollout_task = asyncio.create_task(
+        rollout.start_producer(
             continuous_rollout_producer(
                 rollout=rollout,
                 buffer=buffer,
@@ -208,7 +201,6 @@ async def main() -> None:
                 verifier=verifier,
                 sampling_params=sampling_params,
                 version=current_version,
-                stop_event=stop_event,
             )
         )
         print(f"[MAIN] Started continuous rollout producer (version={current_version})")
@@ -234,13 +226,8 @@ async def main() -> None:
             if result is not None:
                 trained_iterations += 1
 
-        # Signal rollout producer to stop and wait for it to finish
-        print("\n[MAIN] Signaling rollout producer to stop...")
-        stop_event.set()
-        await rollout_task
-        print("[MAIN] Rollout producer stopped.")
-
         # Sync weights: trainer -> rollout (vLLM)
+        # This automatically stops the rollout producer, syncs, then resumes
         await sync_titan_to_vllm(trainer, rollout)
         print("[MAIN] Synced trainer -> rollout vLLM")
 

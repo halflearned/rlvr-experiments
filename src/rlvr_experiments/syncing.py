@@ -82,6 +82,14 @@ async def sync_titan_to_vllm(
     src_rank: int = 0,
     wire_dtype: str = "bfloat16",
 ) -> None:
+    """
+    Sync weights from trainer to vLLM.
+
+    Automatically stops any rollout producers (via vllm.stop()), syncs weights,
+    then resumes (via vllm.resume()) so new producers can run.
+    """
+    await vllm.stop()
+
     if channel is None:
         channel = _infer_channel_name(trainer.name, vllm.name)
 
@@ -101,6 +109,8 @@ async def sync_titan_to_vllm(
             f"(channel={channel}, chunk_mb={chunk_mb}, dtype={wire_dtype})"
         ),
     )
+
+    vllm.resume()
 
 
 @traced("sync.trainer_to_reference")
