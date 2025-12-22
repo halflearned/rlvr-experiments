@@ -92,20 +92,48 @@ class VLLMEngineRank:
     def ready(self) -> bool:
         return True
 
-    def debug_effective_limits(self):
-        cfg = self.engine.vllm_config
-        return {
-            "max_num_seqs_effective": cfg.scheduler_config.max_num_seqs,
-            "max_num_batched_tokens_effective": cfg.scheduler_config.max_num_batched_tokens,
-            "gpu_memory_utilization": cfg.cache_config.gpu_memory_utilization,
-            "max_model_len": cfg.model_config.max_model_len,
-        }
-
 
 class VLLMHandle:
     def __init__(self, actor, name: str = "vllm"):
         self._actor = actor
         self.name = name
+        self._stop_event = asyncio.Event()
+        self._active_task: asyncio.Task | None = None
+
+    def is_stopped(self) -> bool:
+        """Check if the stop signal has been set."""
+        return self._stop_event.is_set()
+
+    def start_producer(self, producer_coro) -> asyncio.Task:
+        """
+        Start a rollout producer coroutine and track it internally.
+        The producer will be automatically stopped when sync_titan_to_vllm is called.
+
+        Args:
+            producer_coro: A coroutine object that produces rollouts.
+                           Should check is_stopped() to know when to exit.
+
+        Returns:
+            The created asyncio.Task (now running in background)
+        """
+        self._active_task = asyncio.create_task(producer_coro)
+        return self._active_task
+
+    async def stop(self) -> None:
+        """
+        Signal rollout producers to stop and wait for them to finish.
+        Call this before syncing weights.
+        """
+        self._stop_event.set()
+        if self._active_task is not None:
+            print("[VLLM] Waiting for rollout producer to stop...")
+            await self._active_task
+            self._active_task = None
+            print("[VLLM] Rollout producer stopped.")
+
+    def resume(self) -> None:
+        """Reset the stop event so new rollout producers can run."""
+        self._stop_event.clear()
 
     @traced("vllm.generate")
     async def generate(self, prompts, **sampling_params):
@@ -114,6 +142,3 @@ class VLLMHandle:
         t_end = time.perf_counter()
         print(f"[VLLM HANDLE TIMING] Ray round-trip: {(t_end - t_start)*1000:.1f}ms")
         return result
-
-    async def debug_effective_limits(self):
-        return await self._actor.debug_effective_limits.remote()
