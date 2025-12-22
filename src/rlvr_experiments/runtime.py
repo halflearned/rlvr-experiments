@@ -11,6 +11,7 @@ import ray
 from .config_plan import Plan, load_plan
 from .titan_actor import create_titan_group
 from .vllm_engine_actor import VLLMEngineRank, VLLMHandle
+from .rollout_buffer import RolloutBuffer
 
 
 def _stable_hash_u32(s: str) -> int:
@@ -30,6 +31,7 @@ class Runtime:
     titan_ports: Dict[str, int]         # titan role rendezvous ports
     channel_ports: Dict[str, int]       # channel_name -> sync port
     namespace: int
+    buffer: Any
 
     @classmethod
     async def from_plan(cls, plan_path: str) -> "Runtime":
@@ -53,6 +55,9 @@ class Runtime:
         for cn in sorted(channel_ports):
             print(f"[runtime] sync channel port channel={cn} port={channel_ports[cn]}")
 
+        # TODO: Change load_plan to load rollout buffer args, if any
+        buffer = RolloutBuffer(maxsize=0, max_reads=1)
+
         return cls(
             plan=plan,
             host=host,
@@ -60,6 +65,7 @@ class Runtime:
             titan_ports=titan_ports,
             channel_ports=channel_ports,
             namespace=namespace,
+            buffer=buffer,
         )
 
     async def start(self, wire=True) -> "Runtime":

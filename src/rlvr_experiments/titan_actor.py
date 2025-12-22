@@ -10,6 +10,7 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 from .weight_sync import WeightSyncManager
 from .syncing import ChunkMeta, ParamMeta
 from .ops import compute_logprobs
+from .tracer import traced
 
 import logging
 
@@ -466,6 +467,37 @@ class DistributedModelHandle:
         self.actors = actors
         self.name = name
 
+    async def _call_all(self, attr, *args, **kwargs):
+        kwargs.pop("tracer", None)
+        results = await asyncio.gather(
+            *[self.resolve(a.call_method.remote(attr, *args, **kwargs)) for a in self.actors]
+        )
+        return results[0]
+
+    @traced("reference.compute_logprobs")
+    async def compute_logprobs_step(self, input_dict: dict, completion_ids: torch.Tensor):
+        return await self._call_all("compute_logprobs_step", input_dict, completion_ids)
+
+    @traced("trainer.forward_backward")
+    async def compute_loss_and_backward_step(
+        self,
+        loss_fn: Callable[..., torch.Tensor],
+        trainer_output: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> float:
+        return await self._call_all(
+            "compute_loss_and_backward_step",
+            loss_fn,
+            trainer_output,
+            *args,
+            **kwargs,
+        )
+
+    @traced("trainer.optimizer_step")
+    async def optimizer_step(self):
+        return await self._call_all("optimizer_step")
+
     def __getattr__(self, attr):
         if attr.startswith("_"):
             raise AttributeError(attr)
@@ -473,6 +505,7 @@ class DistributedModelHandle:
             return ray.get(self.actors[0].get_attr.remote(attr))
 
         async def proxy(*args, **kwargs):
+            kwargs.pop("tracer", None)
             results = await asyncio.gather(
                 *[self.resolve(a.call_method.remote(attr, *args, **kwargs)) for a in self.actors]
             )

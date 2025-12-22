@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from .tracer import traced
 
 @dataclass
 class ParamMeta:
@@ -72,6 +73,7 @@ def _infer_channel_name(src_name: str, dst_name: str) -> str:
     return f"{src_name}_to_{dst_name}"
 
 
+@traced("sync.trainer_to_vllm")
 async def sync_titan_to_vllm(
     trainer: "DistributedModelHandle",
     vllm,
@@ -101,6 +103,7 @@ async def sync_titan_to_vllm(
     )
 
 
+@traced("sync.trainer_to_reference")
 async def sync_titan_to_titan(
     src: "DistributedModelHandle",
     dst: "DistributedModelHandle",

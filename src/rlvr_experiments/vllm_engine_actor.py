@@ -11,6 +11,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
+from .tracer import traced
 
 # Hardcode these for now as discussed.
 WORKER_CLS = "rlvr_experiments.vllm_worker.WeightSyncVLLMWorker"
@@ -106,6 +107,7 @@ class VLLMHandle:
         self._actor = actor
         self.name = name
 
+    @traced("vllm.generate")
     async def generate(self, prompts, **sampling_params):
         t_start = time.perf_counter()
         result = await self._actor.generate.remote(prompts, **sampling_params)
