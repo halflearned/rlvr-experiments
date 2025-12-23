@@ -36,24 +36,24 @@ class MathVerifier:
     def parse_number(self, answer_str: str) -> float:
         """Parse a string that might be a number, fraction, or LaTeX fraction."""
         answer_str = answer_str.strip()
-        
+
         # Handle latex like \frac{a}{b} or \dfrac{a}{b}
         frac_match = re.match(r"\\d?frac\{([^}]+)\}\{([^}]+)\}", answer_str)
         if frac_match:
             num = self.parse_number(frac_match.group(1))
             denom = self.parse_number(frac_match.group(2))
             return num / denom
-        
+
         # Handle simple fractions like "1/3"
         if '/' in answer_str:
             num, denom = answer_str.split('/')
-            return float(num) / float(denom)
-        
-        # Handle plain numbers
-        return float(answer_str)
+            return float(num.replace(",", "")) / float(denom.replace(",", ""))
+
+        # Handle plain numbers (remove commas for numbers like "27,000")
+        return float(answer_str.replace(",", ""))
 
     def verify(self, response: str, target: str) -> float:
-        target_number = float(target)
+        target_number = float(target.replace(",", ""))  # TODO: handle better
         answer_span = self._extract_answer_span(response)
         if answer_span is None:
             return 0.0

@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import torch
 
+from rlvr_experiments.data import DataIterator, load_gsm8k
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import (
@@ -34,62 +35,69 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def apply_template(prompt: str, tokenizer, tokenize=False) -> str:
-    return tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        tokenize=tokenize,
-        enable_thinking=False,
-        add_generation_prompt=True,
-    )
-
-
 async def continuous_rollout_producer(
     rollout,
     buffer,
+    data_iter: DataIterator,
     tokenizer,
-    templates: list[str],
-    problem_answers: list[str],
     verifier,
     sampling_params: dict,
     version: int,
 ) -> None:
     """
     Continuously generates rollouts and pushes them to the buffer.
-    Automatically stops when sync_titan_to_vllm is called.
+    Automatically stops when sync_titan_to_vllm is called or data is exhausted.
     """
     set_current_task_name("rollout")
+    print(f"[ROLLOUT PRODUCER] Starting (version={version})")
 
-    while True:
-        if rollout.is_stopped():
-            print("[ROLLOUT PRODUCER] Stop signal received, exiting.")
-            break
+    try:
+        while True:
+            if rollout.is_stopped():
+                print("[ROLLOUT PRODUCER] Stop signal received, exiting.")
+                break
 
-        responses = await rollout.generate(templates, **sampling_params)
-        response = responses[0]
-        print(f"[ROLLOUT PRODUCER] generated: {response.outputs[0].text[:100]}...")
+            batch = await data_iter.next_batch()
+            if batch is None:
+                print("[ROLLOUT PRODUCER] Data exhausted, exiting.")
+                break
 
-        # Parse vLLM output
-        vllm_output = VLLMOutput(response)
-        full_input_ids, completion_ids, completion_mask, completion_logprobs = vllm_output.get_tensors(tokenizer)
+            templates = batch["templates"]
+            answers = batch["answers"]
 
-        # Compute rewards
-        rewards = verifier.verify_batch(
-            responses=vllm_output.completion_texts(),
-            targets=problem_answers * len(response.outputs),
-            return_dtype=torch.float32,
-        )
-        print(f"[ROLLOUT PRODUCER] rewards: mean={rewards.mean().item():.3f}")
+            responses = await rollout.generate(templates, **sampling_params)
 
-        # Store as a plain dict
-        entry = {
-            "full_input_ids": full_input_ids,
-            "completion_ids": completion_ids,
-            "completion_mask": completion_mask,
-            "completion_logprobs": completion_logprobs,
-            "rewards": rewards,
-        }
-        await buffer.put(entry, version)
-        print(f"[ROLLOUT PRODUCER] pushed entry to buffer (size={buffer.size()})")
+            # Process each prompt's responses
+            for i, response in enumerate(responses):
+                print(f"[ROLLOUT PRODUCER] generated: {response.outputs[0].text[:100]}...")
+
+                # Parse vLLM output
+                vllm_output = VLLMOutput(response)
+                full_input_ids, completion_ids, completion_mask, completion_logprobs = vllm_output.get_tensors(tokenizer)
+
+                # Compute rewards - each prompt has n completions, all share the same answer
+                rewards = verifier.verify_batch(
+                    responses=vllm_output.completion_texts(),
+                    targets=[answers[i]] * len(response.outputs),
+                    return_dtype=torch.float32,
+                )
+                print(f"[ROLLOUT PRODUCER] rewards: mean={rewards.mean().item():.3f}")
+
+                # Store as a plain dict
+                entry = {
+                    "full_input_ids": full_input_ids,
+                    "completion_ids": completion_ids,
+                    "completion_mask": completion_mask,
+                    "completion_logprobs": completion_logprobs,
+                    "rewards": rewards,
+                }
+                await buffer.put(entry, version)
+                print(f"[ROLLOUT PRODUCER] pushed entry to buffer (size={buffer.size()})")
+    except Exception as e:
+        print(f"[ROLLOUT PRODUCER] ERROR: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 
@@ -164,13 +172,10 @@ async def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", use_fast=False)
     system_prompt = r"Answer this math question with a number within \\boxed{}. "
-    problem_prompts = [
-        "Simplify the expression  ((7/12) + (5/18)) / (31/36)"
-    ]
-    problem_answers = [
-        "1",
-    ]
-    templates = [apply_template(system_prompt + p + "?", tokenizer) for p in problem_prompts]
+
+    # Load dataset
+    ds = load_gsm8k(split="train")
+    data_iter = DataIterator(ds, batch_size=8, tokenizer=tokenizer, system_prompt=system_prompt)
 
     sampling_params = dict(temperature=0.6, top_p=0.95, top_k=20, max_tokens=512, logprobs=0, n=20)
 
@@ -190,14 +195,14 @@ async def main() -> None:
         print("=" * 60)
 
         current_version = epoch  # Version tracks weight version
+        data_iter.new_epoch(seed=epoch)
 
         rollout.start_producer(
             continuous_rollout_producer(
                 rollout=rollout,
                 buffer=buffer,
+                data_iter=data_iter,
                 tokenizer=tokenizer,
-                templates=templates,
-                problem_answers=problem_answers,
                 verifier=verifier,
                 sampling_params=sampling_params,
                 version=current_version,
