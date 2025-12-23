@@ -3,7 +3,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .tracer import traced
+from .tracer import traced, trace_span
 
 @dataclass
 class ParamMeta:
@@ -88,7 +88,8 @@ async def sync_titan_to_vllm(
     Automatically stops any rollout producers (via vllm.stop()), syncs weights,
     then resumes (via vllm.resume()) so new producers can run.
     """
-    await vllm.stop()
+    with trace_span(None, "sync.stop_producer"):
+        await vllm.stop()
 
     if channel is None:
         channel = _infer_channel_name(trainer.name, vllm.name)
@@ -97,18 +98,19 @@ async def sync_titan_to_vllm(
         # Engine actor should forward to collective_rpc on workers
         return await vllm._actor.recv_chunk.remote(chunk, wire_dtype, src_rank)
 
-    await _sync_chunks(
-        src=trainer,
-        channel=channel,
-        chunk_mb=chunk_mb,
-        dtype_str=wire_dtype,
-        src_rank=src_rank,
-        receiver_per_chunk=recv,
-        label=(
-            f"CHUNKED: {trainer.name} -> {vllm.name} "
-            f"(channel={channel}, chunk_mb={chunk_mb}, dtype={wire_dtype})"
-        ),
-    )
+    with trace_span(None, "sync.nccl_sync"):
+        await _sync_chunks(
+            src=trainer,
+            channel=channel,
+            chunk_mb=chunk_mb,
+            dtype_str=wire_dtype,
+            src_rank=src_rank,
+            receiver_per_chunk=recv,
+            label=(
+                f"CHUNKED: {trainer.name} -> {vllm.name} "
+                f"(channel={channel}, chunk_mb={chunk_mb}, dtype={wire_dtype})"
+            ),
+        )
 
     vllm.resume()
 

@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import torch
 
-from rlvr_experiments.data import DataIterator, load_gsm8k
+from rlvr_experiments.data import DataIterator, load_gsm8k, load_dummy
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import (
@@ -59,11 +59,21 @@ async def continuous_rollout_producer(
                 vllm_output.get_tensors(tokenizer)
             )
 
+            print("Example rollout:")
+            print(vllm_output.completion_texts()[0])
+
             rewards = verifier.verify_batch(
                 responses=vllm_output.completion_texts(),
                 targets=[answers[i]] * len(response.outputs),
                 return_dtype=torch.float32,
             )
+
+            if tracer := get_tracer():
+                gen_lengths = [len(out.token_ids) for out in response.outputs]
+                tracer.counter("rollout", {
+                    "avg_reward": rewards.mean().item(),
+                    "avg_gen_length": sum(gen_lengths) / len(gen_lengths),
+                })
 
             entry = {
                 "full_input_ids": full_input_ids,
@@ -90,6 +100,7 @@ async def train_step(
     # Skip if all rewards are identical (no gradient signal)
     # TODO: do something better / more elegant here, or at least move it out?
     if torch.allclose(rewards, rewards[0]):
+        print(f"All rewards are equal to {rewards[0]}, skipping!")
         return None
 
     input_dict = {"input": entry["full_input_ids"]}
@@ -139,13 +150,14 @@ async def main() -> None:
     loss_fn = GRPOLoss(**plan.loss)
     verifier = MathVerifier()
 
-    ds = load_gsm8k(**plan.data)
+    #ds = load_gsm8k(**plan.data)
+    ds = load_dummy(**plan.data)
     data_iter = DataIterator(ds, tokenizer=tokenizer, **plan.data_iter)
 
     sampling_params = {**plan.sampling, "logprobs": 0}
 
     num_epochs = plan.training["num_epochs"]
-    iterations_per_epoch = plan.training.get("iterations_per_epoch")  # None = full epoch
+    iterations_per_epoch = plan.training.get("iterations_per_epoch")
     sync_reference_every = plan.training["sync_reference_every"]
 
     # Training loop

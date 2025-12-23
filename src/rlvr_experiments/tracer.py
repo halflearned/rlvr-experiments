@@ -5,6 +5,7 @@ import atexit
 import inspect
 import json
 import os
+import signal
 import threading
 import time
 from contextlib import contextmanager, nullcontext
@@ -21,6 +22,7 @@ class TraceRecorder:
         self._task_tids: dict[asyncio.Task, int] = {}
         self._next_tid = 1
         self._file: Optional[Any] = None
+        self._start_ns = time.perf_counter_ns()  # baseline for relative timestamps
         self._open_file()
 
     def _open_file(self) -> None:
@@ -30,7 +32,7 @@ class TraceRecorder:
         self._file = open(self.path, "w")
 
     def _now_us(self) -> float:
-        return time.perf_counter_ns() / 1000.0
+        return (time.perf_counter_ns() - self._start_ns) / 1000.0
 
     def _get_tid(self) -> int:
         if self._use_task_ids:
@@ -121,6 +123,26 @@ class TraceRecorder:
             if self._file is not None:
                 self._file.close()
                 self._file = None
+                # Write a second file in Chrome format for viewing
+                self._write_chrome_format()
+
+    def _write_chrome_format(self) -> None:
+        """Write a Chrome-format copy for Perfetto/chrome://tracing."""
+        try:
+            events = []
+            with open(self.path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        events.append(json.loads(line))
+            # Write to .perfetto.json alongside the original
+            root, ext = os.path.splitext(self.path)
+            chrome_path = f"{root}.perfetto{ext}"
+            with open(chrome_path, "w") as f:
+                json.dump({"traceEvents": events}, f)
+            print(f"[tracer] Wrote viewable trace to {chrome_path}")
+        except Exception as e:
+            print(f"[tracer] Warning: failed to write Chrome format: {e}")
 
 
 _TRACE_ENV = "RLVR_TRACE_PATH"
@@ -137,12 +159,22 @@ def _path_with_pid(path: str) -> str:
     return f"{root}.{os.getpid()}{ext}"
 
 
+def _signal_handler(signum, frame):
+    """Handle SIGINT/SIGTERM to ensure trace is written."""
+    close_tracer()
+    # Re-raise to allow normal termination
+    signal.default_int_handler(signum, frame)
+
+
 def init_global_tracer(path: str) -> Optional[TraceRecorder]:
     global _GLOBAL_TRACER
     if not path:
         return None
     _GLOBAL_TRACER = TraceRecorder(path)
     atexit.register(_GLOBAL_TRACER.close)
+    # Also handle Ctrl+C and termination signals
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
     return _GLOBAL_TRACER
 
 
