@@ -498,6 +498,14 @@ class DistributedModelHandle:
     async def optimizer_step(self):
         return await self._call_all("optimizer_step")
 
+    @traced("trainer.save_checkpoint")
+    async def save_checkpoint(self, step: int | None = None, last_step: bool = False):
+        return await self._call_all("save_checkpoint", step=step, last_step=last_step)
+
+    @traced("trainer.export_to_hf")
+    async def export_to_hf(self, output_path: str):
+        return await self._call_all("export_to_hf", output_path=output_path)
+
     def __getattr__(self, attr):
         if attr.startswith("_"):
             raise AttributeError(attr)

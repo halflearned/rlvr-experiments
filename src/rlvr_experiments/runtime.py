@@ -55,8 +55,7 @@ class Runtime:
         for cn in sorted(channel_ports):
             print(f"[runtime] sync channel port channel={cn} port={channel_ports[cn]}")
 
-        # TODO: Change load_plan to load rollout buffer args, if any
-        buffer = RolloutBuffer(maxsize=0, max_reads=1)
+        buffer = RolloutBuffer(**plan.buffer)
 
         return cls(
             plan=plan,

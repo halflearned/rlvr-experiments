@@ -137,8 +137,4 @@ class VLLMHandle:
 
     @traced("vllm.generate")
     async def generate(self, prompts, **sampling_params):
-        t_start = time.perf_counter()
-        result = await self._actor.generate.remote(prompts, **sampling_params)
-        t_end = time.perf_counter()
-        print(f"[VLLM HANDLE TIMING] Ray round-trip: {(t_end - t_start)*1000:.1f}ms")
-        return result
+        return await self._actor.generate.remote(prompts, **sampling_params)

@@ -27,9 +27,17 @@ class ChannelPlan:
 class Plan:
     run: Dict[str, Any]
     model: Dict[str, Any]
+    tokenizer: Dict[str, Any]
+    training: Dict[str, Any]
+    loss: Dict[str, Any]
+    data: Dict[str, Any]
+    data_iter: Dict[str, Any]
+    sampling: Dict[str, Any]
     roles: Dict[str, RolePlan]
     channels: Dict[Tuple[str, str], ChannelPlan]  # (src, dst) -> plan
     chunk_mb: int
+    buffer: Dict[str, Any]
+    trace_path: str | None
 
     def channel(self, src: str, dst: str) -> ChannelPlan:
         return self.channels[(src, dst)]
@@ -40,10 +48,18 @@ def load_plan(path: str) -> Plan:
 
     run = y["run"]
     model = dict(y.get("model", {}))
+    tokenizer = dict(y.get("tokenizer", {}))
+    training = dict(y.get("training", {}))
+    loss = dict(y.get("loss", {}))
+    data = dict(y.get("data", {}))
+    data_iter = dict(y.get("data_iter", {}))
+    sampling = dict(y.get("sampling", {}))
     roles_in = y["roles"]                 # required
     sync_in = dict(y.get("sync", {}))
     wiring = sync_in["wiring"]            # required
     chunk_mb = int(sync_in.get("chunk_mb", 100))
+    buffer = dict(y.get("buffer", {}))
+    trace_path = run.get("trace_path", None)
 
     def titan_world_size(cfg: Dict[str, Any]) -> int:
         p = cfg.get("parallelism", {})
@@ -111,5 +127,19 @@ def load_plan(path: str) -> Plan:
             src_rank=src_rank,
         )
 
-    return Plan(run=run, model=model, roles=roles, channels=channels, chunk_mb=chunk_mb)
+    return Plan(
+        run=run,
+        model=model,
+        tokenizer=tokenizer,
+        training=training,
+        loss=loss,
+        data=data,
+        data_iter=data_iter,
+        sampling=sampling,
+        roles=roles,
+        channels=channels,
+        chunk_mb=chunk_mb,
+        buffer=buffer,
+        trace_path=trace_path,
+    )
 

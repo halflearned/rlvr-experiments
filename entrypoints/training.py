@@ -6,7 +6,7 @@ from rlvr_experiments.data import DataIterator, load_gsm8k
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import (
-    dump_traces,
+    close_tracer,
     get_tracer,
     init_global_tracer,
     set_current_task_name,
@@ -20,18 +20,8 @@ from transformers import AutoTokenizer
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="RLVR Experiments Entrypoint")
-    p.add_argument(
-        "config",
-        type=str,
-        help="Path to the YAML configuration file.",
-    )
-    p.add_argument(
-        "--trace",
-        type=str,
-        default=None,
-        help="Override RLVR_TRACE_PATH with this output file.",
-    )
+    p = argparse.ArgumentParser(description="RLVR Training")
+    p.add_argument("config", type=str, help="Path to the YAML config file.")
     return p.parse_args()
 
 
@@ -46,78 +36,60 @@ async def continuous_rollout_producer(
 ) -> None:
     """
     Continuously generates rollouts and pushes them to the buffer.
-    Automatically stops when sync_titan_to_vllm is called or data is exhausted.
+    Stops when sync_titan_to_vllm is called or data is exhausted.
     """
     set_current_task_name("rollout")
-    print(f"[ROLLOUT PRODUCER] Starting (version={version})")
 
-    try:
-        while True:
-            if rollout.is_stopped():
-                print("[ROLLOUT PRODUCER] Stop signal received, exiting.")
-                break
+    while True:
+        if rollout.is_stopped():
+            break
 
-            batch = await data_iter.next_batch()
-            if batch is None:
-                print("[ROLLOUT PRODUCER] Data exhausted, exiting.")
-                break
+        batch = await data_iter.next_batch()
+        if batch is None:
+            break
 
-            templates = batch["templates"]
-            answers = batch["answers"]
+        templates = batch["templates"]
+        answers = batch["answers"]
 
-            responses = await rollout.generate(templates, **sampling_params)
+        responses = await rollout.generate(templates, **sampling_params)
 
-            # Process each prompt's responses
-            for i, response in enumerate(responses):
-                print(f"[ROLLOUT PRODUCER] generated: {response.outputs[0].text[:100]}...")
+        for i, response in enumerate(responses):
+            vllm_output = VLLMOutput(response)
+            full_input_ids, completion_ids, completion_mask, completion_logprobs = (
+                vllm_output.get_tensors(tokenizer)
+            )
 
-                # Parse vLLM output
-                vllm_output = VLLMOutput(response)
-                full_input_ids, completion_ids, completion_mask, completion_logprobs = vllm_output.get_tensors(tokenizer)
+            rewards = verifier.verify_batch(
+                responses=vllm_output.completion_texts(),
+                targets=[answers[i]] * len(response.outputs),
+                return_dtype=torch.float32,
+            )
 
-                # Compute rewards - each prompt has n completions, all share the same answer
-                rewards = verifier.verify_batch(
-                    responses=vllm_output.completion_texts(),
-                    targets=[answers[i]] * len(response.outputs),
-                    return_dtype=torch.float32,
-                )
-                print(f"[ROLLOUT PRODUCER] rewards: mean={rewards.mean().item():.3f}")
-
-                # Store as a plain dict
-                entry = {
-                    "full_input_ids": full_input_ids,
-                    "completion_ids": completion_ids,
-                    "completion_mask": completion_mask,
-                    "completion_logprobs": completion_logprobs,
-                    "rewards": rewards,
-                }
-                await buffer.put(entry, version)
-                print(f"[ROLLOUT PRODUCER] pushed entry to buffer (size={buffer.size()})")
-    except Exception as e:
-        print(f"[ROLLOUT PRODUCER] ERROR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-
-
-
+            entry = {
+                "full_input_ids": full_input_ids,
+                "completion_ids": completion_ids,
+                "completion_mask": completion_mask,
+                "completion_logprobs": completion_logprobs,
+                "rewards": rewards,
+            }
+            await buffer.put(entry, version)
 
 
 @traced()
-async def train_on_rollout(
+async def train_step(
     entry: dict,
     trainer,
     reference,
     loss_fn,
 ) -> tuple[float, float] | None:
     """
-    Train on a single rollout entry (dict). Returns (loss, grad_norm) or None if skipped.
+    Train on a single rollout entry. Returns (loss, grad_norm) or None if skipped.
     """
     rewards = entry["rewards"]
 
     # Skip if all rewards are identical (no gradient signal)
+    # TODO: do something better / more elegant here, or at least move it out?
     if torch.allclose(rewards, rewards[0]):
-        print("[TRAINER] All rewards identical, skipping batch.")
         return None
 
     input_dict = {"input": entry["full_input_ids"]}
@@ -125,13 +97,11 @@ async def train_on_rollout(
     completion_logprobs = entry["completion_logprobs"]
     completion_mask = entry["completion_mask"]
 
-    # Get logprobs from reference model
     reference_logprobs = await reference.compute_logprobs_step(
         input_dict,
         completion_ids,
     )
 
-    # Compute loss and backward
     loss = await trainer.compute_loss_and_backward_step(
         loss_fn,
         input_dict,
@@ -141,63 +111,48 @@ async def train_on_rollout(
         rewards,
         padding_mask=completion_mask,
     )
-    print(f"[TRAINER] loss={loss:.4f}")
 
-    # Optimizer step
     grad_norm = await trainer.optimizer_step()
-    print(f"[TRAINER] grad_norm={grad_norm:.6f}")
 
     return loss, grad_norm
 
 
 async def main() -> None:
     args = parse_args()
+    runtime = await Runtime.from_plan(args.config)
+    plan = runtime.plan
 
-    if args.trace:
-        init_global_tracer(args.trace)
+    if plan.trace_path:
+        init_global_tracer(plan.trace_path)
     set_current_task_name("main")
 
-    runtime = await Runtime.from_plan(args.config)
     await runtime.start()
 
-    # Get roles
+    # Roles
     trainer = runtime.roles["trainer"]
     reference = runtime.roles["reference"]
     rollout = runtime.roles["rollout"]
     buffer = runtime.buffer
-    
-    loss_fn = GRPOLoss(beta=0.1, eps=0.2)
+
+    # Config
+    tokenizer = AutoTokenizer.from_pretrained(**plan.tokenizer)
+    loss_fn = GRPOLoss(**plan.loss)
     verifier = MathVerifier()
-    avg_rewards = []
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", use_fast=False)
-    system_prompt = r"Answer this math question with a number within \\boxed{}. "
+    ds = load_gsm8k(**plan.data)
+    data_iter = DataIterator(ds, tokenizer=tokenizer, **plan.data_iter)
 
-    # Load dataset
-    ds = load_gsm8k(split="train")
-    data_iter = DataIterator(ds, batch_size=8, tokenizer=tokenizer, system_prompt=system_prompt)
+    sampling_params = {**plan.sampling, "logprobs": 0}
 
-    sampling_params = dict(temperature=0.6, top_p=0.95, top_k=20, max_tokens=512, logprobs=0, n=20)
+    num_epochs = plan.training["num_epochs"]
+    iterations_per_epoch = plan.training.get("iterations_per_epoch")  # None = full epoch
+    sync_reference_every = plan.training["sync_reference_every"]
 
-    with open("reward_log.txt", "w") as f:
-        f.write("")
-
-    # Training configuration
-    num_epochs = 3  # Number of weight sync cycles
-    iterations_per_epoch = 3  # Training iterations before syncing weights
-    sync_reference_every = 1  # Sync reference model every N epochs
-
-    global_iteration = 0
-
+    # Training loop
     for epoch in range(num_epochs):
-        print("\n\n" + "=" * 60)
-        print(f" EPOCH {epoch + 1}/{num_epochs} ")
-        print("=" * 60)
-
-        current_version = epoch  # Version tracks weight version
         data_iter.new_epoch(seed=epoch)
 
-        rollout.start_producer(
+        producer_task = rollout.start_producer(
             continuous_rollout_producer(
                 rollout=rollout,
                 buffer=buffer,
@@ -205,56 +160,34 @@ async def main() -> None:
                 tokenizer=tokenizer,
                 verifier=verifier,
                 sampling_params=sampling_params,
-                version=current_version,
+                version=epoch,
             )
         )
-        print(f"[MAIN] Started continuous rollout producer (version={current_version})")
 
-        # Train for n iterations
-        trained_iterations = 0
-        while trained_iterations < iterations_per_epoch:
-            global_iteration += 1
-            print(f"\n{'*' * 20} ITERATION {global_iteration} (epoch {epoch+1}, iter {trained_iterations+1}/{iterations_per_epoch}) {'*' * 20}")
+        trained = 0
+        while iterations_per_epoch is None or trained < iterations_per_epoch:
+            # Check if producer finished (data exhausted)
+            if producer_task.done():
+                # Drain remaining buffer entries
+                if buffer.size() == 0:
+                    break
 
-            # Pop from buffer (blocks until available)
-            entry = await buffer.pop(min_version=current_version)
-            rewards_mean = entry["rewards"].mean().item()
-            print(f"[TRAINER] Got rollout from buffer (rewards_mean={rewards_mean:.3f})")
-
-            avg_rewards.append(rewards_mean)
-            with open("reward_log.txt", "a") as f:
-                f.write(f"{rewards_mean}\n")
-
-            # Train on this entry
-            result = await train_on_rollout(entry, trainer, reference, loss_fn)
-
+            entry = await buffer.pop(min_version=epoch)
+            result = await train_step(entry, trainer, reference, loss_fn)
             if result is not None:
-                trained_iterations += 1
+                trained += 1
 
-        # Sync weights: trainer -> rollout (vLLM)
-        # This automatically stops the rollout producer, syncs, then resumes
         await sync_titan_to_vllm(trainer, rollout)
-        print("[MAIN] Synced trainer -> rollout vLLM")
 
-        # Periodically sync trainer -> reference
         if (epoch + 1) % sync_reference_every == 0:
             await sync_titan_to_titan(trainer, reference)
-            print("[MAIN] Synced trainer -> reference")
 
-        print(f"[MAIN] avg rewards so far: {avg_rewards[-10:]}")  # Last 10
+        # Export trained model in HuggingFace format
+        if True:  # TODO: save or not
+            await trainer.export_to_hf(f"outputs/{plan.run['name']}")
 
-    print("\n" + "=" * 60)
-    print(" TRAINING COMPLETE ")
-    print("=" * 60)
-    print(f"Total iterations: {global_iteration}")
-    print(f"Final avg reward (last 10): {sum(avg_rewards[-10:])/min(10, len(avg_rewards)):.3f}")
-
-    tracer = get_tracer()
-    if tracer is not None:
-        dump_traces()
-        print(f"[TRACE] wrote {tracer.path}")
-
-    
+    if get_tracer():
+        close_tracer()
 
 
 if __name__ == "__main__":

@@ -304,4 +304,44 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         if self.checkpointer:
             self.checkpointer.close()
 
-   
+    def export_to_hf(self, output_path: str) -> None:
+        """
+        Export the model to HuggingFace format.
+
+        Only rank 0 writes; all ranks must call this (collective for DTensors).
+        Copies tokenizer/config from the original HF assets path.
+        """
+        from torch.distributed.tensor import DTensor
+        import shutil
+
+        hf_sd = self.hf_state_dict()
+
+        # Materialize DTensors to full tensors (collective operation)
+        materialized = {}
+        for k, v in hf_sd.items():
+            if isinstance(v, DTensor):
+                materialized[k] = v.full_tensor().cpu()
+            else:
+                materialized[k] = v.cpu() if torch.is_tensor(v) else v
+
+        # Only rank 0 writes
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            os.makedirs(output_path, exist_ok=True)
+
+            # Save model weights using safetensors
+            from safetensors.torch import save_file
+            save_file(materialized, os.path.join(output_path, "model.safetensors"))
+
+            # Copy tokenizer and config from original HF assets
+            hf_assets = self.job_config.model.hf_assets_path
+            if hf_assets and os.path.isdir(hf_assets):
+                for fname in os.listdir(hf_assets):
+                    if fname.endswith((".json", ".txt", ".model")):
+                        src = os.path.join(hf_assets, fname)
+                        dst = os.path.join(output_path, fname)
+                        shutil.copy2(src, dst)
+
+            logger.info(f"Exported HuggingFace model to {output_path}")
+
+
