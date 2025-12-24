@@ -39,19 +39,29 @@ async def continuous_rollout_producer(
     Stops when sync_titan_to_vllm is called or data is exhausted.
     """
     set_current_task_name("rollout")
+    batch_num = 0
+    total_entries_produced = 0
+
+    print(f"[TEMPLOG producer] Starting producer, version={version}")
 
     while True:
         if rollout.is_stopped():
+            print(f"[TEMPLOG producer] Rollout stopped, breaking")
             break
 
+        print(f"[TEMPLOG producer] Fetching next data batch (batch_num={batch_num})")
         batch = await data_iter.next_batch()
         if batch is None:
+            print(f"[TEMPLOG producer] Data exhausted, breaking")
             break
 
+        batch_num += 1
         templates = batch["templates"]
         answers = batch["answers"]
+        print(f"[TEMPLOG producer] Got data batch {batch_num}, {len(templates)} templates, generating...")
 
         responses = await rollout.generate(templates, **sampling_params)
+        print(f"[TEMPLOG producer] Generate complete, got {len(responses)} responses")
 
         for i, response in enumerate(responses):
             vllm_output = VLLMOutput(response)
@@ -67,6 +77,7 @@ async def continuous_rollout_producer(
                 targets=[answers[i]] * len(response.outputs),
                 return_dtype=torch.float32,
             )
+            print(f"[TEMPLOG producer] Rewards for response {i}: sum={rewards.sum().item():.2f}, mean={rewards.mean().item():.2f}")
 
             if tracer := get_tracer():
                 gen_lengths = [len(out.token_ids) for out in response.outputs]
@@ -82,32 +93,34 @@ async def continuous_rollout_producer(
                 "completion_logprobs": completion_logprobs,
                 "rewards": rewards,
             }
+            print(f"[TEMPLOG producer] Putting entry {total_entries_produced} to buffer...")
             await buffer.put(entry, version)
+            total_entries_produced += 1
+            print(f"[TEMPLOG producer] Entry {total_entries_produced} put complete, buffer_size={buffer.size()}")
+
+    print(f"[TEMPLOG producer] Producer finished, total_entries_produced={total_entries_produced}")
 
 
 @traced()
 async def train_step(
-    entry: dict,
+    batch: dict,
     trainer,
     reference,
     loss_fn,
-) -> tuple[float, float] | None:
+) -> tuple[float, float]:
     """
-    Train on a single rollout entry. Returns (loss, grad_norm) or None if skipped.
+    Train on a batched rollout entry. Returns (loss, grad_norm).
+
+    The batch contains pre-computed per-group normalized advantages.
     """
-    rewards = entry["rewards"]
+    input_dict = {"input": batch["full_input_ids"]}
+    completion_ids = batch["completion_ids"]
+    rollout_logprobs = batch["completion_logprobs"]
+    completion_mask = batch["completion_mask"]
+    advantages = batch["advantages"]
 
-    # Skip if all rewards are identical (no gradient signal)
-    # TODO: do something better / more elegant here, or at least move it out?
-    if torch.allclose(rewards, rewards[0]):
-        print(f"All rewards are equal to {rewards[0]}, skipping!")
-        return None
-
-    input_dict = {"input": entry["full_input_ids"]}
-    completion_ids = entry["completion_ids"]
-    completion_logprobs = entry["completion_logprobs"]
-    completion_mask = entry["completion_mask"]
-
+    # TODO: it'd be nice to make this concurrent with the model forward.
+    # Maybe create a task and then await it later.
     reference_logprobs = await reference.compute_logprobs_step(
         input_dict,
         completion_ids,
@@ -118,8 +131,8 @@ async def train_step(
         input_dict,
         completion_ids,
         reference_logprobs,
-        completion_logprobs,
-        rewards,
+        rollout_logprobs,
+        advantages,
         padding_mask=completion_mask,
     )
 
@@ -150,8 +163,8 @@ async def main() -> None:
     loss_fn = GRPOLoss(**plan.loss)
     verifier = MathVerifier()
 
-    #ds = load_gsm8k(**plan.data)
-    ds = load_dummy(**plan.data)
+    ds = load_gsm8k(**plan.data)
+    # ds = load_dummy(**plan.data)
     data_iter = DataIterator(ds, tokenizer=tokenizer, **plan.data_iter)
 
     sampling_params = {**plan.sampling, "logprobs": 0}
@@ -159,6 +172,7 @@ async def main() -> None:
     num_epochs = plan.training["num_epochs"]
     iterations_per_epoch = plan.training.get("iterations_per_epoch")
     sync_reference_every = plan.training["sync_reference_every"]
+    train_batch_size = plan.training.get("train_batch_size", 1)
 
     # Training loop
     for epoch in range(num_epochs):
@@ -177,17 +191,41 @@ async def main() -> None:
         )
 
         trained = 0
+        null_batch_count = 0
         while iterations_per_epoch is None or trained < iterations_per_epoch:
             # Check if producer finished (data exhausted)
-            if producer_task.done():
-                # Drain remaining buffer entries
-                if buffer.size() == 0:
-                    break
+            producer_done = producer_task.done()
+            buffer_size = buffer.size()
+            print(f"[TEMPLOG train_loop] trained={trained}, producer_done={producer_done}, buffer_size={buffer_size}")
 
-            entry = await buffer.pop(min_version=epoch)
-            result = await train_step(entry, trainer, reference, loss_fn)
-            if result is not None:
-                trained += 1
+            if producer_done:
+                # Drain remaining buffer entries
+                if buffer_size == 0:
+                    print(f"[TEMPLOG train_loop] Producer done and buffer empty, breaking")
+                    break
+                print(f"[TEMPLOG train_loop] Producer done but buffer has {buffer_size} items, draining...")
+
+            print(f"[TEMPLOG train_loop] Calling buffer.pop(batch_size={train_batch_size}, min_version={epoch})")
+            batch = await buffer.pop(batch_size=train_batch_size, min_version=epoch)
+            if batch is None:
+                null_batch_count += 1
+                print(f"[TEMPLOG train_loop] Got None batch (#{null_batch_count}), skipping")
+                # All samples had zero reward variance - skip this batch
+                continue
+
+            null_batch_count = 0  # Reset on success
+            print(f"[TEMPLOG train_loop] Got valid batch, calling train_step")
+
+            loss, grad_norm = await train_step(batch, trainer, reference, loss_fn)
+            trained += 1
+            print(f"[TEMPLOG train_loop] train_step complete, loss={loss:.4f}, grad_norm={grad_norm:.4f}")
+
+            if trained % 10 == 0:
+                stats = buffer.get_stats()
+                print(f"[Train] step={trained} loss={loss:.4f} grad_norm={grad_norm:.4f} buffer={stats}")
+
+        stats = buffer.get_stats()
+        print(f"[Epoch {epoch}] Completed {trained} train steps. Buffer stats: {stats}")
 
         await sync_titan_to_vllm(trainer, rollout)
 

@@ -22,7 +22,7 @@ class GRPOLoss(torch.nn.Module):
         response: torch.Tensor,         # [B, T] – completion token ids
         ref_logprobs: torch.Tensor,     # [B, T] – pre-computed reference log π_ref
         rollout_logprobs: torch.Tensor, # [B, T] – pre-computed rollout log π_{θ_old}
-        rewards: torch.Tensor,          # [B] – scalar per sequence
+        advantages: torch.Tensor,       # [B] – pre-computed per-group normalized advantages
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
@@ -31,7 +31,6 @@ class GRPOLoss(torch.nn.Module):
         # Move other tensors to same device, ensure float32
         ref_logprobs = ref_logprobs.to(trainer_logprobs.device).float()
         rollout_logprobs = rollout_logprobs.to(trainer_logprobs.device).float()
-        rewards = rewards.to(trainer_logprobs.device).float()
         padding_mask = padding_mask.to(trainer_logprobs.device).float()
 
         # Zero out padded positions BEFORE computing ratios/KL to avoid numerical issues
@@ -39,10 +38,8 @@ class GRPOLoss(torch.nn.Module):
         ref_logprobs = ref_logprobs * padding_mask
         rollout_logprobs = rollout_logprobs * padding_mask
 
-        # advantage normalization (fp32 to avoid bf16 underflow when rewards have low variance)
-        reward_std = rewards.std(unbiased=False)
-        adv = (rewards - rewards.mean()) / (reward_std.clamp_min(1e-6) + 1e-8)
-        # broadcast over tokens if rewards is [B]
+        # Broadcast advantages over tokens
+        adv = advantages.to(trainer_logprobs.device).float()
         while adv.ndim < trainer_logprobs_masked.ndim:
             adv = adv.unsqueeze(-1)
 
@@ -82,7 +79,7 @@ class SimpleGRPOLoss(torch.nn.Module):
     https://github.com/huggingface/trl/blob/417915a3e4d3e3bc8d7b196594308b8eabf928be/trl/trainer/grpo_trainer.py#L1624
     """
 
-    def __init__(self, beta: float = 0.1):
+    def __init__(self, beta: float = 0.1, **kwargs):
         super().__init__()
         self.beta = beta
 

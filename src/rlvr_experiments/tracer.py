@@ -51,8 +51,9 @@ class TraceRecorder:
 
     def _emit(self, event: Dict[str, object]) -> None:
         with self._lock:
-            self._file.write(json.dumps(event) + "\n")
-            self._file.flush()
+            if self._file is not None:
+                self._file.write(json.dumps(event) + "\n")
+                self._file.flush()
 
     def set_current_task_name(self, name: str) -> None:
         tid = self._get_tid()

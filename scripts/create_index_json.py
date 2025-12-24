@@ -1,8 +1,12 @@
 import json
 from safetensors import safe_open
 
+from huggingface_hub import snapshot_download
+
+model_path = './assets/hf/Qwen3-32B'
+snapshot_download('Qwen/Qwen3-32B', local_dir=model_path)
+
 # Adjust path to where your model.safetensors actually is
-model_path = "./assets/hf/Qwen3-0.6B"
 safetensors_file = "model.safetensors"
 
 # 1. Read all keys from the single file

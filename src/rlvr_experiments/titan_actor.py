@@ -561,29 +561,30 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
         toml.dump(cfg, f)
         config_path = f.name
 
+    logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port}")
+    actors = [
+        TitanModelRank.options(num_gpus=1, num_cpus=2).remote(
+            rank=r,
+            world_size=world_size,
+            config_path=config_path,
+            group_name=name,
+            trainable=trainable,
+        )
+        for r in range(world_size)
+    ]
+
     try:
-        logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port}")
-        actors = [
-            TitanModelRank.options(num_gpus=1, num_cpus=2).remote(
-                rank=r,
-                world_size=world_size,
-                config_path=config_path,
-                group_name=name,
-                trainable=trainable,
-            )
-            for r in range(world_size)
-        ]
-
         ray.get([a.initialize_process_group.remote(master_addr, str(port)) for a in actors])
-        return DistributedModelHandle(actors, name=name)
-
     finally:
+        # Only delete after ALL actors have finished initialization
         keep_cfg = os.environ.get("RLVR_KEEP_TITAN_CONFIG") == "1"
         if not keep_cfg:
             try:
                 os.remove(config_path)
             except FileNotFoundError:
                 pass
+
+    return DistributedModelHandle(actors, name=name)
 
 
 
