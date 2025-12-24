@@ -143,15 +143,18 @@ class TitanModelRank:
           * give each Titan rank a local view of HF tensors.
         We keep the dict per-rank to keep DTensor semantics simple.
         """
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] prepare_sync_state: starting...")
         if self.model is None:
             raise RuntimeError("Model not initialized")
         self._sync_cache = self.model.hf_state_dict()
-        print(f"[{self.group_name} Rank {self.rank}] Prepared sync cache with {len(self._sync_cache)} entries.")
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] prepare_sync_state: done, {len(self._sync_cache)} entries")
 
     def clear_sync_state(self) -> None:
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] clear_sync_state: clearing cache...")
         self._sync_cache = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] clear_sync_state: done")
 
     def build_chunk_plan(
         self,
@@ -163,6 +166,7 @@ class TitanModelRank:
         This is *metadata only* (no NCCL, no device copies). It can be called
         on a single rank (e.g., trainer rank 0) and the result shared via Ray.
         """
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] build_chunk_plan: starting, max_chunk_elems={max_chunk_elems}")
         if self._sync_cache is None:
             raise RuntimeError("Sync state not prepared.")
 
@@ -188,7 +192,7 @@ class TitanModelRank:
         if current_params:
             chunks.append(ChunkMeta(total_numel=current_total, params=current_params))
 
-        print(f"[{self.group_name} Rank {self.rank}] Built chunk plan with {len(chunks)} chunks.")
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] build_chunk_plan: done, {len(chunks)} chunks")
         return chunks
 
     # ------------------------------------------------------------------ #
@@ -201,6 +205,7 @@ class TitanModelRank:
         dtype_str: str,
         src_rank: int,
     ) -> None:
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] broadcast_chunk: starting, channel={channel}")
         if self._sync_cache is None:
             raise RuntimeError("Sync cache not prepared.")
         if channel not in self.sync_managers:
@@ -252,7 +257,9 @@ class TitanModelRank:
                 flat[offset : offset + numel].copy_(buf)
                 offset += numel
 
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] broadcast_chunk: calling NCCL broadcast...")
         manager.communicator.broadcast(flat, src=src_rank)
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] broadcast_chunk: NCCL broadcast done")
 
         del flat
         del local_full_tensors
@@ -275,6 +282,7 @@ class TitanModelRank:
         - Uses sd_adapter.from_hf to translate HF → Titan internas, then
           loads into parameters (handling DTensors via distribute_tensor).
         """
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] recv_chunk_from_hf: starting, channel={channel}")
         if self.model is None:
             raise RuntimeError("Model not initialized.")
         if channel not in self.sync_managers:
@@ -285,9 +293,11 @@ class TitanModelRank:
         device = self.model.device
 
         # 1. Receive flat buffer via NCCL.
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] recv_chunk_from_hf: receiving NCCL broadcast...")
         flat = torch.empty(chunk.total_numel, dtype=dtype, device=device)
         manager.communicator.broadcast(flat, src=src_rank)
         torch.cuda.current_stream().synchronize()
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] recv_chunk_from_hf: NCCL broadcast received")
 
         # 2. Slice and load.
         with torch.no_grad():
@@ -316,6 +326,7 @@ class TitanModelRank:
                         target.copy_(incoming_val.to(device=target.device, dtype=target.dtype))
 
         del flat
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] recv_chunk_from_hf: done")
 
     def forward_step(self, input_dict):
         """
@@ -325,16 +336,18 @@ class TitanModelRank:
         - Non-trainable models: return a plain torch.Tensor materialized on rank 0.
           Other ranksgit s return None. This method is collective if the output is DTensor.
         """
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] forward_step: starting...")
         if self.model is None:
             raise RuntimeError("Model not initialized")
 
         torch.cuda.synchronize()
         t_start = time.perf_counter()
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] forward_step: calling model.forward_step...")
         out = self.model.forward_step(input_dict)
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] forward_step: model.forward_step returned, syncing...")
         torch.cuda.synchronize()
         t_end = time.perf_counter()
-        if self.rank == 0:
-            print(f"[ACTOR TIMING {self.group_name}] forward_step GPU time: {(t_end - t_start)*1000:.1f}ms")
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] forward_step: GPU time {(t_end - t_start)*1000:.1f}ms")
 
         # What follows is necessary to handle the fact that different
         # Titan models may output DTensors that are on different meshes.
@@ -361,8 +374,10 @@ class TitanModelRank:
 
         # Only leader returns to avoid shipping duplicates.
         if self.rank == 0:
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] forward_step: done (returning plain_out)")
             return plain_out
         else:
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] forward_step: done (returning None)")
             return None
 
     def compute_logprobs_step(self, input_dict: dict, completion_ids: torch.Tensor) -> torch.Tensor:
@@ -372,6 +387,7 @@ class TitanModelRank:
         Returns only the small [B, T] logprobs tensor instead of full [B, seq_len, vocab] logits.
         This avoids serializing ~6GB of data through Ray for the reference model.
         """
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: starting...")
         if self.model is None:
             raise RuntimeError("Model not initialized")
 
@@ -379,25 +395,30 @@ class TitanModelRank:
         t_start = time.perf_counter()
 
         # Forward pass
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: calling model.forward_step...")
         logits = self.model.forward_step(input_dict)
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: forward done")
 
         # Materialize DTensor if needed
         if isinstance(logits, DTensor):
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: materializing DTensor...")
             logits = logits.full_tensor()
 
         # Compute logprobs inside the actor
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: computing logprobs...")
         completion_ids = completion_ids.to(self.model.device)
         logprobs = compute_logprobs(logits, completion_ids)
 
         torch.cuda.synchronize()
         t_end = time.perf_counter()
-        if self.rank == 0:
-            print(f"[ACTOR TIMING {self.group_name}] compute_logprobs_step GPU time: {(t_end - t_start)*1000:.1f}ms")
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: GPU time {(t_end - t_start)*1000:.1f}ms")
 
         # Return small tensor [B, T] instead of huge [B, seq_len, vocab]
         if self.rank == 0:
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: done (returning logprobs)")
             return logprobs.detach().cpu()
         else:
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_logprobs_step: done (returning None)")
             return None
 
     def compute_loss_and_backward_step(
@@ -407,17 +428,18 @@ class TitanModelRank:
         *args: Any,
         **kwargs: Any,
     ) -> float:
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: starting...")
         torch.cuda.synchronize()
         t_total_start = time.perf_counter()
 
         if isinstance(trainer_output, dict):
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: running forward pass...")
             torch.cuda.synchronize()
             t_fwd_start = time.perf_counter()
             trainer_output = self.model.forward_step(trainer_output)
             torch.cuda.synchronize()
             t_fwd_end = time.perf_counter()
-            if self.rank == 0:
-                print(f"[ACTOR TIMING {self.group_name}] compute_loss_and_backward forward: {(t_fwd_end - t_fwd_start)*1000:.1f}ms")
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: forward done, {(t_fwd_end - t_fwd_start)*1000:.1f}ms")
 
         device = self.model.device
 
@@ -439,6 +461,7 @@ class TitanModelRank:
 
         # Wrap loss computation and backward in train_context to ensure proper
         # context is active throughout forward→loss→backward chain (matching torchtitan pattern)
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: computing loss...")
         torch.cuda.synchronize()
         t_loss_bwd_start = time.perf_counter()
         with self.model.train_context_mgr(None):
@@ -447,14 +470,15 @@ class TitanModelRank:
             if not torch.is_tensor(loss) or loss.ndim != 0:
                 raise RuntimeError("loss_fn must return a scalar torch.Tensor")
 
+            print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: loss computed, calling backward...")
             loss.backward()
         torch.cuda.synchronize()
         t_loss_bwd_end = time.perf_counter()
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: backward done, loss+backward={(t_loss_bwd_end - t_loss_bwd_start)*1000:.1f}ms")
 
         torch.cuda.synchronize()
         t_total_end = time.perf_counter()
-        if self.rank == 0:
-            print(f"[ACTOR TIMING {self.group_name}] loss+backward: {(t_loss_bwd_end - t_loss_bwd_start)*1000:.1f}ms, total: {(t_total_end - t_total_start)*1000:.1f}ms")
+        print(f"[TEMPLOG {self.group_name} Rank {self.rank}] compute_loss_and_backward_step: done, total={(t_total_end - t_total_start)*1000:.1f}ms")
 
         return float(loss.detach().item())
 
@@ -468,15 +492,20 @@ class DistributedModelHandle:
         self.name = name
 
     async def _call_all(self, attr, *args, **kwargs):
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] _call_all: {attr} starting...")
         kwargs.pop("tracer", None)
         results = await asyncio.gather(
             *[self.resolve(a.call_method.remote(attr, *args, **kwargs)) for a in self.actors]
         )
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] _call_all: {attr} done")
         return results[0]
 
     @traced("reference.compute_logprobs")
     async def compute_logprobs_step(self, input_dict: dict, completion_ids: torch.Tensor):
-        return await self._call_all("compute_logprobs_step", input_dict, completion_ids)
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] compute_logprobs_step: starting...")
+        result = await self._call_all("compute_logprobs_step", input_dict, completion_ids)
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] compute_logprobs_step: done")
+        return result
 
     @traced("trainer.forward_backward")
     async def compute_loss_and_backward_step(
@@ -486,17 +515,23 @@ class DistributedModelHandle:
         *args: Any,
         **kwargs: Any,
     ) -> float:
-        return await self._call_all(
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] compute_loss_and_backward_step: starting...")
+        result = await self._call_all(
             "compute_loss_and_backward_step",
             loss_fn,
             trainer_output,
             *args,
             **kwargs,
         )
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] compute_loss_and_backward_step: done, loss={result}")
+        return result
 
     @traced("trainer.optimizer_step")
     async def optimizer_step(self):
-        return await self._call_all("optimizer_step")
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] optimizer_step: starting...")
+        result = await self._call_all("optimizer_step")
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] optimizer_step: done, grad_norm={result}")
+        return result
 
     @traced("trainer.save_checkpoint")
     async def save_checkpoint(self, step: int | None = None, last_step: bool = False):
@@ -504,7 +539,10 @@ class DistributedModelHandle:
 
     @traced("trainer.export_to_hf")
     async def export_to_hf(self, output_path: str):
-        return await self._call_all("export_to_hf", output_path=output_path)
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] export_to_hf: starting, output_path={output_path}")
+        result = await self._call_all("export_to_hf", output_path=output_path)
+        print(f"[TEMPLOG DistributedModelHandle {self.name}] export_to_hf: done")
+        return result
 
     def __getattr__(self, attr):
         if attr.startswith("_"):

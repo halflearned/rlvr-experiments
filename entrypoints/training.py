@@ -227,17 +227,27 @@ async def main() -> None:
         stats = buffer.get_stats()
         print(f"[Epoch {epoch}] Completed {trained} train steps. Buffer stats: {stats}")
 
+        print(f"[TEMPLOG main] Epoch {epoch}: calling sync_titan_to_vllm...")
         await sync_titan_to_vllm(trainer, rollout)
+        print(f"[TEMPLOG main] Epoch {epoch}: sync_titan_to_vllm done")
 
         if (epoch + 1) % sync_reference_every == 0:
+            print(f"[TEMPLOG main] Epoch {epoch}: calling sync_titan_to_titan...")
             await sync_titan_to_titan(trainer, reference)
+            print(f"[TEMPLOG main] Epoch {epoch}: sync_titan_to_titan done")
 
         # Export trained model in HuggingFace format
-        if True:  # TODO: save or not
+        if False: # TODO: save or not
+            print(f"[TEMPLOG main] Epoch {epoch}: calling export_to_hf...")
             await trainer.export_to_hf(f"outputs/{plan.run['name']}")
+            print(f"[TEMPLOG main] Epoch {epoch}: export_to_hf done")
 
+        print(f"[TEMPLOG main] Epoch {epoch}: complete, moving to next epoch...")
+
+    print(f"[TEMPLOG main] Training complete, closing tracer...")
     if get_tracer():
         close_tracer()
+    print(f"[TEMPLOG main] Done")
 
 
 if __name__ == "__main__":
