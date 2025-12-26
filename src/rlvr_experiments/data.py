@@ -17,7 +17,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     ds = ray.data.from_huggingface(hf_dataset)
 
     def preprocess(row):
-        question =  row["question"].strip()
+        question = f"\n\nProblem:{row['question'].strip()}"
         answer = row["answer"].split("####")[-1].strip()
         return {
             "prompt": question,
@@ -25,6 +25,22 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
         }
 
     return ds.map(preprocess)
+
+
+def load_dummy(split: str = "train") -> ray.data.Dataset:
+    """
+    Load a dummy dataset with a single question repeated 64 times.
+
+    Useful for testing that rewards are increasing on a single problem.
+    Returns dataset with columns: "prompt", "answer"
+    """
+    rows = [
+        {
+            "prompt": "\n\nProblem:What is ((7/12) + (5/18)) / (31/36)?",
+            "answer": "1",
+        }
+    ] * 64
+    return ray.data.from_items(rows)
 
 
 class DataIterator:
@@ -45,27 +61,30 @@ class DataIterator:
                 templates = batch["templates"]  # ready for vLLM
                 answers = batch["answers"]
     """
-
     def __init__(
         self,
         ds: ray.data.Dataset,
         batch_size: int,
         tokenizer,
         system_prompt: str = "",
+        assistant_prefix: str = "",
     ):
         self.ds = ds
         self.batch_size = batch_size
         self.tokenizer = tokenizer
+        self.assistant_prefix = assistant_prefix
         self.system_prompt = system_prompt
         self._iter: Iterator | None = None
 
     def _apply_template(self, prompt: str) -> str:
         """Apply chat template to a single prompt."""
-        return self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": self.system_prompt + prompt}],
+        content = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
             tokenize=False,
             add_generation_prompt=True,
-        )
+            enable_thinking=False,  # TODO: make configurable
+        ) + self.assistant_prefix
+        return content
 
     def new_epoch(self, seed: int | None = None) -> None:
         """Shuffle and reset iterator for a new epoch."""

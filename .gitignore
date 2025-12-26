@@ -1,6 +1,9 @@
 secrets.env
 assets/
 .venv
+.claude
+.rlvr_titan_job_configs
+.vscode
 uv.lock
 old
 build
@@ -34,6 +37,7 @@ model/
 mini/
 manifests/
 dataset/
+outputs/
 
 
 gqa/

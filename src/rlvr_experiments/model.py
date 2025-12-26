@@ -198,6 +198,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         Returns:
             logits: [batch_size, seq_len, vocab_size] tensor (may be DTensor with TP)
         """
+        logger.debug(f"TitanModel.forward_step: input shape={input_dict['input'].shape}")
         inputs = input_dict["input"].to(self.device)
 
         # Pad sequence length to be divisible by TP degree to avoid losing tokens
@@ -227,6 +228,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 extra_inputs=extra_inputs,
             )
 
+        logger.debug("TitanModel.forward_step: calling model_parts[0]...")
         with self.train_context_mgr(None), self.maybe_enable_amp:
             logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
@@ -239,6 +241,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 else:
                     logits = logits[:, :original_seq_len, :]
 
+        logger.debug(f"TitanModel.forward_step: done, logits type={type(logits).__name__}")
         return logits
 
     def backward_step(self, loss: torch.Tensor) -> None:
@@ -250,9 +253,11 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             loss.backward()
 
     def optimizer_step(self) -> float:
+        logger.debug("TitanModel.optimizer_step: starting...")
         if not self.trainable:
             raise RuntimeError("Model is non-trainable; cannot call optimizer_step().")
 
+        logger.debug("TitanModel.optimizer_step: clipping grads...")
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -260,15 +265,20 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             pp_mesh=None,  # PP disabled
             ep_enabled=self.parallel_dims.ep_enabled,
         )
+        logger.debug(f"TitanModel.optimizer_step: grad_norm={grad_norm.item():.4f}")
 
         # Ensure async checkpoint staging (if any) is done
         self.checkpointer.maybe_wait_for_staging()
 
+        logger.debug("TitanModel.optimizer_step: stepping optimizer...")
         self.optimizers.step()
+        logger.debug("TitanModel.optimizer_step: stepping lr_scheduler...")
         self.lr_schedulers.step()
+        logger.debug("TitanModel.optimizer_step: zeroing grads...")
         self.optimizers.zero_grad()
 
         self.step += 1
+        logger.debug(f"TitanModel.optimizer_step: done, step={self.step}")
         return grad_norm.item()
     
     # Checkpointing and state management
@@ -304,4 +314,58 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         if self.checkpointer:
             self.checkpointer.close()
 
-   
+    def export_to_hf(self, output_path: str) -> None:
+        """
+        Export the model to HuggingFace format.
+
+        Only rank 0 writes; all ranks must call this (collective for DTensors).
+        Copies tokenizer/config from the original HF assets path.
+        """
+        from torch.distributed.tensor import DTensor
+        import shutil
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        logger.debug(f"TitanModel.export_to_hf: starting, output_path={output_path}")
+
+        logger.debug("TitanModel.export_to_hf: calling hf_state_dict()...")
+        hf_sd = self.hf_state_dict()
+        logger.debug(f"TitanModel.export_to_hf: hf_state_dict done, {len(hf_sd)} keys")
+
+        # Materialize DTensors to full tensors (collective operation)
+        logger.debug("TitanModel.export_to_hf: materializing DTensors...")
+        materialized = {}
+        for i, (k, v) in enumerate(hf_sd.items()):
+            if isinstance(v, DTensor):
+                materialized[k] = v.full_tensor().cpu()
+            else:
+                materialized[k] = v.cpu() if torch.is_tensor(v) else v
+            if i % 50 == 0:
+                logger.debug(f"TitanModel.export_to_hf: materialized {i}/{len(hf_sd)} tensors")
+        logger.debug("TitanModel.export_to_hf: materialization done")
+
+        # Only rank 0 writes
+        if rank == 0:
+            logger.debug(f"TitanModel.export_to_hf: saving to {output_path}...")
+            os.makedirs(output_path, exist_ok=True)
+
+            # Save model weights using safetensors
+            from safetensors.torch import save_file
+            logger.debug("TitanModel.export_to_hf: calling save_file...")
+            save_file(materialized, os.path.join(output_path, "model.safetensors"))
+            logger.debug("TitanModel.export_to_hf: save_file done")
+
+            # Copy tokenizer and config from original HF assets
+            hf_assets = self.job_config.model.hf_assets_path
+            if hf_assets and os.path.isdir(hf_assets):
+                logger.debug(f"TitanModel.export_to_hf: copying config files from {hf_assets}...")
+                for fname in os.listdir(hf_assets):
+                    if fname.endswith((".json", ".txt", ".model")):
+                        src = os.path.join(hf_assets, fname)
+                        dst = os.path.join(output_path, fname)
+                        shutil.copy2(src, dst)
+
+            logger.info(f"Exported HuggingFace model to {output_path}")
+
+        logger.debug("TitanModel.export_to_hf: done")
+
+

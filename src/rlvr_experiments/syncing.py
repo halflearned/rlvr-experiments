@@ -1,9 +1,12 @@
 import asyncio
+import logging
 
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .tracer import traced
+from .tracer import traced, trace_span
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ParamMeta:
@@ -41,31 +44,41 @@ async def _sync_chunks(
     receiver_per_chunk,  # async fn(chunk) -> awaitable
     label: str,
 ) -> None:
-    print(f"--- [{label}] ---")
+    logger.info(f"_sync_chunks: {label}")
+    logger.debug(f"_sync_chunks: src={src.name}, channel={channel}, chunk_mb={chunk_mb}")
 
     # 1) Prepare HF cache on all src ranks (collectives happen here)
+    logger.debug(f"_sync_chunks: Preparing sync state on {len(src.actors)} src actors...")
     await asyncio.gather(*[a.prepare_sync_state.remote() for a in src.actors])
+    logger.debug("_sync_chunks: Sync state prepared")
 
     try:
         # 2) Build chunk plan on src rank 0 (requires cache)
+        logger.debug("_sync_chunks: Building chunk plan...")
         max_chunk_elems = _chunk_elems_from_mb(chunk_mb, dtype_str)
         chunk_plan: Sequence[Any] = await src.resolve(
             src.actors[0].build_chunk_plan.remote(max_chunk_elems=max_chunk_elems)
         )
+        logger.debug(f"_sync_chunks: Got {len(chunk_plan)} chunks to sync")
 
         # 3) For each chunk: src broadcast (all ranks) + receiver
-        for chunk in chunk_plan:
+        logger.debug(f"_sync_chunks: Broadcasting {len(chunk_plan)} chunks...")
+        for i, chunk in enumerate(chunk_plan):
+            logger.debug(f"_sync_chunks: Chunk {i+1}/{len(chunk_plan)}: broadcasting...")
             src_futs = [
                 a.broadcast_chunk.remote(channel, chunk, dtype_str, src_rank)
                 for a in src.actors
             ]
             await asyncio.gather(*src_futs, receiver_per_chunk(chunk))
+            logger.debug(f"_sync_chunks: Chunk {i+1}/{len(chunk_plan)}: complete")
 
     finally:
         # Always clear even if a chunk fails
+        logger.debug("_sync_chunks: Clearing sync state...")
         await asyncio.gather(*[a.clear_sync_state.remote() for a in src.actors])
+        logger.debug("_sync_chunks: Sync state cleared")
 
-    print(f"✓ {label} complete.")
+    logger.info(f"_sync_chunks: {label} complete")
 
 
 def _infer_channel_name(src_name: str, dst_name: str) -> str:
@@ -88,29 +101,43 @@ async def sync_titan_to_vllm(
     Automatically stops any rollout producers (via vllm.stop()), syncs weights,
     then resumes (via vllm.resume()) so new producers can run.
     """
-    await vllm.stop()
+    logger.info(f"sync_titan_to_vllm: {trainer.name} -> {vllm.name}")
+
+    logger.debug("sync_titan_to_vllm: Stopping vLLM producer...")
+    with trace_span(None, "sync.stop_producer"):
+        await vllm.stop()
+    logger.debug("sync_titan_to_vllm: vLLM producer stopped")
 
     if channel is None:
         channel = _infer_channel_name(trainer.name, vllm.name)
+    logger.debug(f"sync_titan_to_vllm: Using channel={channel}")
 
     async def recv(chunk: Any):
         # Engine actor should forward to collective_rpc on workers
-        return await vllm._actor.recv_chunk.remote(chunk, wire_dtype, src_rank)
+        logger.debug("sync_titan_to_vllm: recv_chunk called")
+        result = await vllm._actor.recv_chunk.remote(chunk, wire_dtype, src_rank)
+        logger.debug("sync_titan_to_vllm: recv_chunk complete")
+        return result
 
-    await _sync_chunks(
-        src=trainer,
-        channel=channel,
-        chunk_mb=chunk_mb,
-        dtype_str=wire_dtype,
-        src_rank=src_rank,
-        receiver_per_chunk=recv,
-        label=(
-            f"CHUNKED: {trainer.name} -> {vllm.name} "
-            f"(channel={channel}, chunk_mb={chunk_mb}, dtype={wire_dtype})"
-        ),
-    )
+    logger.debug("sync_titan_to_vllm: Starting NCCL sync...")
+    with trace_span(None, "sync.nccl_sync"):
+        await _sync_chunks(
+            src=trainer,
+            channel=channel,
+            chunk_mb=chunk_mb,
+            dtype_str=wire_dtype,
+            src_rank=src_rank,
+            receiver_per_chunk=recv,
+            label=(
+                f"CHUNKED: {trainer.name} -> {vllm.name} "
+                f"(channel={channel}, chunk_mb={chunk_mb}, dtype={wire_dtype})"
+            ),
+        )
+    logger.debug("sync_titan_to_vllm: NCCL sync complete")
 
+    logger.debug("sync_titan_to_vllm: Resuming vLLM...")
     vllm.resume()
+    logger.info("sync_titan_to_vllm: Done")
 
 
 @traced("sync.trainer_to_reference")
@@ -122,16 +149,21 @@ async def sync_titan_to_titan(
     src_rank: int = 0,
     wire_dtype: str = "bfloat16",
 ) -> None:
-    
+    logger.info(f"sync_titan_to_titan: {src.name} -> {dst.name}")
+
     if channel is None:
         channel = _infer_channel_name(src.name, dst.name)
+    logger.debug(f"sync_titan_to_titan: channel={channel}, dst has {len(dst.actors)} actors")
 
     async def recv(chunk: Any):
+        logger.debug(f"sync_titan_to_titan: recv_chunk_from_hf, dispatching to {len(dst.actors)} dst actors...")
         dst_futs = [
             a.recv_chunk_from_hf.remote(channel, chunk, wire_dtype, src_rank)
             for a in dst.actors
         ]
-        return await asyncio.gather(*dst_futs)
+        result = await asyncio.gather(*dst_futs)
+        logger.debug("sync_titan_to_titan: recv_chunk_from_hf complete")
+        return result
 
     await _sync_chunks(
         src=src,
@@ -145,3 +177,4 @@ async def sync_titan_to_titan(
             f"(channel={channel}, chunk_mb={chunk_mb}, dtype={wire_dtype})"
         ),
     )
+    logger.info("sync_titan_to_titan: Done")
