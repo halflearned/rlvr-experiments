@@ -23,25 +23,31 @@ class ChannelPlan:
     src_rank: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass
 class Plan:
-    run: Dict[str, Any]
-    model: Dict[str, Any]
     roles: Dict[str, RolePlan]
     channels: Dict[Tuple[str, str], ChannelPlan]  # (src, dst) -> plan
     chunk_mb: int
+    _extras: Dict[str, Any]  # all other top-level yaml keys
 
     def channel(self, src: str, dst: str) -> ChannelPlan:
         return self.channels[(src, dst)]
+
+    def __getattr__(self, name: str) -> Any:
+        """Allow plan.foo to access any top-level yaml key."""
+        if name.startswith("_"):
+            raise AttributeError(name)
+        try:
+            return self._extras[name]
+        except KeyError:
+            raise AttributeError(f"Plan has no field '{name}'")
 
 
 def load_plan(path: str) -> Plan:
     y = yaml.safe_load(open(path, "r"))
 
-    run = y["run"]
-    model = dict(y.get("model", {}))
-    roles_in = y["roles"]                 # required
-    sync_in = dict(y.get("sync", {}))
+    roles_in = y.pop("roles")             # required
+    sync_in = dict(y.pop("sync", {}))
     wiring = sync_in["wiring"]            # required
     chunk_mb = int(sync_in.get("chunk_mb", 100))
 
@@ -111,5 +117,11 @@ def load_plan(path: str) -> Plan:
             src_rank=src_rank,
         )
 
-    return Plan(run=run, model=model, roles=roles, channels=channels, chunk_mb=chunk_mb)
+    # Everything remaining in y becomes accessible via plan.foo
+    return Plan(
+        roles=roles,
+        channels=channels,
+        chunk_mb=chunk_mb,
+        _extras=y,
+    )
 

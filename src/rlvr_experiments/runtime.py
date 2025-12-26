@@ -22,6 +22,11 @@ def _port_map(*, base: int, stride: int, namespace: int, names: list[str]) -> Di
     start = base + namespace * stride + 10
     return {n: start + i for i, n in enumerate(sorted(names))}
 
+def _max_namespace_for(*, base: int, stride: int, count: int) -> int:
+    # Ensure all ports stay within [1, 65535], accounting for the highest index.
+    safe_count = max(1, count)
+    return (65535 - base - 10 - (safe_count - 1)) // stride
+
 
 @dataclass
 class Runtime:
@@ -40,10 +45,20 @@ class Runtime:
         host = ray.util.get_node_ip_address()
 
         run_name = plan.run.get("name", "unnamed_run")
-        namespace = _stable_hash_u32(run_name) % 200  # “200 namespaces” is plenty for most clusters
-
         titan_roles = [n for n, r in plan.roles.items() if r.kind == "titan"]
         channel_names = [ch.name for ch in plan.channels.values()]
+        max_ns_titan = _max_namespace_for(
+            base=29500, stride=200, count=len(titan_roles)
+        )
+        max_ns_channel = _max_namespace_for(
+            base=51200, stride=200, count=len(channel_names)
+        )
+        max_namespace = min(199, max_ns_titan, max_ns_channel)
+        if max_namespace < 0:
+            raise ValueError(
+                "No valid port namespace available; reduce role/channel counts or adjust base/stride."
+            )
+        namespace = _stable_hash_u32(run_name) % (max_namespace + 1)
 
         titan_ports = _port_map(base=29500, stride=200, namespace=namespace, names=titan_roles)
         channel_ports = _port_map(base=51200, stride=200, namespace=namespace, names=channel_names)
@@ -55,8 +70,7 @@ class Runtime:
         for cn in sorted(channel_ports):
             print(f"[runtime] sync channel port channel={cn} port={channel_ports[cn]}")
 
-        # TODO: Change load_plan to load rollout buffer args, if any
-        buffer = RolloutBuffer(maxsize=0, max_reads=1)
+        buffer = RolloutBuffer(**plan.buffer)
 
         return cls(
             plan=plan,
@@ -69,10 +83,19 @@ class Runtime:
         )
 
     async def start(self, wire=True) -> "Runtime":
-        # Spawn all roles in parallel - each role uses different GPUs so no collision
-        await asyncio.gather(*[
-            self.spawn_role(name) for name in self.plan.roles.keys()
-        ])
+        # Spawn Titan roles first (they claim specific GPUs), then vLLM roles.
+        # This ensures Ray's scheduler sees accurate GPU availability when
+        # placing vLLM actors across the cluster.
+        titan_roles = [n for n, r in self.plan.roles.items() if r.kind == "titan"]
+        vllm_roles = [n for n, r in self.plan.roles.items() if r.kind == "vllm"]
+
+        # Spawn Titan roles in parallel
+        if titan_roles:
+            await asyncio.gather(*[self.spawn_role(name) for name in titan_roles])
+
+        # Spawn vLLM roles after Titan has claimed its GPUs
+        for name in vllm_roles:
+            await self.spawn_role(name)
 
         if wire:
             # Wire up all channels
@@ -80,6 +103,32 @@ class Runtime:
                 await self.wire(src, dst)
 
         return self
+
+    def _find_node_with_free_gpus(self, min_gpus: int) -> str | None:
+        """
+        Find a node with at least min_gpus available GPUs.
+        Prefers non-head nodes since Titan roles typically claim head node GPUs first.
+        """
+        head_ip = self.host  # Head node IP
+        candidates = []
+
+        for node in ray.nodes():
+            if not node.get("Alive", False):
+                continue
+            node_ip = node.get("NodeManagerAddress")
+            resources = node.get("Resources", {})
+            total_gpu = resources.get("GPU", 0)
+            if total_gpu >= min_gpus:
+                # Prefer non-head nodes
+                is_head = (node_ip == head_ip)
+                candidates.append((is_head, node_ip))
+
+        # Sort so non-head nodes come first
+        candidates.sort(key=lambda x: x[0])
+
+        if candidates:
+            return candidates[0][1]
+        return None
 
     async def spawn_role(self, name: str) -> None:
         if name in self.roles:
@@ -105,9 +154,18 @@ class Runtime:
             return
 
         if role.kind == "vllm":
-            # Note: num_gpus=1 is for the coordinator actor only.
-            # vLLM internally spawns additional Ray workers for TP>1.
-            actor = VLLMEngineRank.options(num_gpus=1).remote(
+            # Find a node with enough free GPUs for vLLM's TP workers.
+            # vLLM creates its own placement group internally, so we just need
+            # to schedule the coordinator actor on the right node.
+            tp_size = role.config.get("tensor_parallel_size", 1)
+            target_node = self._find_node_with_free_gpus(tp_size)
+
+            scheduling_opts = {"num_gpus": 0}
+            if target_node:
+                scheduling_opts["resources"] = {f"node:{target_node}": 0.001}
+                print(f"[runtime] scheduling vllm role={name} on node {target_node}")
+
+            actor = VLLMEngineRank.options(**scheduling_opts).remote(
                 engine_kwargs=role.config,
             )
             # Run blocking ray.get in thread pool to allow parallel spawning
