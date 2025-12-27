@@ -22,23 +22,24 @@ EXECUTOR_BACKEND = "ray"
 class VLLMEngineRank:
     def __init__(
         self,
-        #model_name: str,
         engine_kwargs: Dict[str, Any],
     ) -> None:
+        # Remove our custom fields before passing to vLLM
+        engine_kwargs = dict(engine_kwargs)
+        engine_kwargs.pop("data_parallel_size", None)
 
         engine_args = AsyncEngineArgs(
-            #model=model_name,
             worker_cls=WORKER_CLS,
             distributed_executor_backend=EXECUTOR_BACKEND,
             **engine_kwargs,
         )
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-    async def join_sync(self, *, host: str, port: int, world_size: int, rank: int) -> None:
+    async def add_sync_channel(self, *, channel_name: str, host: str, port: int, world_size: int, rank: int) -> None:
         # Connect all workers to the external NCCL sync group.
         await self.engine.collective_rpc(
-            "init_weight_sync",
-            kwargs={"host": host, "port": port, "world_size": world_size, "rank": rank},
+            "add_sync_channel",
+            kwargs={"channel_name": channel_name, "host": host, "port": port, "world_size": world_size, "rank": rank},
         )
 
     async def generate(
@@ -94,30 +95,52 @@ class VLLMEngineRank:
 
 
 class VLLMHandle:
-    def __init__(self, actor, name: str = "vllm"):
-        self._actor = actor
+    """
+    Handle for one or more vLLM instances (data parallel replicas).
+
+    Each instance may have multiple TP workers internally. This class provides
+    a unified interface regardless of how many replicas are configured.
+    """
+
+    def __init__(self, actors: list, name: str = "vllm"):
+        """
+        Args:
+            actors: List of VLLMEngineRank actor references (one per DP replica).
+            name: Name for this vLLM role.
+        """
+        if not actors:
+            raise ValueError("VLLMHandle requires at least one actor")
+        self._actors = actors
         self.name = name
         self._stop_event = asyncio.Event()
-        self._active_task: asyncio.Task | None = None
+        self._active_tasks: list[asyncio.Task] = []
+        self._current_replica = 0
+
+    @property
+    def num_replicas(self) -> int:
+        return len(self._actors)
 
     def is_stopped(self) -> bool:
         """Check if the stop signal has been set."""
         return self._stop_event.is_set()
 
-    def start_producer(self, producer_coro) -> asyncio.Task:
+    def start_producer(self, producer_coro_factory) -> list[asyncio.Task]:
         """
-        Start a rollout producer coroutine and track it internally.
-        The producer will be automatically stopped when sync_titan_to_vllm is called.
+        Start rollout producers, one per replica.
 
         Args:
-            producer_coro: A coroutine object that produces rollouts.
-                           Should check is_stopped() to know when to exit.
+            producer_coro_factory: A callable (replica_id) -> coroutine.
+                The coroutine should check handle.is_stopped() to know when to exit.
 
         Returns:
-            The created asyncio.Task (now running in background)
+            List of created asyncio.Tasks (one per replica).
         """
-        self._active_task = asyncio.create_task(producer_coro)
-        return self._active_task
+        self._active_tasks = []
+        for replica_id in range(self.num_replicas):
+            coro = producer_coro_factory(replica_id)
+            task = asyncio.create_task(coro)
+            self._active_tasks.append(task)
+        return self._active_tasks
 
     async def stop(self) -> None:
         """
@@ -125,11 +148,11 @@ class VLLMHandle:
         Call this before syncing weights.
         """
         self._stop_event.set()
-        if self._active_task is not None:
-            print("[VLLM] Waiting for rollout producer to stop...")
-            await self._active_task
-            self._active_task = None
-            print("[VLLM] Rollout producer stopped.")
+        if self._active_tasks:
+            print(f"[VLLMHandle] Waiting for {len(self._active_tasks)} producer(s) to stop...")
+            await asyncio.gather(*self._active_tasks)
+            self._active_tasks = []
+            print("[VLLMHandle] All producers stopped.")
 
     def resume(self) -> None:
         """Reset the stop event so new rollout producers can run."""
@@ -137,4 +160,7 @@ class VLLMHandle:
 
     @traced("vllm.generate")
     async def generate(self, prompts, **sampling_params):
-        return await self._actor.generate.remote(prompts, **sampling_params)
+        """Generate using round-robin replica selection."""
+        actor = self._actors[self._current_replica % len(self._actors)]
+        self._current_replica += 1
+        return await actor.generate.remote(prompts, **sampling_params)

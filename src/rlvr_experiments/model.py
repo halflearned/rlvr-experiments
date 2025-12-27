@@ -185,21 +185,18 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
           
 
 
-    def forward_step(
-        self,
-        input_dict: Dict[str, torch.Tensor],
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the model, returning logits.
 
         Args:
-            input_dict: Dictionary with "input" tensor (token ids).
+            input_ids: [batch_size, seq_len] token ids tensor.
 
         Returns:
             logits: [batch_size, seq_len, vocab_size] tensor (may be DTensor with TP)
         """
-        logger.debug(f"TitanModel.forward_step: input shape={input_dict['input'].shape}")
-        inputs = input_dict["input"].to(self.device)
+        logger.debug(f"TitanModel.forward: input shape={input_ids.shape}")
+        inputs = input_ids.to(self.device)
 
         # Pad sequence length to be divisible by TP degree to avoid losing tokens
         # during sequence sharding with Shard(dim=1)
@@ -212,12 +209,6 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 pad_len = tp_degree - remainder
                 inputs = torch.nn.functional.pad(inputs, (0, pad_len), value=0)
 
-        reserved_keys = {"input"}
-        extra_inputs = {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in input_dict.items()
-            if k not in reserved_keys
-        }
         extra_kwargs: Dict[str, Any] = {}
 
         # FlexAttention: build masks if requested by model args
@@ -225,12 +216,11 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
             )
 
-        logger.debug("TitanModel.forward_step: calling model_parts[0]...")
+        logger.debug("TitanModel.forward: calling model_parts[0]...")
         with self.train_context_mgr(None), self.maybe_enable_amp:
-            logits = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            logits = self.model_parts[0](inputs, **extra_kwargs)
 
             # If we padded the input, trim logits back to original sequence length
             # to maintain correct alignment with target tokens
@@ -241,7 +231,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 else:
                     logits = logits[:, :original_seq_len, :]
 
-        logger.debug(f"TitanModel.forward_step: done, logits type={type(logits).__name__}")
+        logger.debug(f"TitanModel.forward: done, logits type={type(logits).__name__}")
         return logits
 
     def backward_step(self, loss: torch.Tensor) -> None:

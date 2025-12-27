@@ -100,6 +100,8 @@ async def sync_titan_to_vllm(
 
     Automatically stops any rollout producers (via vllm.stop()), syncs weights,
     then resumes (via vllm.resume()) so new producers can run.
+
+    Works with both single VLLMHandle and VLLMReplicaGroup.
     """
     logger.info(f"sync_titan_to_vllm: {trainer.name} -> {vllm.name}")
 
@@ -112,10 +114,14 @@ async def sync_titan_to_vllm(
         channel = _infer_channel_name(trainer.name, vllm.name)
     logger.debug(f"sync_titan_to_vllm: Using channel={channel}")
 
+    vllm_actors = vllm._actors
+    logger.debug(f"sync_titan_to_vllm: Broadcasting to {len(vllm_actors)} vLLM actors")
+
     async def recv(chunk: Any):
-        # Engine actor should forward to collective_rpc on workers
-        logger.debug("sync_titan_to_vllm: recv_chunk called")
-        result = await vllm._actor.recv_chunk.remote(chunk, wire_dtype, src_rank)
+        # Broadcast chunk to all vLLM actors (all replicas participate in NCCL)
+        logger.debug(f"sync_titan_to_vllm: recv_chunk called for {len(vllm_actors)} actors")
+        futs = [actor.recv_chunk.remote(chunk, wire_dtype, src_rank) for actor in vllm_actors]
+        result = await asyncio.gather(*futs)
         logger.debug("sync_titan_to_vllm: recv_chunk complete")
         return result
 
@@ -158,7 +164,7 @@ async def sync_titan_to_titan(
     async def recv(chunk: Any):
         logger.debug(f"sync_titan_to_titan: recv_chunk_from_hf, dispatching to {len(dst.actors)} dst actors...")
         dst_futs = [
-            a.recv_chunk_from_hf.remote(channel, chunk, wire_dtype, src_rank)
+            a.recv_chunk_from_hf.remote(channel_name=channel, chunk=chunk, dtype_str=wire_dtype, src_rank=src_rank)
             for a in dst.actors
         ]
         result = await asyncio.gather(*dst_futs)
