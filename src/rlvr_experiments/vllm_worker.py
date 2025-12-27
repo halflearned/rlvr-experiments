@@ -1,4 +1,3 @@
-from typing import Tuple, List, Any
 import torch
 
 from vllm.v1.worker.gpu_worker import Worker
@@ -7,20 +6,19 @@ from .weight_sync import WeightSyncManager
 from .syncing import ChunkMeta
 
 
-
 class WeightSyncVLLMWorker(Worker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_sync = WeightSyncManager()
 
-    def init_weight_sync(self, host: str, port: int, world_size: int, rank: int):
-        my_sync_rank = rank + self.rank
-        print(f"[Worker {self.rank}] Joining Weight Sync Group as Rank {my_sync_rank}...")
+    def add_sync_channel(self, channel_name: str, host: str, port: int, world_size: int, rank: int):
+        sync_rank = rank + self.rank
+        print(f"[Worker {self.rank}] Joining sync channel '{channel_name}' as Rank {sync_rank}...")
         self.weight_sync.init_communicator(
             host=host,
             port=port,
             world_size=world_size,
-            my_rank=my_sync_rank,
+            rank=sync_rank,
             device=self.device,
         )
         return True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Iterator
 import ray.data
 from datasets import load_dataset
@@ -75,6 +76,7 @@ class DataIterator:
         self.assistant_prefix = assistant_prefix
         self.system_prompt = system_prompt
         self._iter: Iterator | None = None
+        self._lock = threading.Lock()  # Protects _iter from concurrent access
 
     def _apply_template(self, prompt: str) -> str:
         """Apply chat template to a single prompt."""
@@ -103,10 +105,11 @@ class DataIterator:
             raise RuntimeError("Call new_epoch() before next_batch()")
 
         def fetch():
-            try:
-                return next(self._iter)  # type: ignore
-            except StopIteration:
-                return None
+            with self._lock:
+                try:
+                    return next(self._iter)  # type: ignore
+                except StopIteration:
+                    return None
 
         # Run blocking iterator in thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()

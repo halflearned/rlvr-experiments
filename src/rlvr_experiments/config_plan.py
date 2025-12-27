@@ -10,7 +10,13 @@ import yaml
 class RolePlan:
     kind: str              # "titan" | "vllm"
     config: Dict[str, Any] # raw role config
-    world_size: int        # external sync ranks contributed by this role
+    world_size: int        # sync ranks per instance (TP workers etc)
+    data_parallel_size: int = 1  # number of independent instances (vLLM only for now)
+
+    @property
+    def total_world_size(self) -> int:
+        """Total sync ranks across all replicas."""
+        return self.world_size * self.data_parallel_size
 
 
 @dataclass(frozen=True)
@@ -85,13 +91,15 @@ def load_plan(path: str) -> Plan:
         name = r["name"]
         kind = r["kind"]
         cfg = dict(r.get("config", {}) or {})
+        # For vLLM, data_parallel_size is in config; for Titan it would be at role level
+        data_parallel_size = int(cfg.get("data_parallel_size", r.get("data_parallel_size", 1)))
         if kind == "titan":
             ws = titan_world_size(cfg)
         elif kind == "vllm":
             ws = vllm_world_size(cfg)
         else:
             raise ValueError(f"Unknown role kind: {kind}")
-        roles[name] = RolePlan(kind=kind, config=cfg, world_size=ws)
+        roles[name] = RolePlan(kind=kind, config=cfg, world_size=ws, data_parallel_size=data_parallel_size)
 
     channels: Dict[Tuple[str, str], ChannelPlan] = {}
     for w in wiring:
@@ -99,8 +107,9 @@ def load_plan(path: str) -> Plan:
         name = w.get("name") or f"{src}_to_{dst}"
         src_rank = int(w.get("src_rank", 0))
 
-        src_ws = roles[src].world_size
-        dst_ws = roles[dst].world_size
+        # Use total_world_size to account for replicas
+        src_ws = roles[src].total_world_size
+        dst_ws = roles[dst].total_world_size
         world_size = src_ws + dst_ws
         offsets = {src: 0, dst: src_ws}
 

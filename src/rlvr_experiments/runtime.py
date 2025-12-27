@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import socket
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -14,18 +14,33 @@ from .vllm_engine_actor import VLLMEngineRank, VLLMHandle
 from .rollout_buffer import RolloutBuffer
 
 
-def _stable_hash_u32(s: str) -> int:
-    return int(hashlib.sha256(s.encode("utf-8")).hexdigest()[:8], 16)
+def _find_free_port(start: int = 29500, end: int = 65535) -> int:
+    """Find an available port by actually binding to it."""
+    for port in range(start, end):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("", port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(f"No free port found in range {start}-{end}")
 
 
-def _port_map(*, base: int, stride: int, namespace: int, names: list[str]) -> Dict[str, int]:
-    start = base + namespace * stride + 10
-    return {n: start + i for i, n in enumerate(sorted(names))}
-
-def _max_namespace_for(*, base: int, stride: int, count: int) -> int:
-    # Ensure all ports stay within [1, 65535], accounting for the highest index.
-    safe_count = max(1, count)
-    return (65535 - base - 10 - (safe_count - 1)) // stride
+def _find_free_ports(count: int, start: int = 29500) -> list[int]:
+    """Find multiple consecutive-ish free ports."""
+    ports = []
+    current = start
+    while len(ports) < count:
+        try:
+            port = _find_free_port(start=current, end=65535)
+            ports.append(port)
+            current = port + 1
+        except RuntimeError:
+            break
+    if len(ports) < count:
+        raise RuntimeError(f"Could only find {len(ports)} free ports, needed {count}")
+    return ports
 
 
 @dataclass
@@ -45,26 +60,19 @@ class Runtime:
         host = ray.util.get_node_ip_address()
 
         run_name = plan.run.get("name", "unnamed_run")
-        titan_roles = [n for n, r in plan.roles.items() if r.kind == "titan"]
-        channel_names = [ch.name for ch in plan.channels.values()]
-        max_ns_titan = _max_namespace_for(
-            base=29500, stride=200, count=len(titan_roles)
-        )
-        max_ns_channel = _max_namespace_for(
-            base=51200, stride=200, count=len(channel_names)
-        )
-        max_namespace = min(199, max_ns_titan, max_ns_channel)
-        if max_namespace < 0:
-            raise ValueError(
-                "No valid port namespace available; reduce role/channel counts or adjust base/stride."
-            )
-        namespace = _stable_hash_u32(run_name) % (max_namespace + 1)
+        titan_roles = sorted([n for n, r in plan.roles.items() if r.kind == "titan"])
+        channel_names = sorted([ch.name for ch in plan.channels.values()])
 
-        titan_ports = _port_map(base=29500, stride=200, namespace=namespace, names=titan_roles)
-        channel_ports = _port_map(base=51200, stride=200, namespace=namespace, names=channel_names)
+        # Dynamically find free ports instead of hash-based allocation
+        # This avoids collisions with ports still in TIME_WAIT from crashed runs
+        total_ports_needed = len(titan_roles) + len(channel_names)
+        all_ports = _find_free_ports(total_ports_needed, start=29500)
+
+        titan_ports = {name: all_ports[i] for i, name in enumerate(titan_roles)}
+        channel_ports = {name: all_ports[len(titan_roles) + i] for i, name in enumerate(channel_names)}
 
         # One-time log of the final wiring decisions.
-        print(f"[runtime] run.name={run_name!r} host={host} namespace={namespace}")
+        print(f"[runtime] run.name={run_name!r} host={host}")
         for rn in sorted(titan_ports):
             print(f"[runtime] titan rendezvous port role={rn} port={titan_ports[rn]}")
         for cn in sorted(channel_ports):
@@ -78,7 +86,7 @@ class Runtime:
             roles={},
             titan_ports=titan_ports,
             channel_ports=channel_ports,
-            namespace=namespace,
+            namespace=0,  # No longer used, kept for compatibility
             buffer=buffer,
         )
 
@@ -154,25 +162,36 @@ class Runtime:
             return
 
         if role.kind == "vllm":
-            # Find a node with enough free GPUs for vLLM's TP workers.
+            # Find nodes with enough free GPUs for vLLM's TP workers.
             # vLLM creates its own placement group internally, so we just need
             # to schedule the coordinator actor on the right node.
             tp_size = role.config.get("tensor_parallel_size", 1)
-            target_node = self._find_node_with_free_gpus(tp_size)
+            dp_size = role.data_parallel_size
 
-            scheduling_opts = {"num_gpus": 0}
-            if target_node:
-                scheduling_opts["resources"] = {f"node:{target_node}": 0.001}
-                print(f"[runtime] scheduling vllm role={name} on node {target_node}")
+            # Spawn all actors first, then wait for all to be ready in parallel
+            actors = []
+            for replica_id in range(dp_size):
+                target_node = self._find_node_with_free_gpus(tp_size)
 
-            actor = VLLMEngineRank.options(**scheduling_opts).remote(
-                engine_kwargs=role.config,
-            )
-            # Run blocking ray.get in thread pool to allow parallel spawning
+                scheduling_opts = {"num_gpus": 0}
+                if target_node:
+                    scheduling_opts["resources"] = {f"node:{target_node}": 0.001}
+                    print(f"[runtime] scheduling vllm role={name} replica={replica_id} on node {target_node}")
+
+                actor = VLLMEngineRank.options(**scheduling_opts).remote(
+                    engine_kwargs=role.config,
+                )
+                actors.append(actor)
+                print(f"[runtime] spawning vllm role={name} replica={replica_id}")
+
+            # Wait for all replicas to be ready in parallel
+            print(f"[runtime] waiting for {len(actors)} vllm replicas to be ready...")
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: ray.get(actor.ready.remote()))
-            self.roles[name] = handle = VLLMHandle(actor, name=name)
-            print(f"[runtime] spawned vllm role={name}")
+            ready_refs = [a.ready.remote() for a in actors]
+            await loop.run_in_executor(None, ray.get, ready_refs)
+            print(f"[runtime] all {len(actors)} vllm replicas ready for role={name}")
+
+            self.roles[name] = VLLMHandle(actors, name=name)
             return
 
         raise ValueError(f"Unknown role kind: {role.kind}")
@@ -189,37 +208,60 @@ class Runtime:
             f"port={port} world_size={ch.world_size} offsets={ch.offsets} src_rank={ch.src_rank}"
         )
 
-        await asyncio.gather(
-            self._join_role_to_channel(src, ch, port),
-            self._join_role_to_channel(dst, ch, port),
-        )
+        # IMPORTANT: Dispatch all add_sync_channel calls FIRST, then await.
+        # NCCL init is a collective that blocks until all ranks join.
+        # If we await one role before dispatching the other, we deadlock.
+        src_refs = self._get_channel_join_futures(src, ch, port)
+        dst_refs = self._get_channel_join_futures(dst, ch, port)
+        all_refs = src_refs + dst_refs
+
+        # Ray ObjectRefs need ray.get() - run in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, ray.get, all_refs)
 
         print(f"[runtime] wired channel={ch.name}")
 
-    async def _join_role_to_channel(self, role_name: str, ch, port: int) -> None:
+    def _get_channel_join_futures(self, role_name: str, ch, port: int) -> list:
+        """
+        Return list of Ray ObjectRefs for add_sync_channel calls.
+        Does NOT await - caller must gather all futures together.
+        """
         role = self.plan.roles[role_name]
 
         if role.kind == "titan":
             handle = self.roles[role_name]
             base = ch.offsets[role_name]
-            futs = [
+            return [
                 actor.add_sync_channel.remote(
                     channel_name=ch.name,
                     host=self.host,
                     port=port,
                     world_size=ch.world_size,
-                    my_rank=base + local_rank,
+                    rank=base + local_rank,
                 )
                 for local_rank, actor in enumerate(handle.actors)
             ]
-            await asyncio.gather(*futs)
-            return
 
-        # vLLM: join external NCCL sync group via collective RPC to workers
-        vllm_actor = self.roles[role_name]._actor
-        await vllm_actor.join_sync.remote(
-            host=self.host,
-            port=port,
-            world_size=ch.world_size,
-            rank=ch.offsets[role_name],
-        )
+        elif role.kind == "vllm":
+            # vLLM: join external NCCL sync group via collective RPC to workers
+            # Each replica's workers get consecutive rank ranges
+            handle = self.roles[role_name]
+            base = ch.offsets[role_name]
+            workers_per_replica = role.world_size  # TP workers per instance
+
+            futs = []
+            for replica_id, actor in enumerate(handle._actors):
+                replica_base = base + (replica_id * workers_per_replica)
+                futs.append(
+                    actor.add_sync_channel.remote(
+                        channel_name=ch.name,
+                        host=self.host,
+                        port=port,
+                        world_size=ch.world_size,
+                        rank=replica_base,
+                    )
+                )
+            return futs
+
+        else:
+            raise ValueError(f"Unknown role kind: {role.kind}")
