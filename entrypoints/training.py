@@ -1,267 +1,165 @@
 import argparse
 import asyncio
 import logging
+import math
 import torch
-
-from rlvr_experiments.data import DataIterator, load_gsm8k, load_dummy
-
-logger = logging.getLogger(__name__)
-from rlvr_experiments.runtime import Runtime
-from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
-from rlvr_experiments.tracer import (
-    close_tracer,
-    get_tracer,
-    init_global_tracer,
-    set_current_task_name,
-    traced,
-)
-from rlvr_experiments.losses import GRPOLoss
-from rlvr_experiments.verifiers import MathVerifier
-from rlvr_experiments.vllm_utils import VLLMOutput
+import torch.nn.functional as F
 
 from transformers import AutoTokenizer
 
+from rlvr_experiments.data import DataIterator, load_dummy
+from rlvr_experiments.losses import GRPOLoss
+from rlvr_experiments.runtime import Runtime
+from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
+from rlvr_experiments.tracer import init_global_tracer, trace_span
+from rlvr_experiments.verifiers import MathVerifier
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="RLVR Training")
-    p.add_argument("config", type=str, help="Path to the YAML config file.")
-    return p.parse_args()
+logger = logging.getLogger(__name__)
 
 
-async def continuous_rollout_producer(
-    rollout,
-    buffer,
-    data_iter: DataIterator,
-    tokenizer,
-    verifier,
-    sampling_params: dict,
-    version: int,
-    replica_id: int = 0,
-) -> None:
-    """
-    Continuously generates rollouts and pushes them to the buffer.
-    Stops when sync_titan_to_vllm is called or data is exhausted.
+class RolloutSample:
+    """One prompt with N completions."""
 
-    Args:
-        rollout: VLLMHandle for this producer (single replica).
-        buffer: Shared RolloutBuffer.
-        data_iter: DataIterator (shared across replicas, thread-safe).
-        tokenizer: Tokenizer for processing outputs.
-        verifier: Reward verifier.
-        sampling_params: vLLM sampling parameters.
-        version: Epoch/version number for buffer entries.
-        replica_id: ID of this replica (for logging).
-    """
-    set_current_task_name(f"rollout_{replica_id}")
-    batch_num = 0
-    total_entries_produced = 0
+    def __init__(self, input_ids, completion_ids, logprobs, rewards):
+        self.input_ids = input_ids          # [N, seq_len]
+        self.completion_ids = completion_ids  # [N, completion_len]
+        self.logprobs = logprobs            # [N, completion_len]
+        self.rewards = rewards              # [N]
 
-    logger.info(f"producer[{replica_id}]: Starting, version={version}")
+    @classmethod
+    def from_vllm(cls, response, pad_token_id, rewards):
+        prompt = response.prompt_token_ids
+        outputs = response.outputs
+        n = len(outputs)
 
-    while True:
-        if rollout.is_stopped():
-            logger.info(f"producer[{replica_id}]: Rollout stopped, breaking")
-            break
+        # Build input_ids (prompt + completion), right-padded
+        seqs = [prompt + list(o.token_ids) for o in outputs]
+        max_seq_len = max(len(s) for s in seqs)
+        input_ids = torch.full((n, max_seq_len), pad_token_id, dtype=torch.long)
+        for i, seq in enumerate(seqs):
+            input_ids[i, :len(seq)] = torch.tensor(seq)
 
-        logger.debug(f"producer[{replica_id}]: Fetching next data batch (batch_num={batch_num})")
+        # Build completion_ids and logprobs, left-padded
+        max_completion_len = max(len(o.token_ids) for o in outputs)
+        completion_ids = torch.full((n, max_completion_len), pad_token_id, dtype=torch.long)
+        logprobs = torch.zeros((n, max_completion_len), dtype=torch.float32)
+
+        for i, o in enumerate(outputs):
+            L = len(o.token_ids)
+            completion_ids[i, -L:] = torch.tensor(o.token_ids)
+            logprobs[i, -L:] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
+
+        return cls(input_ids, completion_ids, logprobs, rewards)
+
+    @staticmethod
+    def batch(samples):
+        """Batch samples, compute advantages. Returns None if all zero-variance."""
+        valid = [s for s in samples if s.rewards.std() > 1e-6]
+        if not valid:
+            return None
+
+        def pad_cat(tensors):
+            max_len = max(t.shape[1] for t in tensors)
+            return torch.cat([F.pad(t, (0, max_len - t.shape[1])) for t in tensors])
+
+        def advantages(s):
+            a = (s.rewards - s.rewards.mean()) / s.rewards.std().clamp(min=1e-6)
+            return a[:, None].expand(-1, s.logprobs.shape[1])  # repeated along completion length
+
+        # B = total completions across all valid samples, L = max completion length
+        return {
+            "input_ids": pad_cat([s.input_ids for s in valid]),          # [B, prompt_len + L]
+            "completion_ids": pad_cat([s.completion_ids for s in valid]),  # [B, L]
+            "completion_mask": pad_cat([(s.completion_ids != 0).long() for s in valid]),  # [B, L]
+            "logprobs": pad_cat([s.logprobs for s in valid]),            # [B, L]
+            "advantages": pad_cat([advantages(s) for s in valid]),       # [B, L]
+        }
+
+
+async def produce_rollouts(rollout, buffer, data_iter, pad_token_id, verifier, sampling_params, epoch):
+    """Generate rollouts and push to buffer until stopped or data exhausted."""
+    while not rollout.is_stopped():
         batch = await data_iter.next_batch()
         if batch is None:
-            logger.info(f"producer[{replica_id}]: Data exhausted, breaking")
             break
 
-        batch_num += 1
-        templates = batch["templates"]
-        answers = batch["answers"]
-        logger.info(f"producer[{replica_id}]: Got data batch {batch_num}, {len(templates)} templates, generating...")
-
-        responses = await rollout.generate(templates, **sampling_params)
-        logger.debug(f"producer[{replica_id}]: Generate complete, got {len(responses)} responses")
+        responses = await rollout.generate(batch["templates"], **sampling_params)
 
         for i, response in enumerate(responses):
-            vllm_output = VLLMOutput(response)
-            full_input_ids, completion_ids, completion_mask, completion_logprobs = (
-                vllm_output.get_tensors(tokenizer)
-            )
-
-            if i == 0:
-                example_rollout = vllm_output.completion_texts()[0][:100].replace('\n', ' ')
-                logger.info(f"producer[{replica_id}]: Example rollout: {example_rollout}...")
-
+            completions = [out.text for out in response.outputs]
+            target = batch["answers"][i]
             rewards = verifier.verify_batch(
-                responses=vllm_output.completion_texts(),
-                targets=[answers[i]] * len(response.outputs),
+                responses=completions,
+                targets=[target] * len(completions),
                 return_dtype=torch.float32,
             )
-            logger.debug(f"producer[{replica_id}]: Rewards for response {i}: sum={rewards.sum().item():.2f}, mean={rewards.mean().item():.2f}")
-
-            if tracer := get_tracer():
-                gen_lengths = [len(out.token_ids) for out in response.outputs]
-                tracer.counter("rollout", {
-                    "avg_reward": rewards.mean().item(),
-                    "avg_gen_length": sum(gen_lengths) / len(gen_lengths),
-                })
-
-            entry = {
-                "full_input_ids": full_input_ids,
-                "completion_ids": completion_ids,
-                "completion_mask": completion_mask,
-                "completion_logprobs": completion_logprobs,
-                "rewards": rewards,
-            }
-            logger.debug(f"producer[{replica_id}]: Putting entry {total_entries_produced} to buffer...")
-            await buffer.put(entry, version)
-            total_entries_produced += 1
-            logger.debug(f"producer[{replica_id}]: Entry {total_entries_produced} put complete, buffer_size={buffer.size()}")
-
-    logger.info(f"producer[{replica_id}]: Finished, total_entries_produced={total_entries_produced}")
+            await buffer.put(RolloutSample.from_vllm(response, pad_token_id, rewards), epoch)
 
 
-@traced()
-async def train_step(
-    batch: dict,
-    trainer,
-    reference,
-    loss_fn,
-) -> tuple[float, float]:
-    """
-    Train on a batched rollout entry. Returns (loss, grad_norm).
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config", type=str)
+    args = parser.parse_args()
 
-    The batch contains pre-computed per-group normalized advantages.
-    """
-    input_ids = batch["full_input_ids"]
-    completion_ids = batch["completion_ids"]
-    rollout_logprobs = batch["completion_logprobs"]
-    completion_mask = batch["completion_mask"]
-    advantages = batch["advantages"]
-
-    # TODO: it'd be nice to make this concurrent with the model forward.
-    # Maybe create a task and then await it later.
-    reference_logprobs = await reference.compute_logprobs(input_ids, completion_ids)
-
-    loss = await trainer.compute_loss_and_backward(
-        loss_fn,
-        input_ids,
-        completion_ids,
-        reference_logprobs,
-        rollout_logprobs,
-        advantages,
-        padding_mask=completion_mask,
-    )
-
-    grad_norm = await trainer.optimizer_step()
-
-    return loss, grad_norm
-
-
-async def main() -> None:
-    args = parse_args()
     runtime = await Runtime.from_plan(args.config)
     plan = runtime.plan
 
-    if plan.trace_path:
-        init_global_tracer(plan.trace_path)
-    set_current_task_name("main")
-
+    init_global_tracer(plan.trace_path)
     await runtime.start()
 
-    # Roles
+    # Unpack runtime components
     trainer = runtime.roles["trainer"]
     reference = runtime.roles["reference"]
     rollout = runtime.roles["rollout"]
     buffer = runtime.buffer
 
-    # Config
+    # Setup
     tokenizer = AutoTokenizer.from_pretrained(**plan.tokenizer)
+    pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
     loss_fn = GRPOLoss(**plan.loss)
     verifier = MathVerifier()
-
-    # ds = load_gsm8k(**plan.data)
-    ds = load_dummy(**plan.data)
-    data_iter = DataIterator(ds, tokenizer=tokenizer, **plan.data_iter)
-
+    data_iter = DataIterator(load_dummy(**plan.data), tokenizer=tokenizer, **plan.data_iter)
     sampling_params = {**plan.sampling, "logprobs": 0}
 
     num_epochs = plan.training["num_epochs"]
-    iterations_per_epoch = plan.training.get("iterations_per_epoch")
+    iterations_per_epoch = plan.training.get("iterations_per_epoch") or math.inf
     sync_reference_every = plan.training["sync_reference_every"]
-    train_batch_size = plan.training.get("train_batch_size", 1)
+    train_batch_size = plan.training.get("train_batch_size") or 1
 
-    # Training loop
     for epoch in range(num_epochs):
         data_iter.new_epoch(seed=epoch)
-
-        # Start producer(s) - one per replica
-        def make_producer(replica_id):
-            return continuous_rollout_producer(
-                rollout=rollout,
-                buffer=buffer,
-                data_iter=data_iter,
-                tokenizer=tokenizer,
-                verifier=verifier,
-                sampling_params=sampling_params,
-                version=epoch,
-                replica_id=replica_id,
-            )
-        producer_tasks = rollout.start_producer(make_producer)
+        rollout.start_producers(produce_rollouts, buffer, data_iter, pad_token_id, verifier, sampling_params, epoch)
 
         trained = 0
-        null_batch_count = 0
-        while iterations_per_epoch is None or trained < iterations_per_epoch:
-            # Check if all producers finished (data exhausted)
-            producer_done = all(t.done() for t in producer_tasks)
-            buffer_size = buffer.size()
-            logger.debug(f"train_loop: trained={trained}, producer_done={producer_done}, buffer_size={buffer_size}")
+        while trained < iterations_per_epoch:
+            if rollout.producers_done() and buffer.size() == 0:
+                break
 
-            if producer_done:
-                # Drain remaining buffer entries
-                if buffer_size == 0:
-                    logger.info("train_loop: Producer done and buffer empty, breaking")
-                    break
-                logger.debug(f"train_loop: Producer done but buffer has {buffer_size} items, draining...")
-
-            logger.debug(f"train_loop: Calling buffer.pop(batch_size={train_batch_size}, min_version={epoch})")
-            batch = await buffer.pop(batch_size=train_batch_size, min_version=epoch)
+            samples = await buffer.pop_batch(train_batch_size, min_version=epoch)
+            batch = RolloutSample.batch(samples)
             if batch is None:
-                null_batch_count += 1
-                logger.debug(f"train_loop: Got None batch (#{null_batch_count}), skipping")
-                # All samples had zero reward variance - skip this batch
                 continue
 
-            null_batch_count = 0  # Reset on success
-            logger.debug("train_loop: Got valid batch, calling train_step")
-
-            loss, grad_norm = await train_step(batch, trainer, reference, loss_fn)
+            with trace_span(None, "train_step"):
+                ref_logprobs = await reference.compute_logprobs(batch["input_ids"], batch["completion_ids"])
+                loss = await trainer.forward_backward(
+                    loss_fn,
+                    batch["input_ids"],
+                    loss_args=(batch["completion_ids"], ref_logprobs, batch["logprobs"], batch["advantages"]),
+                    loss_kwargs={"padding_mask": batch["completion_mask"]},
+                )
+                grad_norm = await trainer.optim_step()
             trained += 1
-            logger.debug(f"train_loop: train_step complete, loss={loss:.4f}, grad_norm={grad_norm:.4f}")
 
             if trained % 10 == 0:
-                stats = buffer.get_stats()
-                logger.info(f"step={trained} loss={loss:.4f} grad_norm={grad_norm:.4f} buffer={stats}")
+                logger.info(f"step={trained} loss={loss:.4f} grad_norm={grad_norm:.4f}")
 
-        stats = buffer.get_stats()
-        logger.info(f"Epoch {epoch}: Completed {trained} train steps. Buffer stats: {stats}")
+        await rollout.stop_producers()
+        logger.info(f"Epoch {epoch}: {trained} steps")
 
-        logger.info(f"Epoch {epoch}: Syncing trainer to vLLM...")
         await sync_titan_to_vllm(trainer, rollout)
-        logger.debug(f"Epoch {epoch}: sync_titan_to_vllm done")
-
         if (epoch + 1) % sync_reference_every == 0:
-            logger.info(f"Epoch {epoch}: Syncing trainer to reference...")
             await sync_titan_to_titan(trainer, reference)
-            logger.debug(f"Epoch {epoch}: sync_titan_to_titan done")
-
-        # Export trained model in HuggingFace format
-        if False: # TODO: save or not
-            logger.info(f"Epoch {epoch}: Exporting to HuggingFace...")
-            await trainer.export_to_hf(f"outputs/{plan.run['name']}")
-            logger.debug(f"Epoch {epoch}: export_to_hf done")
-
-        logger.info(f"Epoch {epoch}: complete")
-
-    logger.info("Training complete, closing tracer...")
-    if get_tracer():
-        close_tracer()
-    logger.info("Done")
 
 
 if __name__ == "__main__":
