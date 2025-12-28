@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict
 
 import os
 import torch
@@ -13,7 +13,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
-from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.logging import logger
 
 
 class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
@@ -234,20 +234,12 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         logger.debug(f"TitanModel.forward: done, logits type={type(logits).__name__}")
         return logits
 
-    def backward_step(self, loss: torch.Tensor) -> None:
+    def optim_step(self) -> float:
+        logger.debug("TitanModel.optim_step: starting...")
         if not self.trainable:
-            raise RuntimeError("Model is non-trainable; cannot call backward_step().")
-        
-        # No CP: pass None into train_context_mgr
-        with self.train_context_mgr(None):
-            loss.backward()
+            raise RuntimeError("Model is non-trainable; cannot call optim_step().")
 
-    def optimizer_step(self) -> float:
-        logger.debug("TitanModel.optimizer_step: starting...")
-        if not self.trainable:
-            raise RuntimeError("Model is non-trainable; cannot call optimizer_step().")
-
-        logger.debug("TitanModel.optimizer_step: clipping grads...")
+        logger.debug("TitanModel.optim_step: clipping grads...")
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -255,29 +247,23 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             pp_mesh=None,  # PP disabled
             ep_enabled=self.parallel_dims.ep_enabled,
         )
-        logger.debug(f"TitanModel.optimizer_step: grad_norm={grad_norm.item():.4f}")
+        logger.debug(f"TitanModel.optim_step: grad_norm={grad_norm.item():.4f}")
 
         # Ensure async checkpoint staging (if any) is done
         self.checkpointer.maybe_wait_for_staging()
 
-        logger.debug("TitanModel.optimizer_step: stepping optimizer...")
+        logger.debug("TitanModel.optim_step: stepping optimizer...")
         self.optimizers.step()
-        logger.debug("TitanModel.optimizer_step: stepping lr_scheduler...")
+        logger.debug("TitanModel.optim_step: stepping lr_scheduler...")
         self.lr_schedulers.step()
-        logger.debug("TitanModel.optimizer_step: zeroing grads...")
+        logger.debug("TitanModel.optim_step: zeroing grads...")
         self.optimizers.zero_grad()
 
         self.step += 1
-        logger.debug(f"TitanModel.optimizer_step: done, step={self.step}")
+        logger.debug(f"TitanModel.optim_step: done, step={self.step}")
         return grad_norm.item()
     
     # Checkpointing and state management
-
-    def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step}
-
-    def load_state_dict(self, state_dict: dict[str, Any]):
-        self.step = state_dict["step"]
 
     def hf_state_dict(self) -> Dict[str, Any]:
         """
@@ -292,9 +278,6 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             raise RuntimeError("No StateDictAdapter found for this model.")
         hf_sd = self.sd_adapter.to_hf(titan_state)
         return hf_sd
-
-    def load_checkpoint(self, step: int | None = None):
-        self.checkpointer.load(step=step)
 
     def save_checkpoint(self, step: int | None = None, last_step: bool = False):
         curr_step = self.step if step is None else step
