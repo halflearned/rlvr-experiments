@@ -3,17 +3,25 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import math
+import os
+import time
 import torch
 import torch.nn.functional as F
 
 from transformers import AutoTokenizer
 
-from rlvr_experiments.data import DataIterator, load_dummy
+from rlvr_experiments.data import DataIterator, load_humaneval, load_mbpp
 from rlvr_experiments.losses import GRPOLoss
 from rlvr_experiments.runtime import Runtime
+from rlvr_experiments.sample_logger import init_sample_logger, log_sample, close_sample_logger
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import init_global_tracer, trace_span
-from rlvr_experiments.verifiers import MathVerifier
+from rlvr_experiments.sandbox import RayCodeVerifier, HumanEvalVerifier, MBPPVerifier
+
+DATASET_REGISTRY = {
+    "humaneval": (load_humaneval, HumanEvalVerifier),
+    "mbpp": (load_mbpp, MBPPVerifier),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -26,21 +34,20 @@ class RolloutSample:
     completion_ids: torch.Tensor     # [N, completion_len]
     logprobs: torch.Tensor           # [N, completion_len]
     rewards: list[float]             # [N]
+    problem_id: str = ""
 
     @classmethod
-    def from_vllm(cls, response, pad_token_id, rewards):
+    def from_vllm(cls, response, pad_token_id, rewards, problem_id: str = ""):
         prompt = response.prompt_token_ids
         outputs = response.outputs
         n = len(outputs)
 
-        # Build input_ids (prompt + completion), right-padded
         seqs = [prompt + list(o.token_ids) for o in outputs]
         max_seq_len = max(len(s) for s in seqs)
         input_ids = torch.full((n, max_seq_len), pad_token_id, dtype=torch.long)
         for i, seq in enumerate(seqs):
             input_ids[i, :len(seq)] = torch.tensor(seq)
 
-        # Build completion_ids and logprobs, left-padded
         max_completion_len = max(len(o.token_ids) for o in outputs)
         completion_ids = torch.full((n, max_completion_len), pad_token_id, dtype=torch.long)
         logprobs = torch.zeros((n, max_completion_len), dtype=torch.float32)
@@ -50,14 +57,14 @@ class RolloutSample:
             completion_ids[i, -L:] = torch.tensor(o.token_ids)
             logprobs[i, -L:] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
 
-        return cls(input_ids, completion_ids, logprobs, rewards)
+        return cls(input_ids, completion_ids, logprobs, rewards, problem_id)
 
 
 def make_batch(samples, pad_token_id):
     """Batch samples, compute advantages. Returns None if all zero-variance."""
     valid = [s for s in samples if torch.tensor(s.rewards, dtype=torch.float32).std() > 1e-6]
     if not valid:
-        return None
+        return None, samples  # Return original samples for logging
 
     def pad_cat(tensors, pad_value=0):
         max_len = max(t.shape[1] for t in tensors)
@@ -66,20 +73,42 @@ def make_batch(samples, pad_token_id):
     def advantages(s):
         rewards = torch.tensor(s.rewards, dtype=torch.float32)
         a = (rewards - rewards.mean()) / rewards.std().clamp(min=1e-6)
-        return a[:, None].expand(-1, s.logprobs.shape[1])  # repeated along completion length
+        return a[:, None].expand(-1, s.logprobs.shape[1])
 
-    # B = total completions across all valid samples, L = max completion length
     return {
-        "input_ids": pad_cat([s.input_ids for s in valid], pad_value=pad_token_id),          # [B, prompt_len + L]
-        "completion_ids": pad_cat([s.completion_ids for s in valid], pad_value=pad_token_id),  # [B, L]
-        "completion_mask": pad_cat([(s.completion_ids != pad_token_id).long() for s in valid]),  # [B, L]
-        "logprobs": pad_cat([s.logprobs for s in valid]),            # [B, L]
-        "advantages": pad_cat([advantages(s) for s in valid]),       # [B, L]
-    }
+        "input_ids": pad_cat([s.input_ids for s in valid], pad_value=pad_token_id),
+        "completion_ids": pad_cat([s.completion_ids for s in valid], pad_value=pad_token_id),
+        "completion_mask": pad_cat([(s.completion_ids != pad_token_id).long() for s in valid]),
+        "logprobs": pad_cat([s.logprobs for s in valid]),
+        "advantages": pad_cat([advantages(s) for s in valid]),
+    }, valid
 
 
 async def produce_rollouts(rollout, buffer, data_iter, pad_token_id, verifier, sampling_params, epoch):
-    """Generate rollouts and push to buffer until stopped or data exhausted."""
+    """Generate rollouts with pipelined verification.
+
+    Verification runs in background while GPU generates next batch.
+    """
+    pending: list[asyncio.Task] = []
+    gen_batch = 0
+
+    async def verify_and_buffer(response, problem):
+        """Verify completions and push to buffer."""
+        start = time.perf_counter()
+        completions = [out.text for out in response.outputs]
+        rewards = await verifier.verify_completions(problem, completions)
+        duration_ms = (time.perf_counter() - start) * 1000
+
+        problem_id = str(problem.get('task_id', 'unknown'))
+        passed = sum(1 for r in rewards if r > 0)
+
+        log_sample("verification",
+            problem_id=problem_id, generation_batch=gen_batch, epoch=epoch,
+            num_completions=len(completions), rewards=rewards,
+            passed=passed, failed=len(rewards) - passed, duration_ms=duration_ms)
+
+        await buffer.put(RolloutSample.from_vllm(response, pad_token_id, rewards, problem_id), epoch)
+
     while not rollout.is_stopped():
         batch = await data_iter.next_batch()
         if batch is None:
@@ -87,11 +116,21 @@ async def produce_rollouts(rollout, buffer, data_iter, pad_token_id, verifier, s
 
         responses = await rollout.generate(batch["templates"], **sampling_params)
 
+        # Submit verifications as background tasks
         for i, response in enumerate(responses):
-            completions = [out.text for out in response.outputs]
-            target = batch["answers"][i]
-            rewards = verifier.verify_batch(completions, [target] * len(completions))
-            await buffer.put(RolloutSample.from_vllm(response, pad_token_id, rewards), epoch)
+            task = asyncio.create_task(verify_and_buffer(response, batch["problems"][i]))
+            pending.append(task)
+
+        gen_batch += 1
+
+        # Harvest completed tasks
+        done = [t for t in pending if t.done()]
+        for t in done:
+            await t
+            pending.remove(t)
+
+    if pending:
+        await asyncio.gather(*pending)
 
 
 async def main():
@@ -103,28 +142,45 @@ async def main():
     plan = runtime.plan
 
     tracer = init_global_tracer(plan.trace_path)
+
+    # Sample logger - goes next to trace file
+    if plan.trace_path:
+        sample_path = os.path.join(os.path.dirname(plan.trace_path) or ".", "samples.jsonl")
+        init_sample_logger(sample_path)
+        logger.info(f"Sample logging to {sample_path}")
+
     await runtime.start()
 
-    # Unpack runtime components
     trainer = runtime.roles["trainer"]
     reference = runtime.roles["reference"]
     rollout = runtime.roles["rollout"]
     buffer = runtime.buffer
 
-    # Setup
+    # Config
     tok_cfg = plan.tokenizer
-    loss_cfg = plan.loss
-    data_cfg = plan.data
-    data_iter_cfg = plan.data_iter
-    sampling_cfg = plan.sampling
+    data_cfg = dict(plan.data)  # Copy so we can pop
     train_cfg = plan.training
+    verifier_cfg = getattr(plan, "verifier", {})
 
     tokenizer = AutoTokenizer.from_pretrained(**tok_cfg)
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
-    loss_fn = GRPOLoss(**loss_cfg)
-    verifier = MathVerifier()
-    data_iter = DataIterator(load_dummy(**data_cfg), tokenizer=tokenizer, **data_iter_cfg)
-    sampling_params = {**sampling_cfg, "logprobs": 0}
+    loss_fn = GRPOLoss(**plan.loss)
+
+    # Dataset selection
+    dataset_name = data_cfg.pop("dataset", None)
+    if not dataset_name or dataset_name not in DATASET_REGISTRY:
+        raise ValueError(f"data.dataset required, one of: {list(DATASET_REGISTRY.keys())}")
+
+    load_fn, verifier_cls = DATASET_REGISTRY[dataset_name]
+    verifier = RayCodeVerifier(
+        verifier_cls,
+        num_workers=verifier_cfg.get("num_workers", 4),
+        verifier_kwargs={"timeout": verifier_cfg.get("timeout", 10.0)},
+    )
+    verifier.emit_worker_thread_names()  # Register worker names in Perfetto
+
+    data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
+    sampling_params = {**plan.sampling, "logprobs": 0}
 
     num_epochs = train_cfg["num_epochs"]
     iterations_per_epoch = train_cfg.get("iterations_per_epoch") or math.inf
@@ -132,45 +188,49 @@ async def main():
     train_batch_size = train_cfg.get("train_batch_size") or 1
 
     for epoch in range(num_epochs):
-
         data_iter.new_epoch(seed=epoch)
-        
         rollout.start_producers(produce_rollouts, buffer, data_iter, pad_token_id, verifier, sampling_params, epoch)
 
         trained = 0
         while trained < iterations_per_epoch:
-            # if producers are done producing and we've exhausted the buffer, we're done
             if rollout.producers_done() and buffer.size() == 0:
                 break
 
-            # sample from the buffer, ensuring it's at most from epoch min_version
             samples = await buffer.pop_batch(train_batch_size, min_version=epoch)
 
-            # batch the samples
-            batch = make_batch(samples, pad_token_id)
+            # Log reward stats
+            all_rewards = [r for s in samples for r in s.rewards]
+            tracer.counter("rewards", {
+                "mean": sum(all_rewards) / len(all_rewards) if all_rewards else 0,
+                "max": max(all_rewards) if all_rewards else 0,
+                "num_positive": sum(1 for r in all_rewards if r > 0),
+            })
+
+            batch, valid_samples = make_batch(samples, pad_token_id)
+
+            # Log training events
+            for s in samples:
+                r = torch.tensor(s.rewards, dtype=torch.float32)
+                log_sample("training",
+                    problem_id=s.problem_id, step=trained, epoch=epoch,
+                    rewards=s.rewards, included=r.std() > 1e-6)
+
             if batch is None:
+                tracer.counter("skipped", {"zero_variance_batches": 1})
                 continue
 
-            # Compute avg reward across all samples in this batch
-            avg_reward = sum(sum(s.rewards) / len(s.rewards) for s in samples) / len(samples)
+            avg_reward = sum(sum(s.rewards) / len(s.rewards) for s in valid_samples) / len(valid_samples)
 
             with trace_span(None, "train_step"):
-
-                # compute the reference logprobs
                 ref_logprobs = await reference.compute_logprobs(batch["input_ids"], batch["completion_ids"])
-                
-                # train
                 loss = await trainer.forward_backward(
-                    loss_fn,
-                    batch["input_ids"],
+                    loss_fn, batch["input_ids"],
                     loss_args=(batch["completion_ids"], ref_logprobs, batch["logprobs"], batch["advantages"]),
                     loss_kwargs={"padding_mask": batch["completion_mask"]},
                 )
-                
                 grad_norm = await trainer.optim_step()
-            
-            trained += 1
 
+            trained += 1
             tracer.counter("metrics", {"avg_reward": avg_reward, "loss": loss, "grad_norm": grad_norm})
 
             if trained % 10 == 0:

@@ -73,10 +73,11 @@ class TraceRecorder:
         name: str,
         *,
         cat: str = "trace",
+        tid: Optional[int] = None,
         args: Optional[Dict[str, object]] = None,
     ):
         ts = self._now_us()
-        tid = self._get_tid()
+        tid = tid if tid is not None else self._get_tid()
         try:
             yield
         finally:
@@ -167,11 +168,11 @@ def _signal_handler(signum, frame):
     signal.default_int_handler(signum, frame)
 
 
-def init_global_tracer(path: str) -> Optional[TraceRecorder]:
+def init_global_tracer(path: str, *, use_task_ids: bool = False) -> Optional[TraceRecorder]:
     global _GLOBAL_TRACER
     if not path:
         return None
-    _GLOBAL_TRACER = TraceRecorder(path)
+    _GLOBAL_TRACER = TraceRecorder(path, use_task_ids=use_task_ids)
     atexit.register(_GLOBAL_TRACER.close)
     # Also handle Ctrl+C and termination signals
     signal.signal(signal.SIGINT, _signal_handler)

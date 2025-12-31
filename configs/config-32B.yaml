@@ -88,7 +88,6 @@ roles:
         disable_loss_parallel: true
 
       checkpoint:
-        # I think we actually won't use this in the end, but alas.
         enable: true
         folder: "checkpoint"
         initial_load_in_hf: true
