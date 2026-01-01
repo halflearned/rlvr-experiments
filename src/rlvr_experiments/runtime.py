@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -9,9 +8,11 @@ from typing import Any, Dict
 import ray
 
 from .config_plan import Plan, load_plan
-from .titan_actor import create_titan_group
-from .vllm_engine_actor import VLLMEngineRank, VLLMHandle
 from .rollout_buffer import RolloutBuffer
+from .sample_logger import init_sample_logger
+from .titan_actor import create_titan_group
+from .tracer import init_global_tracer, get_tracer
+from .vllm_engine_actor import VLLMEngineRank, VLLMHandle
 
 
 def _find_free_port(start: int = 29500, end: int = 65535) -> int:
@@ -53,9 +54,28 @@ class Runtime:
     namespace: int
     buffer: Any
 
+    @property
+    def tracer(self):
+        """Access the global tracer (if configured)."""
+        return get_tracer()
+
     @classmethod
     async def from_plan(cls, plan_path: str) -> "Runtime":
+        import os
+
         plan = load_plan(plan_path)
+
+        # Initialize tracing - use trace_path from config or default to ./traces/
+        trace_path = getattr(plan, "trace_path", None) or "traces/trace.json"
+        trace_dir = os.path.dirname(trace_path) or "."
+        os.makedirs(trace_dir, exist_ok=True)
+
+        init_global_tracer(trace_path)
+        sample_path = os.path.join(trace_dir, "samples.jsonl")
+        init_sample_logger(sample_path)
+        print(f"[runtime] tracing to {trace_path}")
+        print(f"[runtime] sample logging to {sample_path}")
+
         ray.init(address="auto")
         host = ray.util.get_node_ip_address()
 
