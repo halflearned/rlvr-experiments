@@ -44,7 +44,7 @@ async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype
     if not vllm.is_stopped():
         raise RuntimeError("Cannot sync weights while vLLM is generating. Call stop_producers() first.")
     channel = f"{trainer.name}_to_{vllm.name}"
-    with trace_span(None, "sync.titan_to_vllm"):
+    with trace_span("sync.titan_to_vllm"):
         await _sync_chunks(trainer, vllm._actors, channel, chunk_mb, wire_dtype, src_rank,
                            f"synced {trainer.name} -> {vllm.name}")
 
@@ -53,6 +53,6 @@ async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype
 async def sync_titan_to_titan(src, dst, chunk_mb=100, src_rank=0, wire_dtype="bfloat16"):
     """Sync weights from src Titan model to dst Titan model."""
     channel = f"{src.name}_to_{dst.name}"
-    with trace_span(None, "sync.titan_to_titan"):
+    with trace_span("sync.titan_to_titan"):
         await _sync_chunks(src, dst.actors, channel, chunk_mb, wire_dtype, src_rank,
                            f"synced {src.name} -> {dst.name}")

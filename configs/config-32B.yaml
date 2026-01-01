@@ -32,6 +32,7 @@ sampling:
   top_k: 20
   max_tokens: 512
   n: 16
+  logprobs: 0
 
 trace_path: /home/ubuntu/outputs/trace.json
 
@@ -88,7 +89,6 @@ roles:
         disable_loss_parallel: true
 
       checkpoint:
-        # I think we actually won't use this in the end, but alas.
         enable: true
         folder: "checkpoint"
         initial_load_in_hf: true

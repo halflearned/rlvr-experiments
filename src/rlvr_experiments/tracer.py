@@ -73,10 +73,11 @@ class TraceRecorder:
         name: str,
         *,
         cat: str = "trace",
+        tid: Optional[int] = None,
         args: Optional[Dict[str, object]] = None,
     ):
         ts = self._now_us()
-        tid = self._get_tid()
+        tid = tid if tid is not None else self._get_tid()
         try:
             yield
         finally:
@@ -161,17 +162,16 @@ def _path_with_pid(path: str) -> str:
 
 
 def _signal_handler(signum, frame):
-    """Handle SIGINT/SIGTERM to ensure trace is written."""
+    """Handle SIGINT/SIGTERM to ensure trace is written, then force exit."""
     close_tracer()
-    # Re-raise to allow normal termination
-    signal.default_int_handler(signum, frame)
+    os._exit(1)  # Force exit, skip atexit handlers that might hang
 
 
-def init_global_tracer(path: str) -> Optional[TraceRecorder]:
+def init_global_tracer(path: str, *, use_task_ids: bool = True) -> Optional[TraceRecorder]:
     global _GLOBAL_TRACER
     if not path:
         return None
-    _GLOBAL_TRACER = TraceRecorder(path)
+    _GLOBAL_TRACER = TraceRecorder(path, use_task_ids=use_task_ids)
     atexit.register(_GLOBAL_TRACER.close)
     # Also handle Ctrl+C and termination signals
     signal.signal(signal.SIGINT, _signal_handler)
@@ -209,8 +209,8 @@ def _init_from_env() -> None:
 _init_from_env()
 
 
-def trace_span(tracer: Optional[TraceRecorder], name: str, **kwargs):
-    tracer = tracer or get_tracer()
+def trace_span(name: str, **kwargs):
+    tracer = get_tracer()
     if tracer is None:
         return nullcontext()
     return tracer.span(name, **kwargs)
@@ -220,45 +220,22 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-def _resolve_tracer(
-    sig: inspect.Signature,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    tracer_arg: str,
-) -> Optional[TraceRecorder]:
-    tracer = None
-    if tracer_arg in sig.parameters:
-        try:
-            bound = sig.bind_partial(*args, **kwargs)
-        except TypeError:
-            bound = None
-        if bound is not None:
-            tracer = bound.arguments.get(tracer_arg)
-    return tracer or get_tracer()
-
-
-def traced(
-    name: Optional[str] = None,
-    *,
-    tracer_arg: str = "tracer",
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def traced(name: Optional[str] = None) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Decorator to wrap a function in a trace span."""
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         span_name = name or func.__name__
-        sig = inspect.signature(func)
 
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-                tracer = _resolve_tracer(sig, args, kwargs, tracer_arg)
-                with trace_span(tracer, span_name):
+                with trace_span(span_name):
                     return await func(*args, **kwargs)
 
             return async_wrapper
 
         @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            tracer = _resolve_tracer(sig, args, kwargs, tracer_arg)
-            with trace_span(tracer, span_name):
+            with trace_span(span_name):
                 return func(*args, **kwargs)
 
         return wrapper

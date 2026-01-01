@@ -4,8 +4,6 @@ from typing import Generic, TypeVar
 
 from ray.util.queue import Queue
 
-from .tracer import traced
-
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -26,7 +24,6 @@ class RolloutBuffer(Generic[T]):
         self._max_reads = max_reads
         self._stats = {"put": 0, "popped": 0, "evicted_stale": 0, "evicted_exhausted": 0}
 
-    @traced("buffer.put")
     async def put(self, item: T, version: int) -> None:
         entry = Entry(item=item, version=version, reads_remaining=self._max_reads)
         await self._queue.put_async(entry)
@@ -51,9 +48,21 @@ class RolloutBuffer(Generic[T]):
 
             return entry.item
 
-    async def pop_batch(self, batch_size: int, min_version: int | None = None) -> list[T]:
-        """Pop up to batch_size items."""
-        return [await self.pop(min_version) for _ in range(batch_size)]
+    async def pop_batch(self, batch_size: int, min_version: int | None = None, timeout: float | None = None) -> list[T]:
+        """Pop up to batch_size items. If timeout specified, returns partial batch on timeout."""
+        import asyncio
+        items = []
+        for _ in range(batch_size):
+            try:
+                if timeout is not None:
+                    item = await asyncio.wait_for(self.pop(min_version), timeout=timeout)
+                else:
+                    item = await self.pop(min_version)
+                items.append(item)
+            except asyncio.TimeoutError:
+                logger.warning(f"pop_batch timeout after {len(items)}/{batch_size} items")
+                break
+        return items
 
     def size(self) -> int:
         return self._queue.qsize()
