@@ -8,7 +8,7 @@ from typing import Any, Dict
 import ray
 
 from .config_plan import Plan, load_plan
-from .rollout_buffer import RolloutBuffer
+from .buffer import DataBuffer
 from .sample_logger import init_sample_logger
 from .titan_actor import create_titan_group
 from .tracer import init_global_tracer, get_tracer
@@ -98,7 +98,7 @@ class Runtime:
         for cn in sorted(channel_ports):
             print(f"[runtime] sync channel port channel={cn} port={channel_ports[cn]}")
 
-        buffer = RolloutBuffer(**plan.buffer)
+        buffer = DataBuffer(**plan.buffer)
 
         return cls(
             plan=plan,

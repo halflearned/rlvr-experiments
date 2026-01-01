@@ -38,6 +38,7 @@ sampling:
   top_k: 20
   max_tokens: 512
   n: 16
+  logprobs: 0
 
 trace_path: /home/ubuntu/outputs/trace.json
 

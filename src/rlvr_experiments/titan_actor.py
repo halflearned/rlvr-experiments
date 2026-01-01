@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Callable
 
 from torch.distributed.tensor import DTensor, distribute_tensor
 
-from .weight_sync import WeightSyncManager
+from .syncing import WeightSyncManager
 from .ops import compute_logprobs
 
 import asyncio

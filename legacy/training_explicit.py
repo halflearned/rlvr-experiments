@@ -16,7 +16,7 @@ from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import init_sample_logger, log_sample, close_sample_logger
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import init_global_tracer, trace_span, set_current_task_name
-from rlvr_experiments.sandbox import RayCodeVerifier, HumanEvalVerifier, MBPPVerifier
+from rlvr_experiments.verifiers import VerifierPool, HumanEvalVerifier, MBPPVerifier
 
 DATASET_REGISTRY = {
     "humaneval": (load_humaneval, HumanEvalVerifier),
@@ -149,13 +149,11 @@ async def main():
         raise ValueError(f"data.dataset required, one of: {list(DATASET_REGISTRY.keys())}")
 
     load_fn, verifier_cls = DATASET_REGISTRY[dataset_name]
-    verifier = RayCodeVerifier(
+    verifier = VerifierPool(
         verifier_cls,
         num_workers=verifier_cfg.get("num_workers", 4),
-        verifier_kwargs={
-            "timeout": verifier_cfg.get("timeout", 10.0),
-            "max_concurrent": verifier_cfg.get("max_concurrent", 4),
-        },
+        timeout=verifier_cfg.get("timeout", 10.0),
+        max_concurrent=verifier_cfg.get("max_concurrent", 4),
     )
 
     data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)

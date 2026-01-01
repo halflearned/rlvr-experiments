@@ -1,12 +1,37 @@
+"""Weight synchronization between models.
+
+Provides NCCL-based weight transfer between:
+- Trainer → vLLM (for rollout generation)
+- Trainer → Reference (for KL computation)
+"""
+
 import asyncio
 import logging
 
 import ray
+import torch
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.utils import StatelessProcessGroup
 
 from .tracer import traced, trace_span
 
 logger = logging.getLogger(__name__)
 
+
+# --- Low-level NCCL manager ---
+
+class WeightSyncManager:
+    """NCCL communicator for weight sync between models in separate distributed worlds."""
+
+    def __init__(self, host: str, port: int, world_size: int, rank: int, device: torch.device) -> None:
+        pg = StatelessProcessGroup.create(host=host, port=port, rank=rank, world_size=world_size)
+        self.communicator = PyNcclCommunicator(pg, device=device)
+        self.sync_group_rank = rank
+        self.device = device
+        self.world_size = world_size
+
+
+# --- High-level sync functions ---
 
 _BYTES_PER_ELEM = {"bfloat16": 2, "float16": 2, "float32": 4, "int8": 1}
 
