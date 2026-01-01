@@ -1,4 +1,4 @@
-"""Ray-distributed code verification."""
+"""Distributed verification pool."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import time
 
 import ray
 
-from .verifier import CodeVerifier
+from .code import CodeVerifier
 from rlvr_experiments.tracer import get_tracer
 
 logger = logging.getLogger(__name__)
@@ -34,20 +34,26 @@ class _VerifierWorker:
         return scores, durations, timing_spans, self.worker_id, (time.perf_counter() - batch_start) * 1000
 
 
-class RayCodeVerifier:
-    """Distributed code verifier using Ray actor pool."""
+class VerifierPool:
+    """Distributed verifier pool.
 
-    def __init__(self, verifier_cls: type[CodeVerifier], num_workers: int = 4, verifier_kwargs: dict | None = None):
+    Args:
+        verifier_cls: The verifier class to instantiate on each worker (e.g., MBPPVerifier)
+        num_workers: Number of parallel workers
+        **verifier_kwargs: Passed to verifier_cls constructor (e.g., timeout=10.0)
+    """
+
+    def __init__(self, verifier_cls: type[CodeVerifier], num_workers: int = 4, **verifier_kwargs):
         self.num_workers = num_workers
-        self.verifier_kwargs = verifier_kwargs or {}
+        self.verifier_kwargs = verifier_kwargs
         self._worker_tid_base = 1000  # Base tid for Perfetto worker threads
-        self.workers = [_VerifierWorker.remote(verifier_cls, i, self.verifier_kwargs) for i in range(num_workers)]
+        self.workers = [_VerifierWorker.remote(verifier_cls, i, verifier_kwargs) for i in range(num_workers)]
         self._idx = 0
         # Track last span end time per worker to prevent overlaps in trace
         self._worker_last_end_us: dict[int, float] = {}
         atexit.register(self.shutdown)
         self._register_tracer_threads()
-        logger.info(f"Created RayCodeVerifier with {num_workers} {verifier_cls.__name__} workers")
+        logger.info(f"Created VerifierPool with {num_workers} {verifier_cls.__name__} workers")
 
     def _register_tracer_threads(self):
         """Register worker thread names with Perfetto tracer."""

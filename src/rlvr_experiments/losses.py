@@ -1,7 +1,11 @@
 import torch
-import torch.nn.functional as F
 
 from .ops import compute_logprobs
+
+
+def _rewards_to_advantages(rewards: torch.Tensor) -> torch.Tensor:
+    """GRPO: normalize rewards to zero mean, unit variance."""
+    return (rewards - rewards.mean()) / rewards.std().clamp(min=1e-6)
 
 
 class GRPOLoss(torch.nn.Module):
@@ -22,7 +26,7 @@ class GRPOLoss(torch.nn.Module):
         response: torch.Tensor,         # [B, T] – completion token ids
         ref_logprobs: torch.Tensor,     # [B, T] – pre-computed reference log π_ref
         rollout_logprobs: torch.Tensor, # [B, T] – pre-computed rollout log π_{θ_old}
-        advantages: torch.Tensor,       # [B] – pre-computed per-group normalized advantages
+        rewards: torch.Tensor,          # [B] – rewards
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
@@ -38,8 +42,8 @@ class GRPOLoss(torch.nn.Module):
         ref_logprobs = ref_logprobs * padding_mask
         rollout_logprobs = rollout_logprobs * padding_mask
 
-        # Broadcast advantages over tokens
-        adv = advantages.to(trainer_logprobs.device).float()
+        # Compute advantages from rewards and broadcast over tokens
+        adv = _rewards_to_advantages(rewards).to(trainer_logprobs.device).float()
         while adv.ndim < trainer_logprobs_masked.ndim:
             adv = adv.unsqueeze(-1)
 
@@ -88,7 +92,7 @@ class SimpleGRPOLoss(torch.nn.Module):
         logits: torch.Tensor,       # [B, seq_len, vocab] – model output logits
         response: torch.Tensor,     # [B, T] – completion token ids
         ref_logprobs: torch.Tensor, # [B, T] – pre-computed reference log π_ref
-        advantages: torch.Tensor,   # [B] or [B, 1] – advantages
+        rewards: torch.Tensor,      # [B] – rewards
         padding_mask: torch.Tensor, # [B, T], 1 for tokens, 0 for pad
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
@@ -98,10 +102,10 @@ class SimpleGRPOLoss(torch.nn.Module):
         ref_logprobs = ref_logprobs.to(logprobs.device).float()
         padding_mask = padding_mask.to(logprobs.device).float()
 
-        # Broadcast advantages if needed
+        # Compute advantages from rewards
+        advantages = _rewards_to_advantages(rewards).to(logprobs.device).float()
         if advantages.ndim == 1:
             advantages = advantages.unsqueeze(-1)
-        advantages = advantages.to(logprobs.device).float()
 
         kl = torch.exp(ref_logprobs - logprobs) - (ref_logprobs - logprobs) - 1
         per_token_policy_loss = torch.exp(logprobs - logprobs.detach()) * advantages

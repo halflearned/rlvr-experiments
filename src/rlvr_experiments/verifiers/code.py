@@ -5,7 +5,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from .executor import CodeExecutor, ExecutorConfig, ExecutionResult
+from .code_executor import CodeExecutor, ExecutorConfig, ExecutionResult
 
 
 def extract_code_from_markdown(text: str) -> str:

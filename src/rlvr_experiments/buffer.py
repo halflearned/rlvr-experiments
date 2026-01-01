@@ -1,10 +1,10 @@
-import logging
+"""Versioned buffer for producer/consumer coordination."""
+
+import asyncio
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from ray.util.queue import Queue
-
-logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -16,7 +16,7 @@ class Entry(Generic[T]):
     reads_remaining: int
 
 
-class RolloutBuffer(Generic[T]):
+class DataBuffer(Generic[T]):
     """Generic versioned queue with replay support."""
 
     def __init__(self, maxsize: int = 0, max_reads: int = 1):
@@ -50,7 +50,6 @@ class RolloutBuffer(Generic[T]):
 
     async def pop_batch(self, batch_size: int, min_version: int | None = None, timeout: float | None = None) -> list[T]:
         """Pop up to batch_size items. If timeout specified, returns partial batch on timeout."""
-        import asyncio
         items = []
         for _ in range(batch_size):
             try:
@@ -60,7 +59,6 @@ class RolloutBuffer(Generic[T]):
                     item = await self.pop(min_version)
                 items.append(item)
             except asyncio.TimeoutError:
-                logger.warning(f"pop_batch timeout after {len(items)}/{batch_size} items")
                 break
         return items
 

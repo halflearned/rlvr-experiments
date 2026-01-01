@@ -10,8 +10,9 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval
 from rlvr_experiments.losses import GRPOLoss
+from rlvr_experiments.rollout import run_epoch
 from rlvr_experiments.runtime import Runtime
-from rlvr_experiments.sandbox import RayCodeVerifier, MBPPVerifier, HumanEvalVerifier
+from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import trace_span
 
@@ -43,15 +44,7 @@ async def main():
     dataset_name = data_cfg.pop("dataset")
     load_fn, verifier_cls = DATASETS[dataset_name]
 
-    verifier_cfg = getattr(plan, "verifier", {})
-    verifier = RayCodeVerifier(
-        verifier_cls,
-        num_workers=verifier_cfg.get("num_workers", 4),
-        verifier_kwargs={
-            "timeout": verifier_cfg.get("timeout", 10.0),
-            "max_concurrent": verifier_cfg.get("max_concurrent", 4),
-        },
-    )
+    verifier = VerifierPool(verifier_cls, **plan.verifier)
 
     data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
     loss_fn = GRPOLoss(**plan.loss)
@@ -65,8 +58,8 @@ async def main():
     for epoch in range(num_epochs):
         data_iter.new_epoch(seed=epoch)
 
-        async for step, batch in rollout.run_epoch(
-            data_iter, buffer,
+        async for step, batch in run_epoch(
+            rollout, data_iter, buffer,
             reward=verifier.verify_completions,
             pad_token_id=pad_token_id,
             batch_size=batch_size,
@@ -75,23 +68,23 @@ async def main():
         ):
             # The GRPO algorithm
             with trace_span("train_step"):
-                
                 with trace_span("ref_logprobs"):
                     ref_logprobs = await reference.compute_logprobs(batch.input_ids, batch.completion_ids)
-                
+
                 with trace_span("forward_backward"):
                     loss = await trainer.forward_backward(
                         loss_fn, batch.input_ids,
-                        loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.advantages),
+                        loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
                         loss_kwargs={"padding_mask": batch.mask},
                     )
-                
+
                 with trace_span("optim_step"):
                     grad_norm = await trainer.optim_step()
 
-            runtime.tracer.counter("metrics", {"loss": loss, "grad_norm": grad_norm, "avg_reward": batch.avg_reward})
+            avg_reward = batch.rewards.mean().item()
+            runtime.tracer.counter("metrics", {"loss": loss, "grad_norm": grad_norm, "avg_reward": avg_reward})
 
-            print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={batch.avg_reward:.2f}")
+            print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
 
             if max_steps and step >= max_steps:
                 break
