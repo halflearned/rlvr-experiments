@@ -3,7 +3,7 @@ import uuid
 import torch
 import ray
 
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Callable, Sequence
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -11,7 +11,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.worker.gpu_worker import Worker
 
 from .weight_sync import WeightSyncManager
-from .tracer import traced
+from .tracer import traced, trace_span
 
 WORKER_CLS = "rlvr_experiments.vllm_engine_actor.WeightSyncVLLMWorker"
 
@@ -56,7 +56,14 @@ class VLLMEngineRank:
 
 
 class VLLMHandle:
-    """Handle for one or more vLLM instances (data parallel replicas)."""
+    """Handle for one or more vLLM instances (data parallel replicas).
+
+    Manages GPU generation and producer lifecycle for rollout collection.
+
+    Usage:
+        async for samples in rollout.run_epoch(producer_fn, buffer, batch_size=8, ...):
+            train_on(samples)
+    """
 
     def __init__(self, actors: list, name: str = "vllm"):
         self._actors = actors
@@ -68,37 +75,79 @@ class VLLMHandle:
     def is_stopped(self) -> bool:
         return self._stop_event.is_set()
 
-    def producers_done(self) -> bool:
-        return all(t.done() for t in self._producer_tasks)
+    @traced("vllm.generate")
+    async def generate(self, prompts, **sampling_params):
+        actor = self._actors[self._current_replica % len(self._actors)]
+        self._current_replica += 1
+        return await actor.generate.remote(prompts, **sampling_params)
 
-    def check_producer_errors(self) -> None:
-        """Raise if any producer task failed with an exception."""
+    # ---- Producer lifecycle ----
+
+    def _producers_done(self) -> bool:
+        return len(self._producer_tasks) > 0 and all(t.done() for t in self._producer_tasks)
+
+    def _check_producer_errors(self) -> None:
         for i, t in enumerate(self._producer_tasks):
             if t.done() and not t.cancelled():
                 exc = t.exception()
                 if exc is not None:
                     raise RuntimeError(f"Producer {i} failed") from exc
 
-    def start_producers(self, coro_fn, *args, **kwargs) -> None:
-        """Start producer coroutines, one per replica."""
+    async def run_epoch(
+        self,
+        producer_fn: Callable,
+        buffer,
+        batch_size: int,
+        min_version: int = 0,
+        **producer_kwargs,
+    ) -> AsyncIterator[list]:
+        """Run producers and yield batches until done.
+
+        Args:
+            producer_fn: Coroutine that generates samples. Called as:
+                         producer_fn(rollout, buffer, **producer_kwargs)
+            buffer: RolloutBuffer to collect samples into
+            batch_size: Number of samples per batch
+            min_version: Minimum version for buffer.pop()
+            **producer_kwargs: Additional args passed to producer_fn
+
+        Yields:
+            Lists of samples, batch_size each (may be smaller at end)
+        """
         self._stop_event.clear()
         self._producer_tasks = [
-            asyncio.create_task(coro_fn(self, *args, **kwargs))
+            asyncio.create_task(producer_fn(self, buffer, **producer_kwargs))
             for _ in self._actors
         ]
 
-    async def stop_producers(self) -> None:
-        """Signal stop and wait for all producers to finish."""
-        self._stop_event.set()
-        if self._producer_tasks:
-            await asyncio.gather(*self._producer_tasks)
-            self._producer_tasks = []
+        try:
+            while True:
+                with trace_span(None, "wait_for_batch"):
+                    self._check_producer_errors()
 
-    @traced("vllm.generate")
-    async def generate(self, prompts, **sampling_params):
-        actor = self._actors[self._current_replica % len(self._actors)]
-        self._current_replica += 1
-        return await actor.generate.remote(prompts, **sampling_params)
+                    if self._producers_done() and buffer.size() == 0:
+                        return
+
+                    samples = []
+                    while len(samples) < batch_size:
+                        self._check_producer_errors()
+                        if self._producers_done() and buffer.size() == 0:
+                            break
+                        # Wait longer when buffer empty (verifications take several seconds)
+                        timeout = 10.0 if buffer.size() == 0 else 5.0
+                        batch = await buffer.pop_batch(batch_size - len(samples), min_version=min_version, timeout=timeout)
+                        samples.extend(batch)
+
+                if not samples:
+                    return
+
+                yield samples
+        finally:
+            self._stop_event.set()
+            for t in self._producer_tasks:
+                t.cancel()
+            await asyncio.gather(*self._producer_tasks, return_exceptions=True)
+            self._producer_tasks = []
 
 
 

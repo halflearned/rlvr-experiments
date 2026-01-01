@@ -46,24 +46,22 @@ class RayCodeVerifier:
         # Track last span end time per worker to prevent overlaps in trace
         self._worker_last_end_us: dict[int, float] = {}
         atexit.register(self.shutdown)
+        self._register_tracer_threads()
         logger.info(f"Created RayCodeVerifier with {num_workers} {verifier_cls.__name__} workers")
 
-    def emit_worker_thread_names(self):
-        """Emit Perfetto thread name metadata for workers."""
+    def _register_tracer_threads(self):
+        """Register worker thread names with Perfetto tracer."""
         tracer = get_tracer()
-        if tracer:
-            for i in range(self.num_workers):
-                # Use adjacent tids so parent and children sort together:
-                # worker 0: tid 1000 (parent), 1001 (lane 0), 1002 (lane 1)
-                # worker 1: tid 1003 (parent), 1004 (lane 0), 1005 (lane 1)
-                # etc.
-                base_tid = self._worker_tid_base + i * 3
-                tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
-                              "tid": base_tid, "args": {"name": f"verifier_{i:02d}"}})
-                tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
-                              "tid": base_tid + 1, "args": {"name": f"verifier_{i:02d}.0"}})
-                tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
-                              "tid": base_tid + 2, "args": {"name": f"verifier_{i:02d}.1"}})
+        if not tracer:
+            return
+        for i in range(self.num_workers):
+            base_tid = self._worker_tid_base + i * 3
+            tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
+                          "tid": base_tid, "args": {"name": f"verifier_{i:02d}"}})
+            tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
+                          "tid": base_tid + 1, "args": {"name": f"verifier_{i:02d}.0"}})
+            tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
+                          "tid": base_tid + 2, "args": {"name": f"verifier_{i:02d}.1"}})
 
     async def verify_completions(self, problem: dict, completions: list[str], worker_id: int | None = None) -> tuple[list[float], list[float]]:
         """Verify N completions for one problem. Returns (scores, per_completion_durations_ms)."""
