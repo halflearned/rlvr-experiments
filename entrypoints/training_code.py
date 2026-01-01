@@ -15,7 +15,7 @@ from rlvr_experiments.losses import GRPOLoss
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import init_sample_logger, log_sample, close_sample_logger
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
-from rlvr_experiments.tracer import init_global_tracer, trace_span
+from rlvr_experiments.tracer import init_global_tracer, trace_span, set_current_task_name
 from rlvr_experiments.sandbox import RayCodeVerifier, HumanEvalVerifier, MBPPVerifier
 
 DATASET_REGISTRY = {
@@ -89,45 +89,70 @@ async def produce_rollouts(rollout, buffer, data_iter, pad_token_id, verifier, s
 
     Verification runs in background while GPU generates next batch.
     """
+    set_current_task_name("rollout")
     pending: list[asyncio.Task] = []
     gen_batch = 0
 
-    async def verify_and_buffer(response, problem):
+    async def verify_and_buffer(response, problem, worker_id):
         """Verify completions and push to buffer."""
+        import subprocess
         start = time.perf_counter()
         completions = [out.text for out in response.outputs]
-        rewards = await verifier.verify_completions(problem, completions)
+        rewards, exec_durations = await verifier.verify_completions(problem, completions, worker_id=worker_id)
         duration_ms = (time.perf_counter() - start) * 1000
 
         problem_id = str(problem.get('task_id', 'unknown'))
         passed = sum(1 for r in rewards if r > 0)
 
+        # Quick system stats for debugging slowdown
+        try:
+            docker_count = int(subprocess.check_output("docker ps -q | wc -l", shell=True).decode().strip())
+        except:
+            docker_count = -1
+
         log_sample("verification",
             problem_id=problem_id, generation_batch=gen_batch, epoch=epoch,
             num_completions=len(completions), rewards=rewards,
-            passed=passed, failed=len(rewards) - passed, duration_ms=duration_ms)
+            passed=passed, failed=len(rewards) - passed, duration_ms=duration_ms,
+            exec_durations_ms=exec_durations, max_exec_ms=max(exec_durations),
+            docker_containers=docker_count, worker_id=worker_id)
 
         await buffer.put(RolloutSample.from_vllm(response, pad_token_id, rewards, problem_id), epoch)
 
+    worker_idx = 0
+    # Allow many pending verifications - let Ray handle queueing
+    # Backpressure only if memory becomes a concern (e.g., 1000+ pending)
+    max_pending = 256
+
     while not rollout.is_stopped():
+        # Harvest completed tasks first (non-blocking)
+        done = [t for t in pending if t.done()]
+        for t in done:
+            await t
+            pending.remove(t)
+
+        # Backpressure only if queue gets very large
+        if len(pending) >= max_pending:
+            logger.info(f"Backpressure: {len(pending)} pending, waiting for some to complete...")
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                await t
+                pending.remove(t)
+
         batch = await data_iter.next_batch()
         if batch is None:
             break
 
         responses = await rollout.generate(batch["templates"], **sampling_params)
 
-        # Submit verifications as background tasks
+        # Submit verifications as background tasks, assigning workers upfront
         for i, response in enumerate(responses):
-            task = asyncio.create_task(verify_and_buffer(response, batch["problems"][i]))
+            task = asyncio.create_task(verify_and_buffer(response, batch["problems"][i], worker_idx))
             pending.append(task)
+            worker_idx += 1
 
         gen_batch += 1
-
-        # Harvest completed tasks
-        done = [t for t in pending if t.done()]
-        for t in done:
-            await t
-            pending.remove(t)
+        logger.info(f"gen_batch={gen_batch} pending_verifications={len(pending)}")
 
     if pending:
         await asyncio.gather(*pending)
@@ -175,7 +200,10 @@ async def main():
     verifier = RayCodeVerifier(
         verifier_cls,
         num_workers=verifier_cfg.get("num_workers", 4),
-        verifier_kwargs={"timeout": verifier_cfg.get("timeout", 10.0)},
+        verifier_kwargs={
+            "timeout": verifier_cfg.get("timeout", 10.0),
+            "max_concurrent": verifier_cfg.get("max_concurrent", 4),
+        },
     )
     verifier.emit_worker_thread_names()  # Register worker names in Perfetto
 
@@ -187,6 +215,8 @@ async def main():
     sync_reference_every = train_cfg["sync_reference_every"]
     train_batch_size = train_cfg.get("train_batch_size") or 1
 
+    set_current_task_name("trainer")
+
     for epoch in range(num_epochs):
         data_iter.new_epoch(seed=epoch)
         rollout.start_producers(produce_rollouts, buffer, data_iter, pad_token_id, verifier, sampling_params, epoch)
@@ -196,7 +226,22 @@ async def main():
             if rollout.producers_done() and buffer.size() == 0:
                 break
 
-            samples = await buffer.pop_batch(train_batch_size, min_version=epoch)
+            print(f"\r[epoch {epoch}] step={trained} buffer={buffer.size()} waiting for batch...", end="", flush=True)
+            with trace_span(None, "wait_for_batch"):
+                # Use timeout to periodically check producer status
+                samples = []
+                while len(samples) < train_batch_size:
+                    rollout.check_producer_errors()
+                    if rollout.producers_done() and buffer.size() == 0:
+                        break
+                    # Short timeout when buffer empty (to detect end quickly), longer when items available
+                    timeout = 0.1 if buffer.size() == 0 else 5.0
+                    batch = await buffer.pop_batch(train_batch_size - len(samples), min_version=epoch, timeout=timeout)
+                    samples.extend(batch)
+            if not samples:
+                logger.info("No more samples available, ending epoch")
+                break
+            print(f"\r[epoch {epoch}] step={trained} buffer={buffer.size()} training...          ", end="", flush=True)
 
             # Log reward stats
             all_rewards = [r for s in samples for r in s.rewards]
@@ -206,7 +251,8 @@ async def main():
                 "num_positive": sum(1 for r in all_rewards if r > 0),
             })
 
-            batch, valid_samples = make_batch(samples, pad_token_id)
+            with trace_span(None, "make_batch"):
+                batch, valid_samples = make_batch(samples, pad_token_id)
 
             # Log training events
             for s in samples:
@@ -222,13 +268,16 @@ async def main():
             avg_reward = sum(sum(s.rewards) / len(s.rewards) for s in valid_samples) / len(valid_samples)
 
             with trace_span(None, "train_step"):
-                ref_logprobs = await reference.compute_logprobs(batch["input_ids"], batch["completion_ids"])
-                loss = await trainer.forward_backward(
-                    loss_fn, batch["input_ids"],
-                    loss_args=(batch["completion_ids"], ref_logprobs, batch["logprobs"], batch["advantages"]),
-                    loss_kwargs={"padding_mask": batch["completion_mask"]},
-                )
-                grad_norm = await trainer.optim_step()
+                with trace_span(None, "ref_logprobs"):
+                    ref_logprobs = await reference.compute_logprobs(batch["input_ids"], batch["completion_ids"])
+                with trace_span(None, "forward_backward"):
+                    loss = await trainer.forward_backward(
+                        loss_fn, batch["input_ids"],
+                        loss_args=(batch["completion_ids"], ref_logprobs, batch["logprobs"], batch["advantages"]),
+                        loss_kwargs={"padding_mask": batch["completion_mask"]},
+                    )
+                with trace_span(None, "optim_step"):
+                    grad_norm = await trainer.optim_step()
 
             trained += 1
             tracer.counter("metrics", {"avg_reward": avg_reward, "loss": loss, "grad_norm": grad_norm})

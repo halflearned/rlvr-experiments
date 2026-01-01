@@ -162,13 +162,12 @@ def _path_with_pid(path: str) -> str:
 
 
 def _signal_handler(signum, frame):
-    """Handle SIGINT/SIGTERM to ensure trace is written."""
+    """Handle SIGINT/SIGTERM to ensure trace is written, then force exit."""
     close_tracer()
-    # Re-raise to allow normal termination
-    signal.default_int_handler(signum, frame)
+    os._exit(1)  # Force exit, skip atexit handlers that might hang
 
 
-def init_global_tracer(path: str, *, use_task_ids: bool = False) -> Optional[TraceRecorder]:
+def init_global_tracer(path: str, *, use_task_ids: bool = True) -> Optional[TraceRecorder]:
     global _GLOBAL_TRACER
     if not path:
         return None

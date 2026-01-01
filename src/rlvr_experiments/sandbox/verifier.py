@@ -40,8 +40,8 @@ class TestResult:
 class CodeVerifier(ABC):
     """Base class for code verifiers."""
 
-    def __init__(self, executor: CodeExecutor | None = None, timeout: float = 10.0):
-        self.executor = executor or CodeExecutor(ExecutorConfig(timeout=timeout))
+    def __init__(self, executor: CodeExecutor | None = None, timeout: float = 10.0, max_concurrent: int = 4):
+        self.executor = executor or CodeExecutor(ExecutorConfig(timeout=timeout), max_concurrent=max_concurrent)
 
     @abstractmethod
     def assemble_code(self, problem: dict, completion: str) -> str:
@@ -60,16 +60,35 @@ class CodeVerifier(ABC):
         passed = total if result.success else 0
         return TestResult(passed=passed, total=total, execution_result=result)
 
-    async def verify_batch(self, problems: list[dict], completions: list[str]) -> list[float]:
-        """Verify pairs of (problem, completion) sequentially. Returns scores."""
-        scores = []
-        for p, c in zip(problems, completions):
-            result = await self.verify(p, c)
-            scores.append(result.score)
-        return scores
+    async def verify_batch(self, problems: list[dict], completions: list[str]) -> tuple[list[float], list[float]]:
+        """Verify pairs of (problem, completion) in parallel. Returns (scores, durations_ms)."""
+        scores, durations, _ = await self.verify_batch_with_timing(problems, completions)
+        return scores, durations
 
-    async def verify_completions(self, problem: dict, completions: list[str]) -> list[float]:
-        """Verify N completions for one problem."""
+    async def verify_batch_with_timing(self, problems: list[dict], completions: list[str]) -> tuple[list[float], list[float], list[tuple[float, float]]]:
+        """Verify with timing spans. Returns (scores, durations_ms, timing_spans).
+
+        timing_spans is list of (start_offset_ms, duration_ms) for each completion.
+        These represent actual execution time (after semaphore acquired), not queue wait time.
+        """
+        import time
+        batch_start = time.perf_counter()
+
+        tasks = [self.verify(p, c) for p, c in zip(problems, completions)]
+        results = await asyncio.gather(*tasks)
+
+        scores = [r.score for r in results]
+        durations = [r.execution_result.duration_ms for r in results]
+        # Use actual_start_time from executor (after semaphore acquired) for accurate spans
+        timing_spans = [
+            ((r.execution_result.actual_start_time - batch_start) * 1000, r.execution_result.duration_ms)
+            if r.execution_result.actual_start_time else (0.0, r.execution_result.duration_ms)
+            for r in results
+        ]
+        return scores, durations, timing_spans
+
+    async def verify_completions(self, problem: dict, completions: list[str]) -> tuple[list[float], list[float]]:
+        """Verify N completions for one problem. Returns (scores, durations_ms)."""
         return await self.verify_batch([problem] * len(completions), completions)
 
 

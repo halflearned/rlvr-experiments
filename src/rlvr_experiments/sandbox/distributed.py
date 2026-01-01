@@ -16,7 +16,7 @@ from rlvr_experiments.tracer import get_tracer
 logger = logging.getLogger(__name__)
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, max_concurrency=1)
 class _VerifierWorker:
     """Ray actor that runs a CodeVerifier instance."""
 
@@ -24,11 +24,14 @@ class _VerifierWorker:
         self.verifier = verifier_cls(**(verifier_kwargs or {}))
         self.worker_id = worker_id
 
-    async def verify_batch(self, problems: list[dict], completions: list[str]) -> tuple[list[float], int, float]:
-        """Returns (scores, worker_id, duration_ms)."""
-        start = time.perf_counter()
-        scores = await self.verifier.verify_batch(problems, completions)
-        return scores, self.worker_id, (time.perf_counter() - start) * 1000
+    async def verify_batch(self, problems: list[dict], completions: list[str]) -> tuple[list[float], list[float], list[tuple[float, float]], int, float]:
+        """Returns (scores, durations_ms, timing_spans, worker_id, total_duration_ms).
+
+        timing_spans is list of (start_offset_ms, duration_ms) for each completion.
+        """
+        batch_start = time.perf_counter()
+        scores, durations, timing_spans = await self.verifier.verify_batch_with_timing(problems, completions)
+        return scores, durations, timing_spans, self.worker_id, (time.perf_counter() - batch_start) * 1000
 
 
 class RayCodeVerifier:
@@ -40,6 +43,8 @@ class RayCodeVerifier:
         self._worker_tid_base = 1000  # Base tid for Perfetto worker threads
         self.workers = [_VerifierWorker.remote(verifier_cls, i, self.verifier_kwargs) for i in range(num_workers)]
         self._idx = 0
+        # Track last span end time per worker to prevent overlaps in trace
+        self._worker_last_end_us: dict[int, float] = {}
         atexit.register(self.shutdown)
         logger.info(f"Created RayCodeVerifier with {num_workers} {verifier_cls.__name__} workers")
 
@@ -48,44 +53,94 @@ class RayCodeVerifier:
         tracer = get_tracer()
         if tracer:
             for i in range(self.num_workers):
+                # Use adjacent tids so parent and children sort together:
+                # worker 0: tid 1000 (parent), 1001 (lane 0), 1002 (lane 1)
+                # worker 1: tid 1003 (parent), 1004 (lane 0), 1005 (lane 1)
+                # etc.
+                base_tid = self._worker_tid_base + i * 3
                 tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
-                              "tid": self._worker_tid_base + i, "args": {"name": f"worker_{i}"}})
+                              "tid": base_tid, "args": {"name": f"verifier_{i:02d}"}})
+                tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
+                              "tid": base_tid + 1, "args": {"name": f"verifier_{i:02d}.0"}})
+                tracer._emit({"name": "thread_name", "ph": "M", "pid": os.getpid(),
+                              "tid": base_tid + 2, "args": {"name": f"verifier_{i:02d}.1"}})
 
-    def _next_worker(self):
-        worker = self.workers[self._idx % len(self.workers)]
-        self._idx += 1
-        return worker
+    async def verify_completions(self, problem: dict, completions: list[str], worker_id: int | None = None) -> tuple[list[float], list[float]]:
+        """Verify N completions for one problem. Returns (scores, per_completion_durations_ms)."""
+        from rlvr_experiments.tracer import get_tracer
 
-    async def verify_completions(self, problem: dict, completions: list[str]) -> list[float]:
-        """Verify N completions for one problem. Returns list of scores."""
+        if worker_id is not None:
+            wid = worker_id % len(self.workers)
+        else:
+            wid = self._idx % len(self.workers)
+            self._idx += 1
+
+        worker = self.workers[wid]
         tracer = get_tracer()
 
-        # Distribute across workers
-        chunk_size = max(1, len(completions) // len(self.workers))
-        futures = [
-            self._next_worker().verify_batch.remote([problem] * len(completions[i:i + chunk_size]), completions[i:i + chunk_size])
-            for i in range(0, len(completions), chunk_size)
-        ]
+        future = worker.verify_batch.remote([problem] * len(completions), completions)
+        scores, durations, timing_spans, _, worker_duration_ms = await asyncio.wrap_future(future.future())
 
-        results = await asyncio.gather(*[asyncio.wrap_future(f.future()) for f in futures])
+        # Emit nested spans: parent for the batch, children for each completion
+        if tracer:
+            now_us = tracer._now_us()
+            dur_us = worker_duration_ms * 1000
+            # Use adjacent tids: base (parent), base+1 (lane 0), base+2 (lane 1)
+            base_tid = self._worker_tid_base + wid * 3
 
-        # Flatten scores, emit worker spans
-        scores = []
-        for chunk_scores, worker_id, duration_ms in results:
-            scores.extend(chunk_scores)
-            if tracer:
-                self._emit_worker_span(tracer, worker_id, duration_ms, len(chunk_scores))
+            # Place span ending at now, but ensure no overlap with previous span on this worker
+            # (clock drift between worker and main process can cause calculated start to be before previous end)
+            last_end = self._worker_last_end_us.get(wid, 0)
+            batch_start_us = max(now_us - dur_us, last_end)
+            batch_end_us = batch_start_us + dur_us
+            self._worker_last_end_us[wid] = batch_end_us
 
-        return scores
+            passed_count = sum(1 for s in scores if s > 0)
 
-    def _emit_worker_span(self, tracer, worker_id: int, duration_ms: float, num_verified: int):
-        """Emit a Perfetto span for a worker's verification work."""
-        tracer._emit({
-            "name": "verify", "cat": "worker", "ph": "X",
-            "ts": tracer._now_us() - duration_ms * 1000, "dur": duration_ms * 1000,
-            "pid": os.getpid(), "tid": self._worker_tid_base + worker_id,
-            "args": {"worker_id": worker_id, "num_verified": num_verified},
-        })
+            # Parent span for the whole verification batch
+            tracer._emit({
+                "name": "verify",
+                "cat": "verify",
+                "ph": "X",
+                "ts": batch_start_us,
+                "dur": dur_us,
+                "pid": os.getpid(),
+                "tid": base_tid,
+                "args": {
+                    "n": len(completions),
+                    "passed": passed_count,
+                    "failed": len(completions) - passed_count,
+                },
+            })
+
+            # Child spans for each completion
+            # timing_spans are relative to worker's batch_start, scale to fit parent
+            # Use sub-tids to show concurrent executions on separate rows
+            # Sort by start time and assign to alternating lanes
+            if timing_spans:
+                worker_total_ms = max(start + dur for start, dur in timing_spans)
+                scale = worker_duration_ms / worker_total_ms if worker_total_ms > 0 else 1.0
+
+                # Sort by start time and assign lane based on execution order
+                indexed_spans = list(enumerate(timing_spans))
+                indexed_spans.sort(key=lambda x: x[1][0])  # Sort by start_offset_ms
+
+                for lane, (i, (start_offset_ms, dur_ms)) in enumerate(indexed_spans):
+                    passed = scores[i] > 0
+                    # Alternate between lane 0 (base_tid+1) and lane 1 (base_tid+2)
+                    sub_tid = base_tid + 1 + (lane % 2)
+                    tracer._emit({
+                        "name": "pass" if passed else "fail",
+                        "cat": "exec",
+                        "ph": "X",
+                        "ts": batch_start_us + start_offset_ms * scale * 1000,
+                        "dur": dur_ms * scale * 1000,
+                        "pid": os.getpid(),
+                        "tid": sub_tid,
+                        "args": {"idx": i, "ms": round(dur_ms, 1)},
+                    })
+
+        return scores, durations
 
     def shutdown(self):
         """Shutdown all workers."""

@@ -71,6 +71,14 @@ class VLLMHandle:
     def producers_done(self) -> bool:
         return all(t.done() for t in self._producer_tasks)
 
+    def check_producer_errors(self) -> None:
+        """Raise if any producer task failed with an exception."""
+        for i, t in enumerate(self._producer_tasks):
+            if t.done() and not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    raise RuntimeError(f"Producer {i} failed") from exc
+
     def start_producers(self, coro_fn, *args, **kwargs) -> None:
         """Start producer coroutines, one per replica."""
         self._stop_event.clear()
