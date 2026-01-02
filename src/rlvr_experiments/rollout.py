@@ -59,22 +59,34 @@ class RolloutSample:
         return cls(input_ids, completion_ids, logprobs, rewards)
 
 
-def make_batch(samples: list[RolloutSample], pad_token_id: int) -> Batch | None:
-    """Combine samples into a training batch. Returns None if all zero-variance."""
+def make_batch(
+    samples: list[RolloutSample],
+    pad_token_id: int,
+    max_seq_len: int | None = None,
+    max_completion_len: int | None = None,
+) -> Batch | None:
+    """Combine samples into a training batch. Returns None if all zero-variance.
+
+    Args:
+        samples: List of RolloutSample objects
+        pad_token_id: Token ID to use for padding
+        max_seq_len: If provided, pad input_ids to this fixed length (avoids recompilation)
+        max_completion_len: If provided, pad completion_ids to this fixed length
+    """
     valid = [s for s in samples if torch.tensor(s.rewards, dtype=torch.float32).std() > 1e-6]
     if not valid:
         return None
 
-    def pad_cat(tensors, pad_value=0):
-        max_len = max(t.shape[1] for t in tensors)
+    def pad_cat(tensors, pad_value=0, fixed_len=None):
+        max_len = fixed_len if fixed_len is not None else max(t.shape[1] for t in tensors)
         return torch.cat([F.pad(t, (0, max_len - t.shape[1]), value=pad_value) for t in tensors])
 
     return Batch(
-        input_ids=pad_cat([s.input_ids for s in valid], pad_value=pad_token_id),
-        completion_ids=pad_cat([s.completion_ids for s in valid], pad_value=pad_token_id),
-        logprobs=pad_cat([s.logprobs for s in valid]),
+        input_ids=pad_cat([s.input_ids for s in valid], pad_value=pad_token_id, fixed_len=max_seq_len),
+        completion_ids=pad_cat([s.completion_ids for s in valid], pad_value=pad_token_id, fixed_len=max_completion_len),
+        logprobs=pad_cat([s.logprobs for s in valid], fixed_len=max_completion_len),
         rewards=torch.cat([torch.tensor(s.rewards, dtype=torch.float32) for s in valid]),
-        mask=pad_cat([(s.completion_ids != pad_token_id).float() for s in valid]),
+        mask=pad_cat([(s.completion_ids != pad_token_id).float() for s in valid], fixed_len=max_completion_len),
     )
 
 
@@ -88,6 +100,8 @@ async def run_epoch(
     batch_size: int,
     sampling_params: dict | None = None,
     epoch: int = 0,
+    max_seq_len: int | None = None,
+    max_completion_len: int | None = None,
 ):
     """Run generation/verification and yield training batches.
 
@@ -100,6 +114,8 @@ async def run_epoch(
         batch_size: Samples per training batch
         sampling_params: vLLM sampling parameters
         epoch: Current epoch (for buffer versioning)
+        max_seq_len: If provided, pad input_ids to fixed length (avoids recompilation)
+        max_completion_len: If provided, pad completions to fixed length
 
     Yields:
         (step, batch) tuples. Zero-variance batches are filtered.
@@ -156,7 +172,7 @@ async def run_epoch(
                         "num_positive": sum(1 for r in all_rewards if r > 0),
                     })
 
-                    batch = make_batch(samples, pad_token_id)
+                    batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
                     samples = []
 
                     if batch is None:
@@ -168,7 +184,7 @@ async def run_epoch(
 
         # Yield any remaining samples as final batch
         if samples:
-            batch = make_batch(samples, pad_token_id)
+            batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
             if batch is not None:
                 step += 1
                 yield step, batch

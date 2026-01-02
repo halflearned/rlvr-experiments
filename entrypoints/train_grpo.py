@@ -54,8 +54,14 @@ async def main():
     num_epochs = plan.training["num_epochs"]
     max_steps = plan.training.get("iterations_per_epoch")
     batch_size = plan.training.get("train_batch_size") or 1
-    sync_ref_every = plan.training["sync_reference_every"]
-    sync_model_every = plan.training.get("sync_reference_every", 1)
+    sync_ref_every = plan.training.get("sync_reference_every", 1)
+    sync_model_every = plan.training.get("sync_reference_every", 2)
+
+    # Fixed sequence lengths to avoid dynamic shape recompilation
+    # max_completion_len = max_tokens from sampling config
+    # max_seq_len = prompt (estimate ~200) + completion
+    max_completion_len = plan.sampling.get("max_tokens", 512)
+    max_seq_len = plan.training.get("max_seq_len") or (max_completion_len + 256)
 
     # --- Training loop ---
     for epoch in range(num_epochs):
@@ -68,6 +74,8 @@ async def main():
             batch_size=batch_size,
             sampling_params=plan.sampling,
             epoch=epoch,
+            max_seq_len=max_seq_len,
+            max_completion_len=max_completion_len,
         ):
             # The GRPO algorithm
             with trace_span("train_step"):
@@ -76,7 +84,8 @@ async def main():
 
                 with trace_span("forward_backward"):
                     loss = await trainer.forward_backward(
-                        loss_fn, batch.input_ids,
+                        loss_fn,
+                        batch.input_ids,
                         loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
                         loss_kwargs={"padding_mask": batch.mask},
                     )
@@ -96,11 +105,10 @@ async def main():
             if (step + 1) % sync_model_every == 0:
                 await sync_titan_to_vllm(trainer, rollout)
 
-            print(f"Epoch {epoch} complete: {step} steps")
+        print(f"Epoch {epoch} complete: {step} steps")
 
-            # Sync weights to reference
-            if (step + 1) % sync_ref_every == 0:
-                await sync_titan_to_titan(trainer, reference)
+        if epoch % sync_ref_every == 0:
+            await sync_titan_to_titan(trainer, reference)
 
 
 if __name__ == "__main__":

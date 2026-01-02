@@ -30,6 +30,7 @@ class TitanModelRank:
         master_port: str,
         group_name: str = "default",
         trainable: bool = True,
+        hf_compatible: bool = False,
     ) -> None:
         self.rank = rank
         self.world_size = world_size
@@ -47,8 +48,8 @@ class TitanModelRank:
         from torchtitan.config import ConfigManager
 
         job_config = ConfigManager().parse_args(["--job.config-file", config_path])
-        self.model = TitanModel(job_config, trainable=trainable)
-        logger.info(f"{group_name} Rank {rank}: Initialized Titan")
+        self.model = TitanModel(job_config, trainable=trainable, hf_compatible=hf_compatible)
+        logger.info(f"{group_name} Rank {rank}: Initialized Titan (hf_compatible={hf_compatible})")
 
     def add_sync_channel(self, channel_name: str, host: str, port: int, world_size: int, rank: int) -> None:
         if channel_name in self.sync_managers:
@@ -68,7 +69,8 @@ class TitanModelRank:
 
     def clear_sync_state(self) -> None:
         self._sync_cache = None
-        torch.cuda.empty_cache()
+        # NOTE: Removed torch.cuda.empty_cache() - it was causing slowdown
+        # on the next forward pass due to CUDA memory reorganization
 
     def build_chunk_plan(self, max_chunk_elems: int) -> list[dict]:
         """Build a chunk plan from cached HF state (metadata only, single rank)."""
@@ -162,14 +164,63 @@ class TitanModelRank:
                         else:
                             target.copy_(incoming_val.to(device=target.device, dtype=target.dtype))
 
-    def compute_logprobs(self, input_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor | None:
-        """Forward pass returning logprobs (only rank 0 returns, others return None)."""
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor | None:
+        """Forward pass returning raw logits (only rank 0 returns, others return None)."""
         logits = self.model.forward(input_ids)
         if isinstance(logits, DTensor):
             logits = logits.full_tensor()
+        return logits.detach().cpu() if self.rank == 0 else None
+
+    def get_rope_cache_info(self) -> dict:
+        """Return info about rope_cache for debugging HF-compatibility."""
+        model = self.model.model_parts[0]
+        if hasattr(model, 'rope_cache') and model.rope_cache is not None:
+            return {
+                "dtype": str(model.rope_cache.dtype),
+                "shape": list(model.rope_cache.shape),
+                "hf_compatible": self.model.hf_compatible,
+            }
+        return {"error": "No rope_cache found", "hf_compatible": self.model.hf_compatible}
+
+    def export_to_hf(self, output_path: str) -> None:
+        """Export model to HuggingFace format. All ranks must call (collective for DTensors)."""
+        self.model.export_to_hf(output_path)
+
+    def compute_logprobs(self, input_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor | None:
+        """Forward pass returning logprobs (only rank 0 returns, others return None)."""
+        import time
+
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+
+        logits = self.model.forward(input_ids)
+
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
+
+        torch.cuda.synchronize()
+        t2 = time.perf_counter()
 
         completion_ids = completion_ids.to(self.model.device)
         logprobs = compute_logprobs(logits, completion_ids)
+
+        torch.cuda.synchronize()
+        t3 = time.perf_counter()
+
+        if self.rank == 0:
+            print(
+                f"[PROFILE compute_logprobs] "
+                f"forward={1000*(t1-t0):.0f}ms, "
+                f"full_tensor={1000*(t2-t1):.0f}ms, "
+                f"logprobs={1000*(t3-t2):.0f}ms, "
+                f"TOTAL={1000*(t3-t0):.0f}ms | "
+                f"shape={list(input_ids.shape)}",
+                flush=True
+            )
+
         return logprobs.detach().cpu() if self.rank == 0 else None
 
     def forward_backward(
@@ -180,7 +231,16 @@ class TitanModelRank:
         loss_kwargs: dict | None = None,
     ) -> float:
         """Forward pass, compute loss, and backward pass. Returns loss value."""
+        import time
+
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+
         logits = self.model.forward(input_ids)
+
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+
         device = self.model.device
 
         def to_device(v: Any) -> Any:
@@ -191,13 +251,34 @@ class TitanModelRank:
         args_local = tuple(to_device(a) for a in loss_args)
         kwargs_local = {k: to_device(v) for k, v in (loss_kwargs or {}).items()}
 
+        torch.cuda.synchronize()
+        t2 = time.perf_counter()
+
         with self.model.train_context_mgr(None):
             loss = loss_fn(logits, *args_local, **kwargs_local)
 
             if not torch.is_tensor(loss) or loss.ndim != 0:
                 raise RuntimeError("loss_fn must return a scalar torch.Tensor")
 
+            torch.cuda.synchronize()
+            t3 = time.perf_counter()
+
             loss.backward()
+
+        torch.cuda.synchronize()
+        t4 = time.perf_counter()
+
+        if self.rank == 0:
+            print(
+                f"[PROFILE forward_backward] "
+                f"forward={1000*(t1-t0):.0f}ms, "
+                f"to_device={1000*(t2-t1):.0f}ms, "
+                f"loss_fn={1000*(t3-t2):.0f}ms, "
+                f"backward={1000*(t4-t3):.0f}ms, "
+                f"TOTAL={1000*(t4-t0):.0f}ms | "
+                f"shape={list(input_ids.shape)}",
+                flush=True
+            )
 
         return float(loss.detach().item())
 
@@ -233,9 +314,11 @@ class DistributedModelHandle:
 def create_titan_group(config: dict, name: str, world_size: int, port: int) -> DistributedModelHandle:
     master_addr = ray.util.get_node_ip_address()
     trainable = bool(config.get("trainable", True))
+    hf_compatible = bool(config.get("hf_compatible", False))
 
     cfg = dict(config)
     cfg.pop("trainable", None)
+    cfg.pop("hf_compatible", None)
 
     # Ray actors may be on different nodes - use shared filesystem for config
     config_dir = os.environ.get("RLVR_TITAN_CONFIG_DIR", os.path.join(os.getcwd(), ".rlvr_titan_job_configs"))
@@ -245,9 +328,20 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
         toml.dump(cfg, f)
         config_path = f.name
 
-    logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port}")
+    # Forward RLVR_* environment variables to Ray actors
+    # These control runtime behavior like HF-compatible precision mode
+    env_vars = {
+        k: v for k, v in os.environ.items()
+        if k.startswith("RLVR_")
+    }
+
+    logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port} (hf_compatible={hf_compatible})")
+
     actors = [
-        TitanModelRank.options(num_gpus=1, num_cpus=2).remote(
+        TitanModelRank.options(
+            num_gpus=1,
+            num_cpus=2,
+        ).remote(
             rank=r,
             world_size=world_size,
             config_path=config_path,
@@ -255,6 +349,7 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
             master_port=str(port),
             group_name=name,
             trainable=trainable,
+            hf_compatible=hf_compatible,
         )
         for r in range(world_size)
     ]

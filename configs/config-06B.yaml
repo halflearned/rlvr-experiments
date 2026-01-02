@@ -9,13 +9,13 @@ tokenizer:
   use_fast: false
 
 training:
-  num_epochs: 2
+  num_epochs: 10
   iterations_per_epoch: null  # null = run full epoch until data exhausted
-  sync_reference_every: 1
+  sync_reference_every: 5
   train_batch_size: 2  # number of prompts (will be multiplied by n completions)
 
 verifier:
-  num_workers: 4
+  num_workers: 2
   # max_concurrent: 2  # Concurrent Docker containers per worker
   # timeout: 3  # per completion check
 
@@ -24,12 +24,12 @@ loss:
   eps: 0.2
 
 data:
-  dataset: dummy
-  # split: train
+  dataset: gsm8k
+  split: train
 
 data_iter:
-  batch_size: 8
-  system_prompt: ""
+  batch_size: 10
+  system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
   assistant_prefix: "Let's think step by step."
 
 sampling:
@@ -43,18 +43,18 @@ sampling:
 trace_path: /home/ubuntu/outputs/trace.json
 
 buffer:
-  max_reads: 1
+  max_reads: 2
 
 roles:
   - name: trainer
     kind: titan
     config:
-      # my titan model takes this additional keyword.
+      # our titan model enecccblutrdkdillectnkehbjcvrtunreirnirhvihjtakes this additional keyword.
       # if false then it doesn't create optimizers etc
       trainable: true
 
       profiling:
-        enable_profiling: false
+        enable_profiling: true
         save_traces_folder: "profile_trace"
         profile_freq: 100
 
@@ -71,7 +71,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00001
+        lr: 0.00005
         eps: 0.00000001
 
       lr_scheduler:
@@ -87,7 +87,7 @@ roles:
         data_parallel_replicate_degree: 1  # note: not available for qwen3 (2025-12-23)
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 2
+        tensor_parallel_degree: 1
         context_parallel_degree: 1
         # IMPORTANT: disable_loss_parallel must be true when computing custom losses
         # with TP>1, otherwise logits are sharded on vocab and cross_entropy is wrong
@@ -104,7 +104,7 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: full
+        mode: none
         selective_ac_option: "op"
 
       compile:
@@ -132,7 +132,7 @@ roles:
         context_parallel_degree: 1
 
       training:
-        seq_len: 4096
+        seq_len: 2048
         dtype: "bfloat16"
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
@@ -148,7 +148,7 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: full
+        mode: none
         selective_ac_option: op
 
       compile:
