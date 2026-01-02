@@ -119,6 +119,12 @@ class TitanModelRank:
 
     def recv_chunk(self, channel: str, chunk: dict, dtype_str: str, src_rank: int) -> None:
         """Receive a chunk and load into model parameters."""
+        from torch.distributed.checkpoint.state_dict import (
+            set_model_state_dict,
+            get_model_state_dict,
+            StateDictOptions,
+        )
+
         manager = self.sync_managers[channel]
         dtype = getattr(torch, dtype_str)
         device = self.model.device
@@ -126,24 +132,35 @@ class TitanModelRank:
         flat = torch.empty(chunk["total_numel"], dtype=dtype, device=device)
         manager.communicator.broadcast(flat, src=src_rank)
 
+        # Get current model state dict to understand param name mapping
+        # (handles FSDP + activation checkpointing wrappers)
+        model = self.model.model_parts[0]
+        current_state = get_model_state_dict(model)
+
         with torch.no_grad():
-            model_params = dict(self.model.model_parts[0].named_parameters())
             offset = 0
 
             for p in chunk["params"]:
                 full_tensor = flat[offset : offset + p["numel"]].view(p["shape"])
                 offset += p["numel"]
 
+                # Convert HF param name to Titan param name(s)
                 titan_state = self.model.sd_adapter.from_hf({p["name"]: full_tensor})
+
+                # Directly update matching params in current_state
                 for titan_name, incoming_val in titan_state.items():
-                    if titan_name not in model_params:
-                        continue
-                    target = model_params[titan_name]
-                    if isinstance(target, DTensor):
-                        sharded = distribute_tensor(incoming_val, target.device_mesh, target.placements)
-                        target.copy_(sharded)
-                    else:
-                        target.copy_(incoming_val.to(device=target.device, dtype=target.dtype))
+                    if titan_name in current_state:
+                        target = current_state[titan_name]
+                        if isinstance(target, DTensor):
+                            # Re-shard the incoming tensor to match target's distribution
+                            sharded = distribute_tensor(
+                                incoming_val.to(device=device, dtype=target.dtype),
+                                target.device_mesh,
+                                target.placements,
+                            )
+                            target.copy_(sharded)
+                        else:
+                            target.copy_(incoming_val.to(device=target.device, dtype=target.dtype))
 
     def compute_logprobs(self, input_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor | None:
         """Forward pass returning logprobs (only rank 0 returns, others return None)."""
