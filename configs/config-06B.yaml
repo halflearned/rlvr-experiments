@@ -9,28 +9,28 @@ tokenizer:
   use_fast: false
 
 training:
-  num_epochs: 1
+  num_epochs: 2
   iterations_per_epoch: null  # null = run full epoch until data exhausted
   sync_reference_every: 1
-  train_batch_size: 8
+  train_batch_size: 2  # number of prompts (will be multiplied by n completions)
 
 verifier:
-  num_workers: 32
-  max_concurrent: 2  # Concurrent Docker containers per worker
-  timeout: 3  # per completion check
+  num_workers: 4
+  # max_concurrent: 2  # Concurrent Docker containers per worker
+  # timeout: 3  # per completion check
 
 loss:
   beta: 0.1
   eps: 0.2
 
 data:
-  dataset: mbpp
-  split: train
+  dataset: dummy
+  # split: train
 
 data_iter:
   batch_size: 8
   system_prompt: ""
-  assistant_prefix: ""
+  assistant_prefix: "Let's think step by step."
 
 sampling:
   temperature: 0.6

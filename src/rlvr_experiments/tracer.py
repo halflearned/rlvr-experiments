@@ -163,6 +163,10 @@ def _path_with_pid(path: str) -> str:
 
 def _signal_handler(signum, frame):
     """Handle SIGINT/SIGTERM to ensure trace is written, then force exit."""
+    import sys
+    import traceback
+    print("\n--- Interrupted ---", file=sys.stderr)
+    traceback.print_stack(frame)
     close_tracer()
     os._exit(1)  # Force exit, skip atexit handlers that might hang
 

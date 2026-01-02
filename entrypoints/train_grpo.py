@@ -8,17 +8,19 @@ import argparse
 
 from transformers import AutoTokenizer
 
-from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval
+from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_dummy
 from rlvr_experiments.losses import GRPOLoss
 from rlvr_experiments.rollout import run_epoch
 from rlvr_experiments.runtime import Runtime
-from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier
+from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier, MathVerifier
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.tracer import trace_span
 
 DATASETS = {
     "humaneval": (load_humaneval, HumanEvalVerifier),
     "mbpp": (load_mbpp, MBPPVerifier),
+    "gsm8k": (load_gsm8k, MathVerifier),
+    "dummy": (load_dummy, MathVerifier),
 }
 
 
@@ -53,6 +55,7 @@ async def main():
     max_steps = plan.training.get("iterations_per_epoch")
     batch_size = plan.training.get("train_batch_size") or 1
     sync_ref_every = plan.training["sync_reference_every"]
+    sync_model_every = plan.training.get("sync_reference_every", 1)
 
     # --- Training loop ---
     for epoch in range(num_epochs):
@@ -89,12 +92,15 @@ async def main():
             if max_steps and step >= max_steps:
                 break
 
-        print(f"Epoch {epoch} complete: {step} steps")
+            # Sync weights to vllm
+            if (step + 1) % sync_model_every == 0:
+                await sync_titan_to_vllm(trainer, rollout)
 
-        # Sync weights
-        await sync_titan_to_vllm(trainer, rollout)
-        if (epoch + 1) % sync_ref_every == 0:
-            await sync_titan_to_titan(trainer, reference)
+            print(f"Epoch {epoch} complete: {step} steps")
+
+            # Sync weights to reference
+            if (step + 1) % sync_ref_every == 0:
+                await sync_titan_to_titan(trainer, reference)
 
 
 if __name__ == "__main__":

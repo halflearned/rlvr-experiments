@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 import torch
 import ray
@@ -12,6 +13,8 @@ from vllm.v1.worker.gpu_worker import Worker
 
 from .syncing import WeightSyncManager
 from .tracer import traced
+
+logger = logging.getLogger(__name__)
 
 WORKER_CLS = "rlvr_experiments.vllm_engine_actor.WeightSyncVLLMWorker"
 
@@ -60,28 +63,47 @@ class VLLMHandle:
 
     def __init__(self, actors: list, name: str = "vllm"):
         self._actors = actors
-        self._stop_event = asyncio.Event()
         self._current_replica = 0
+        self._in_flight = 0
+        self._in_flight_zero = asyncio.Event()
+        self._in_flight_zero.set()  # Initially no in-flight requests
+        self._paused = asyncio.Event()
+        self._paused.set()  # Initially not paused (gate is open)
         self.name = name
 
     @property
     def num_replicas(self) -> int:
         return len(self._actors)
 
-    def is_stopped(self) -> bool:
-        return self._stop_event.is_set()
+    async def stop(self) -> None:
+        """Stop accepting new generation requests and wait for in-flight to complete."""
+        self._paused.clear()  # Close the gate for new requests
+        await self._in_flight_zero.wait()  # Wait for in-flight requests to finish
 
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    def reset(self) -> None:
-        self._stop_event.clear()
+    def resume(self) -> None:
+        """Resume accepting generation requests after sync."""
+        self._paused.set()  # Open the gate
 
     @traced("vllm.generate")
     async def generate(self, prompts, **sampling_params):
-        actor = self._actors[self._current_replica % len(self._actors)]
-        self._current_replica += 1
-        return await actor.generate.remote(prompts, **sampling_params)
+        # Wait if paused (will block until resume() is called)
+        if not self._paused.is_set():
+            logger.debug("generate() waiting for sync to complete")
+        await self._paused.wait()
+
+        # Track in-flight requests
+        self._in_flight += 1
+        if self._in_flight == 1:
+            self._in_flight_zero.clear()
+
+        try:
+            actor = self._actors[self._current_replica % len(self._actors)]
+            self._current_replica += 1
+            return await actor.generate.remote(prompts, **sampling_params)
+        finally:
+            self._in_flight -= 1
+            if self._in_flight == 0:
+                self._in_flight_zero.set()
 
 
 class WeightSyncVLLMWorker(Worker):
