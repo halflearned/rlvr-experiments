@@ -65,6 +65,20 @@ class MathVerifier:
 
         return 1.0 if abs(target_num - parsed) < self.tolerance else 0.0
 
-    def verify_batch(self, responses: list[str], targets: list[str]) -> list[float]:
-        """Verify a batch of responses against targets."""
-        return [self.verify(r, t) for r, t in zip(responses, targets)]
+    async def verify_completions(self, problem: dict, completions: list[str]) -> list[float]:
+        """Verify N completions for one problem. Returns list of scores."""
+        target = problem["answer"]
+        return [self.verify(c, target) for c in completions]
+
+    async def verify_batch(self, problems: list[dict], completions: list[str]) -> tuple[list[float], list[float]]:
+        """Verify a batch. Returns (scores, durations_ms)."""
+        scores = [self.verify(c, p["answer"]) for p, c in zip(problems, completions)]
+        durations = [0.0] * len(completions)  # instant, no timing needed
+        return scores, durations
+
+    async def verify_batch_with_timing(self, problems: list[dict], completions: list[str]) -> tuple[list[float], list[float], list[tuple[float, float]]]:
+        """Verify a batch with timing spans. Returns (scores, durations_ms, timing_spans)."""
+        scores = [self.verify(c, p["answer"]) for p, c in zip(problems, completions)]
+        durations = [0.0] * len(completions)
+        timing_spans = [(0.0, 0.0)] * len(completions)  # no meaningful timing for math
+        return scores, durations, timing_spans

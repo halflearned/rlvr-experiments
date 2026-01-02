@@ -103,6 +103,9 @@ async def run_epoch(
 
     Yields:
         (step, batch) tuples. Zero-variance batches are filtered.
+
+    Mid-epoch sync: sync_titan_to_vllm can be called from another task at any time.
+    It will pause generation, wait for in-flight requests, sync, then resume.
     """
     tracer = get_tracer()
     sp = {**(sampling_params or {}), "logprobs": 0}
@@ -118,7 +121,7 @@ async def run_epoch(
             await buffer.put(sample, epoch)
 
         async with asyncio.TaskGroup() as tg:
-            while not rollout.is_stopped():
+            while True:
                 data_batch = await data_iter.next_batch()
                 if data_batch is None:
                     break
@@ -130,7 +133,6 @@ async def run_epoch(
         await buffer.put(DONE, epoch)
 
     # Start one producer per vLLM replica
-    rollout.reset()
     producers = [asyncio.create_task(produce()) for _ in range(num_producers)]
 
     step = 0
@@ -172,7 +174,6 @@ async def run_epoch(
                 yield step, batch
 
     finally:
-        rollout.stop()
         for t in producers:
             t.cancel()
         await asyncio.gather(*producers, return_exceptions=True)

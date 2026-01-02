@@ -65,13 +65,18 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
 
 @traced("sync.trainer_to_vllm")
 async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype="bfloat16"):
-    """Sync weights from trainer to vLLM. Caller must stop producers first."""
-    if not vllm.is_stopped():
-        raise RuntimeError("Cannot sync weights while vLLM is generating. Call stop_producers() first.")
-    channel = f"{trainer.name}_to_{vllm.name}"
-    with trace_span("sync.titan_to_vllm"):
-        await _sync_chunks(trainer, vllm._actors, channel, chunk_mb, wire_dtype, src_rank,
-                           f"synced {trainer.name} -> {vllm.name}")
+    """Sync weights from trainer to vLLM.
+
+    Pauses generation, waits for in-flight requests, syncs, then resumes.
+    """
+    await vllm.stop()  # Pause and wait for in-flight to complete
+    try:
+        channel = f"{trainer.name}_to_{vllm.name}"
+        with trace_span("sync.titan_to_vllm"):
+            await _sync_chunks(trainer, vllm._actors, channel, chunk_mb, wire_dtype, src_rank,
+                               f"synced {trainer.name} -> {vllm.name}")
+    finally:
+        vllm.resume()
 
 
 @traced("sync.trainer_to_reference")

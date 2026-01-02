@@ -12,7 +12,8 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     """
     Load GSM8k dataset as a Ray Dataset.
 
-    Returns dataset with columns: "prompt", "answer"
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict with "answer" for use with MathVerifier.
     """
     hf_dataset = load_dataset("openai/gsm8k", "main", split=split)
     ds = ray.data.from_huggingface(hf_dataset)
@@ -22,7 +23,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
         answer = row["answer"].split("####")[-1].strip()
         return {
             "prompt": question,
-            "answer": answer,
+            "problem": {"answer": answer},
         }
 
     return ds.map(preprocess)
@@ -109,12 +110,13 @@ def load_dummy(split: str = "train") -> ray.data.Dataset:
     Load a dummy dataset with a single question repeated 64 times.
 
     Useful for testing that rewards are increasing on a single problem.
-    Returns dataset with columns: "prompt", "answer"
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict with "answer" for use with MathVerifier.
     """
     rows = [
         {
             "prompt": "\n\nProblem:What is ((7/12) + (5/18)) / (31/36)?",
-            "answer": "1",
+            "problem": {"answer": "1"},
         }
     ] * 64
     return ray.data.from_items(rows)
@@ -125,9 +127,8 @@ class DataIterator:
     Iterator over a Ray Dataset with epoch and batch support.
     Applies chat template to prompts for direct use with vLLM.
 
-    Supports two dataset formats:
-    - Math datasets: columns "prompt", "answer" (e.g., GSM8K)
-    - Code datasets: columns "prompt", "problem" (e.g., HumanEval)
+    All datasets should have columns "prompt" and "problem", where
+    "problem" is a dict containing whatever the verifier needs.
 
     Usage:
         data_iter = DataIterator(ds, batch_size=16, tokenizer=tokenizer)
@@ -140,12 +141,7 @@ class DataIterator:
                 if batch is None:
                     break  # epoch exhausted
                 templates = batch["templates"]  # ready for vLLM
-
-                # For math datasets:
-                answers = batch["answers"]  # list of strings
-
-                # For code datasets:
-                problems = batch["problems"]  # list of dicts
+                problems = batch["problems"]    # list of dicts for verifier
     """
 
     def __init__(
@@ -185,8 +181,7 @@ class DataIterator:
 
         Returns dict with:
             - "templates": list of chat-formatted strings ready for vLLM
-            - "answers": list of ground truth answers (if dataset has "answer" column)
-            - "problems": list of problem dicts (if dataset has "problem" column)
+            - "problems": list of problem dicts for the verifier
         """
         if self._iter is None:
             raise RuntimeError("Call new_epoch() before next_batch()")
@@ -205,13 +200,7 @@ class DataIterator:
         if batch is None:
             return None
 
-        templates = [self._apply_template(p) for p in batch["prompt"]]
-        result = {"templates": templates}
-
-        # Support both math (answer) and code (problem) datasets
-        if "answer" in batch:
-            result["answers"] = list(batch["answer"])
-        if "problem" in batch:
-            result["problems"] = list(batch["problem"])
-
-        return result
+        return {
+            "templates": [self._apply_template(p) for p in batch["prompt"]],
+            "problems": list(batch["problem"]),
+        }

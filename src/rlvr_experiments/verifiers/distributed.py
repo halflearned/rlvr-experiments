@@ -10,7 +10,6 @@ import time
 
 import ray
 
-from .code import CodeVerifier
 from rlvr_experiments.tracer import get_tracer
 
 logger = logging.getLogger(__name__)
@@ -20,9 +19,13 @@ logger = logging.getLogger(__name__)
 class _VerifierWorker:
     """Ray actor that runs a CodeVerifier instance."""
 
-    def __init__(self, verifier_cls: type[CodeVerifier], worker_id: int, verifier_kwargs: dict | None = None):
+    def __init__(self, verifier_cls: type, worker_id: int, verifier_kwargs: dict | None = None):
         self.verifier = verifier_cls(**(verifier_kwargs or {}))
         self.worker_id = worker_id
+
+    def ready(self) -> bool:
+        """Check that worker initialized successfully."""
+        return True
 
     async def verify_batch(self, problems: list[dict], completions: list[str]) -> tuple[list[float], list[float], list[tuple[float, float]], int, float]:
         """Returns (scores, durations_ms, timing_spans, worker_id, total_duration_ms).
@@ -43,7 +46,7 @@ class VerifierPool:
         **verifier_kwargs: Passed to verifier_cls constructor (e.g., timeout=10.0)
     """
 
-    def __init__(self, verifier_cls: type[CodeVerifier], num_workers: int = 4, **verifier_kwargs):
+    def __init__(self, verifier_cls: type, num_workers: int = 4, **verifier_kwargs):
         self.num_workers = num_workers
         self.verifier_kwargs = verifier_kwargs
         self._worker_tid_base = 1000  # Base tid for Perfetto worker threads
@@ -51,6 +54,13 @@ class VerifierPool:
         self._idx = 0
         # Track last span end time per worker to prevent overlaps in trace
         self._worker_last_end_us: dict[int, float] = {}
+
+        # Wait for all workers to initialize - surfaces errors immediately
+        try:
+            ray.get([w.ready.remote() for w in self.workers])
+        except ray.exceptions.RayActorError as e:
+            raise RuntimeError(f"VerifierPool worker failed to initialize: {e}") from e
+
         atexit.register(self.shutdown)
         self._register_tracer_threads()
         logger.info(f"Created VerifierPool with {num_workers} {verifier_cls.__name__} workers")
