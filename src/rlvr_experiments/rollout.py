@@ -25,6 +25,7 @@ class Batch:
     logprobs: torch.Tensor        # [B, completion_len]
     rewards: torch.Tensor         # [B]
     mask: torch.Tensor            # [B, completion_len]
+    prompt_lens: torch.Tensor     # [B] - length of prompt for each sample
 
 
 @dataclass
@@ -34,12 +35,14 @@ class RolloutSample:
     completion_ids: torch.Tensor
     logprobs: torch.Tensor
     rewards: list[float]
+    prompt_len: int  # Length of the prompt (same for all completions in this sample)
 
     @classmethod
     def from_vllm(cls, response, pad_token_id: int, rewards: list[float]):
         prompt = response.prompt_token_ids
         outputs = response.outputs
         n = len(outputs)
+        prompt_len = len(prompt)
 
         seqs = [prompt + list(o.token_ids) for o in outputs]
         max_seq_len = max(len(s) for s in seqs)
@@ -53,10 +56,11 @@ class RolloutSample:
 
         for i, o in enumerate(outputs):
             L = len(o.token_ids)
-            completion_ids[i, -L:] = torch.tensor(o.token_ids)
-            logprobs[i, -L:] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
+            # Left-align to match input_ids (prompt + completion, then padding)
+            completion_ids[i, :L] = torch.tensor(o.token_ids)
+            logprobs[i, :L] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
 
-        return cls(input_ids, completion_ids, logprobs, rewards)
+        return cls(input_ids, completion_ids, logprobs, rewards, prompt_len)
 
 
 def make_batch(
@@ -81,12 +85,19 @@ def make_batch(
         max_len = fixed_len if fixed_len is not None else max(t.shape[1] for t in tensors)
         return torch.cat([F.pad(t, (0, max_len - t.shape[1]), value=pad_value) for t in tensors])
 
+    # Build prompt_lens: each sample has N completions with the same prompt_len
+    prompt_lens_list = []
+    for s in valid:
+        n_completions = s.input_ids.size(0)
+        prompt_lens_list.extend([s.prompt_len] * n_completions)
+
     return Batch(
         input_ids=pad_cat([s.input_ids for s in valid], pad_value=pad_token_id, fixed_len=max_seq_len),
         completion_ids=pad_cat([s.completion_ids for s in valid], pad_value=pad_token_id, fixed_len=max_completion_len),
         logprobs=pad_cat([s.logprobs for s in valid], fixed_len=max_completion_len),
         rewards=torch.cat([torch.tensor(s.rewards, dtype=torch.float32) for s in valid]),
         mask=pad_cat([(s.completion_ids != pad_token_id).float() for s in valid], fixed_len=max_completion_len),
+        prompt_lens=torch.tensor(prompt_lens_list, dtype=torch.long),
     )
 
 
