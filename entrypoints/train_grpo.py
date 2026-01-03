@@ -80,18 +80,24 @@ async def main():
             # The GRPO algorithm
             with trace_span("train_step"):
                 with trace_span("ref_logprobs"):
-                    ref_logprobs = await reference.compute_logprobs(batch.input_ids, batch.completion_ids)
+                    ref_logprobs = await reference.compute_logprobs(
+                        batch.input_ids, batch.completion_ids, batch.prompt_lens
+                    )
 
                 with trace_span("forward_backward"):
                     loss = await trainer.forward_backward(
                         loss_fn,
                         batch.input_ids,
                         loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
-                        loss_kwargs={"padding_mask": batch.mask},
+                        loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
                     )
 
                 with trace_span("optim_step"):
                     grad_norm = await trainer.optim_step()
+
+                # Log torchtitan-style metrics (MFU, TFLOPS, memory)
+                ntokens = batch.input_ids.numel()
+                await trainer.log_metrics(loss, grad_norm, ntokens)
 
             avg_reward = batch.rewards.mean().item()
             runtime.tracer.counter("metrics", {"loss": loss, "grad_norm": grad_norm, "avg_reward": avg_reward})

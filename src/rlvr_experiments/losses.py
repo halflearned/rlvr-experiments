@@ -28,9 +28,10 @@ class GRPOLoss(torch.nn.Module):
         rollout_logprobs: torch.Tensor, # [B, T] – pre-computed rollout log π_{θ_old}
         rewards: torch.Tensor,          # [B] – rewards
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
+        prompt_lens: torch.Tensor | None = None,  # [B] – prompt lengths for proper slicing
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
-        trainer_logprobs = compute_logprobs(logits, response)
+        trainer_logprobs = compute_logprobs(logits, response, prompt_lens=prompt_lens)
 
         # Move other tensors to same device, ensure float32
         ref_logprobs = ref_logprobs.to(trainer_logprobs.device).float()
@@ -60,6 +61,22 @@ class GRPOLoss(torch.nn.Module):
         # kl-div per token, unbiased estimator
         log_ratio_ref = ref_logprobs - trainer_logprobs_masked  # log(π_ref / π_θ)
         kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
+
+        # Debug: log differences between logprobs
+        with torch.no_grad():
+            diff_trainer_ref = (trainer_logprobs_masked - ref_logprobs).abs()
+            diff_trainer_rollout = (trainer_logprobs_masked - rollout_logprobs).abs()
+            print(
+                f"[GRPO DEBUG] "
+                f"trainer_lp: [{trainer_logprobs_masked.min().item():.2f}, {trainer_logprobs_masked.max().item():.2f}]  "
+                f"ref_lp: [{ref_logprobs.min().item():.2f}, {ref_logprobs.max().item():.2f}]  "
+                f"rollout_lp: [{rollout_logprobs.min().item():.2f}, {rollout_logprobs.max().item():.2f}]  "
+                f"|trainer-ref|_max: {diff_trainer_ref.max().item():.4f}  "
+                f"|trainer-rollout|_max: {diff_trainer_rollout.max().item():.4f}  "
+                f"kl_max: {kl_t.max().item():.4f}  "
+                f"ratio_max: {ratio.max().item():.4f}",
+                flush=True
+            )
 
         # per-token loss with mask
         per_token_loss = -(surrogate - self.beta * kl_t)

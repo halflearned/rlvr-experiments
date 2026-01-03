@@ -358,6 +358,15 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             )
             self.checkpointer.load(step=None)
 
+        # Metrics tracking for MFU/TFLOPS (without using MetricsProcessor which calls empty_cache)
+        _, self._num_flops_per_token = self.model_args.get_nparams_and_flops(
+            self.model_parts[0], job_config.training.seq_len
+        )
+        self._gpu_peak_flops = utils.get_peak_flops(torch.cuda.get_device_name(self.device))
+        self._metrics_log_freq = job_config.metrics.log_freq
+        self._ntokens_since_last_log = 0
+        self._time_last_log = None
+
         # Optionally enable HuggingFace-compatible precision for training.
         # This ensures trained model produces identical outputs when loaded in HF for evaluation.
         #
@@ -457,7 +466,49 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         self.step += 1
         logger.debug(f"TitanModel.optim_step: done, step={self.step}")
         return grad_norm.item()
-    
+
+    def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> None:
+        """Log metrics (MFU, TFLOPS, memory, etc.)."""
+        import time
+
+        # Accumulate tokens for throughput calculation
+        self._ntokens_since_last_log += ntokens
+
+        # Check if we should log this step
+        if self._metrics_log_freq <= 0 or self.step % self._metrics_log_freq != 0:
+            return
+
+        now = time.perf_counter()
+        if self._time_last_log is None:
+            self._time_last_log = now
+            return  # Skip first log (no time delta yet)
+
+        time_delta = now - self._time_last_log
+        self._time_last_log = now
+
+        # Tokens per second
+        tps = self._ntokens_since_last_log / time_delta if time_delta > 0 else 0
+
+        # TFLOPS and MFU
+        tflops = self._num_flops_per_token * tps / 1e12
+        mfu = 100 * self._num_flops_per_token * tps / self._gpu_peak_flops if self._gpu_peak_flops > 0 else 0
+
+        # Memory stats
+        mem_stats = torch.cuda.memory_stats(self.device)
+        peak_reserved = mem_stats.get("reserved_bytes.all.peak", 0) / (1024**3)
+        total_mem = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)
+        mem_pct = 100 * peak_reserved / total_mem if total_mem > 0 else 0
+
+        print(
+            f"[METRICS] step={self.step:3d}  loss={loss:.4f}  "
+            f"memory={peak_reserved:.1f}GiB({mem_pct:.0f}%)  "
+            f"tps={tps:.0f}  tflops={tflops:.1f}  mfu={mfu:.1f}%",
+            flush=True
+        )
+
+        # Reset token counter after logging
+        self._ntokens_since_last_log = 0
+
     # Checkpointing and state management
 
     def hf_state_dict(self) -> Dict[str, Any]:

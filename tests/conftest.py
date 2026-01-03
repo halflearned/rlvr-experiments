@@ -28,29 +28,9 @@ def event_loop():
 
 @pytest.fixture
 def mock_tokenizer():
-    """Mock tokenizer that returns simple chat templates."""
-    tokenizer = MagicMock()
-
-    def apply_chat_template(messages, tokenize=False, add_generation_prompt=False):
-        # Simple mock: just concatenate message contents
-        parts = []
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system":
-                parts.append(f"<system>{content}</system>")
-            elif role == "user":
-                parts.append(f"<user>{content}</user>")
-            elif role == "assistant":
-                parts.append(f"<assistant>{content}</assistant>")
-        result = "".join(parts)
-        if add_generation_prompt:
-            result += "<assistant>"
-        return result
-
-    tokenizer.apply_chat_template = apply_chat_template
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token_id = 1
+    """Real Qwen tokenizer for realistic testing."""
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", use_fast=False)
     return tokenizer
 
 

@@ -49,7 +49,7 @@ roles:
   - name: trainer
     kind: titan
     config:
-      # our titan model enecccblutrdkdillectnkehbjcvrtunreirnirhvihjtakes this additional keyword.
+      # our titan model takes this additional keyword.
       # if false then it doesn't create optimizers etc
       trainable: true
 
@@ -71,7 +71,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00005
+        lr: 0.00001
         eps: 0.00000001
 
       lr_scheduler:
@@ -104,7 +104,7 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: none
+        mode: selective
         selective_ac_option: "op"
 
       compile:

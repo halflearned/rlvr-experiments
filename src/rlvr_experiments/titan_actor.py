@@ -186,8 +186,20 @@ class TitanModelRank:
         """Export model to HuggingFace format. All ranks must call (collective for DTensors)."""
         self.model.export_to_hf(output_path)
 
-    def compute_logprobs(self, input_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor | None:
-        """Forward pass returning logprobs (only rank 0 returns, others return None)."""
+    def compute_logprobs(
+        self,
+        input_ids: torch.Tensor,
+        completion_ids: torch.Tensor,
+        prompt_lens: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """Forward pass returning logprobs (only rank 0 returns, others return None).
+
+        Args:
+            input_ids: [B, seq_len] - full sequence (prompt + completion + padding)
+            completion_ids: [B, completion_len] - just the completion tokens
+            prompt_lens: [B] - length of prompt for each sample, needed when sequences
+                         have trailing padding to correctly slice logits
+        """
         import time
 
         torch.cuda.synchronize()
@@ -205,7 +217,7 @@ class TitanModelRank:
         t2 = time.perf_counter()
 
         completion_ids = completion_ids.to(self.model.device)
-        logprobs = compute_logprobs(logits, completion_ids)
+        logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
 
         torch.cuda.synchronize()
         t3 = time.perf_counter()
@@ -281,6 +293,11 @@ class TitanModelRank:
             )
 
         return float(loss.detach().item())
+
+    def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> None:
+        """Log metrics using torchtitan's MetricsProcessor (only rank 0 logs)."""
+        if self.rank == 0:
+            self.model.log_metrics(loss, grad_norm, ntokens)
 
 
 class DistributedModelHandle:

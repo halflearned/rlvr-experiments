@@ -162,8 +162,12 @@ class DataIterator:
 
     def _apply_template(self, prompt: str) -> str:
         """Apply chat template to a single prompt."""
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": prompt})
         content = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
+            messages,
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,  # TODO: make configurable
