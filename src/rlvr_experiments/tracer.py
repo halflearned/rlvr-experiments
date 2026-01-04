@@ -98,14 +98,23 @@ class TraceRecorder:
         self,
         size: int,
         by_version: Dict[int, int] | None = None,
-        evicted: Dict[int, int] | None = None,
+        fates: Dict[str, Dict[int, int]] | None = None,
     ) -> None:
-        """Emit buffer state. Specialized for richer buffer tracking."""
+        """Emit buffer state with item fate tracking.
+
+        Args:
+            size: Current buffer size
+            by_version: Per-version item counts currently in buffer
+            fates: Per-version cumulative fate counts:
+                - used: Items fully consumed (good)
+                - wasted: Items evicted without any reads (bad)
+                - partial: Items evicted with some reads (in between)
+        """
         event = {"type": "buffer", "ts": self._now_s(), "size": size}
         if by_version:
             event["by_version"] = by_version
-        if evicted:
-            event["evicted"] = evicted
+        if fates:
+            event["fates"] = fates
         self._emit(event)
 
     def meta(self, **kwargs) -> None:

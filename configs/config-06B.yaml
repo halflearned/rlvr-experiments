@@ -12,7 +12,7 @@ training:
   num_epochs: 2
   iterations_per_epoch: null  # null = run full epoch until data exhausted
   sync_reference_every: 5
-  train_batch_size: 2  # number of prompts (will be multiplied by n completions)
+  train_batch_size: 9  # number of prompts (will be multiplied by n completions)
 
 verifier:
   num_workers: 2
@@ -40,7 +40,7 @@ sampling:
   n: 16
   logprobs: 0
 
-trace_path: /home/ubuntu/outputs/trace.json
+trace_path: traces/trace.jsonl
 
 buffer:
   max_reads: 2
@@ -84,7 +84,7 @@ roles:
         mixed_precision_reduce: "float32"
 
       parallelism: 
-        data_parallel_replicate_degree: 1  # note: not available for qwen3 (2025-12-23)
+        data_parallel_replicate_degree: 3
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
         tensor_parallel_degree: 1

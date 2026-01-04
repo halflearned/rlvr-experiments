@@ -164,6 +164,30 @@ class TitanModelRank:
                         else:
                             target.copy_(incoming_val.to(device=target.device, dtype=target.dtype))
 
+    def _get_dp_shard(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Shard a tensor by DP replicate rank (for DDP-style data parallelism)."""
+        dp_degree = self.model.parallel_dims.dp_replicate
+        if dp_degree <= 1:
+            return tensor
+
+        # Get local rank within dp_replicate dimension
+        mesh = self.model.parallel_dims.world_mesh
+        if "dp_replicate" not in mesh.mesh_dim_names:
+            return tensor
+
+        dp_rank = mesh.get_local_rank("dp_replicate")
+        batch_size = tensor.shape[0]
+        shard_size = batch_size // dp_degree
+
+        if shard_size * dp_degree != batch_size:
+            raise ValueError(
+                f"Batch size {batch_size} not evenly divisible by dp_replicate={dp_degree}."
+            )
+
+        start = dp_rank * shard_size
+        end = start + shard_size
+        return tensor[start:end]
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor | None:
         """Forward pass returning raw logits (only rank 0 returns, others return None)."""
         logits = self.model.forward(input_ids)
@@ -201,6 +225,13 @@ class TitanModelRank:
                          have trailing padding to correctly slice logits
         """
         import time
+        import torch.distributed as dist
+
+        # Shard batch by DP replicate rank
+        input_ids = self._get_dp_shard(input_ids)
+        completion_ids = self._get_dp_shard(completion_ids)
+        if prompt_lens is not None:
+            prompt_lens = self._get_dp_shard(prompt_lens)
 
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -222,13 +253,29 @@ class TitanModelRank:
         torch.cuda.synchronize()
         t3 = time.perf_counter()
 
+        # Gather logprobs from all DP replicate ranks to reconstruct full batch
+        dp_degree = self.model.parallel_dims.dp_replicate
+        if dp_degree > 1 and "dp_replicate" in self.model.parallel_dims.world_mesh.mesh_dim_names:
+            mesh = self.model.parallel_dims.world_mesh
+            dp_mesh = mesh["dp_replicate"]
+            dp_group = dp_mesh.get_group()
+
+            # All-gather logprobs across DP ranks
+            gathered = [torch.zeros_like(logprobs) for _ in range(dp_degree)]
+            dist.all_gather(gathered, logprobs, group=dp_group)
+            logprobs = torch.cat(gathered, dim=0)
+
+        torch.cuda.synchronize()
+        t4 = time.perf_counter()
+
         if self.rank == 0:
             print(
                 f"[PROFILE compute_logprobs] "
                 f"forward={1000*(t1-t0):.0f}ms, "
                 f"full_tensor={1000*(t2-t1):.0f}ms, "
                 f"logprobs={1000*(t3-t2):.0f}ms, "
-                f"TOTAL={1000*(t3-t0):.0f}ms | "
+                f"gather={1000*(t4-t3):.0f}ms, "
+                f"TOTAL={1000*(t4-t0):.0f}ms | "
                 f"shape={list(input_ids.shape)}",
                 flush=True
             )
@@ -244,6 +291,18 @@ class TitanModelRank:
     ) -> tuple[float, dict | None]:
         """Forward pass, compute loss, and backward pass. Returns (loss, debug_metrics)."""
         import time
+
+        # Shard batch by DP replicate rank
+        input_ids = self._get_dp_shard(input_ids)
+        loss_args = tuple(
+            self._get_dp_shard(a) if torch.is_tensor(a) else a
+            for a in loss_args
+        )
+        if loss_kwargs:
+            loss_kwargs = {
+                k: self._get_dp_shard(v) if torch.is_tensor(v) else v
+                for k, v in loss_kwargs.items()
+            }
 
         torch.cuda.synchronize()
         t0 = time.perf_counter()

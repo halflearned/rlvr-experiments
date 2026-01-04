@@ -265,6 +265,94 @@
         .tooltip.visible {
             display: block;
         }
+
+        /* Fates canvas */
+        #fates-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Recommendations panel */
+        .recommendations-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            overflow-y: auto;
+        }
+
+        .rec-utilization {
+            display: flex;
+            gap: 16px;
+            padding: 8px 10px;
+            background: #161b22;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+        }
+
+        .rec-stat {
+            font-size: 12px;
+            color: #8b949e;
+        }
+
+        .rec-stat strong {
+            color: #58a6ff;
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .rec-items {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .rec-item {
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .rec-icon {
+            font-weight: bold;
+            margin-right: 6px;
+        }
+
+        .rec-text {
+            font-weight: 500;
+        }
+
+        .rec-suggestion {
+            font-size: 10px;
+            opacity: 0.8;
+            margin-left: 16px;
+        }
+
+        .rec-success {
+            background: rgba(63, 185, 80, 0.15);
+            border: 1px solid rgba(63, 185, 80, 0.3);
+            color: #3fb950;
+        }
+
+        .rec-warning {
+            background: rgba(248, 81, 73, 0.15);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+            color: #f85149;
+        }
+
+        .rec-caution {
+            background: rgba(210, 153, 34, 0.15);
+            border: 1px solid rgba(210, 153, 34, 0.3);
+            color: #d29922;
+        }
+
+        .rec-info {
+            background: rgba(88, 166, 255, 0.1);
+            border: 1px solid rgba(88, 166, 255, 0.2);
+            color: #8b949e;
+        }
     </style>
 </head>
 <body>
@@ -322,26 +410,67 @@
             </div>
         </div>
 
-        <!-- Panel 2: Buffer Dynamics -->
-        <div class="panel">
-            <div class="panel-header">
-                <div>
-                    <div class="panel-title">Buffer Dynamics</div>
-                    <div class="panel-subtitle">Sample versions, fill/drain rate, evictions</div>
+        <!-- Panel 2: Buffer Dynamics + Sample Fates + Recommendations -->
+        <div class="panel" style="display: grid; grid-template-columns: 5fr 2fr 2fr; gap: 1px; padding: 0; background: #30363d;">
+            <!-- Buffer Dynamics -->
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Buffer Dynamics</div>
+                        <div class="panel-subtitle">Sample versions over time</div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #a371f7;"></div>
+                            <span>Buffer Size</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #f85149; opacity: 0.5;"></div>
+                            <span>Version Change</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="legend">
-                    <div class="legend-item">
-                        <div class="legend-dot" style="background: #a371f7;"></div>
-                        <span>Buffer Size</span>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-dot" style="background: #f85149; opacity: 0.5;"></div>
-                        <span>Version Change</span>
-                    </div>
+                <div class="panel-content">
+                    <canvas id="buffer-canvas"></canvas>
                 </div>
             </div>
-            <div class="panel-content">
-                <canvas id="buffer-canvas"></canvas>
+            <!-- Sample Fates -->
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Sample Fates</div>
+                        <div class="panel-subtitle">Per-version utilization</div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #3fb950;"></div>
+                            <span>Used</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #d29922;"></div>
+                            <span>Partial</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #f85149;"></div>
+                            <span>Wasted</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <canvas id="fates-canvas"></canvas>
+                </div>
+            </div>
+            <!-- Recommendations -->
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Balance</div>
+                        <div class="panel-subtitle">Utilization & recommendations</div>
+                    </div>
+                </div>
+                <div id="recommendations" class="recommendations-content">
+                    <div class="rec-item rec-info">Waiting for data...</div>
+                </div>
             </div>
         </div>
 

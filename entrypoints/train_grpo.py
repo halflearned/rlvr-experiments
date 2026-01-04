@@ -55,7 +55,7 @@ async def main():
     num_epochs = None #plan.training.get("num_epochs")
     max_steps = 50 # plan.training.get("max_steps")
 
-    batch_size = 2 #plan.training.get("train_batch_size") or 1
+    prompts_per_batch = 9 #plan.training.get("prompts_per_batch") or 1
     sync_ref_every = 10  # plan.training.get("sync_reference_every", 10)
     sync_model_every = 5 # plan.training.get("sync_model_every", 5)
     log_every = 5 #plan.training.get("log_every", 5)
@@ -70,7 +70,7 @@ async def main():
         rollout, data_iter, buffer,
         verifier_fn=verifier.verify_completions,
         pad_token_id=pad_token_id,
-        batch_size=batch_size,
+        prompts_per_batch=prompts_per_batch,
         sampling_params=plan.sampling,
         num_epochs=num_epochs,
         max_steps=max_steps,
@@ -78,7 +78,6 @@ async def main():
         max_completion_len=max_completion_len,
         max_staleness=max_staleness,
     ):
-
         # ---- train step ----
         with trace_span("ref_logprobs"):
             ref_logprobs = await reference.compute_logprobs(

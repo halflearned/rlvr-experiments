@@ -26,7 +26,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
 print(f"Serving RLVR Heartbeat at http://localhost:{PORT}/viz/")
-print(f"Trace files available at http://localhost:{PORT}/traces/trace.json")
+print(f"Trace files available at http://localhost:{PORT}/traces/trace.jsonl")
 print("Press Ctrl+C to stop")
 
 with http.server.HTTPServer(("", PORT), Handler) as httpd:

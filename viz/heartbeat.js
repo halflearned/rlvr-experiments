@@ -10,6 +10,7 @@ class HeartbeatViz {
         // Canvas contexts
         this.timelineCtx = null;
         this.bufferCtx = null;
+        this.fatesCtx = null;
         this.metricCharts = {};
 
         // Metric history
@@ -63,9 +64,11 @@ class HeartbeatViz {
     setupCanvases() {
         const timelineCanvas = document.getElementById('timeline-canvas');
         const bufferCanvas = document.getElementById('buffer-canvas');
+        const fatesCanvas = document.getElementById('fates-canvas');
 
         this.timelineCtx = timelineCanvas.getContext('2d');
         this.bufferCtx = bufferCanvas.getContext('2d');
+        this.fatesCtx = fatesCanvas.getContext('2d');
 
         // Setup metric mini-charts with hover handling
         const metricNames = Object.keys(this.metrics);
@@ -93,9 +96,10 @@ class HeartbeatViz {
         try {
             // Try loading from common locations (now JSONL format)
             const paths = [
+                '../traces/trace.jsonl',
+                'traces/trace.jsonl',
                 '../trace.jsonl',
-                '/efs/rlvr-experiments/trace.jsonl',
-                '../traces/trace.jsonl'
+                '/efs/rlvr-experiments/traces/trace.jsonl'
             ];
 
             for (const path of paths) {
@@ -201,6 +205,10 @@ class HeartbeatViz {
         this.bufferEvents = [];
         this.syncEvents = [];
 
+        // For utilization tracking
+        this.vllmSpans = [];  // {replica, ts, dur}
+        this.trainerSpans = [];  // {ts, dur}
+
         let currentVersion = 0;
 
         for (const event of this.events) {
@@ -264,6 +272,14 @@ class HeartbeatViz {
                     currentVersion++;
                     this.syncEvents.push({ ts, version: currentVersion });
                 }
+                // Track vLLM generation spans
+                if (event.name === 'vllm.generate') {
+                    this.vllmSpans.push({ replica: event.replica, ts: event.ts, dur: event.dur || 0 });
+                }
+                // Track trainer spans
+                if (event.name === 'forward_backward') {
+                    this.trainerSpans.push({ ts: event.ts, dur: event.dur || 0 });
+                }
             }
 
             // Buffer events (new specialized type)
@@ -272,7 +288,7 @@ class HeartbeatViz {
                     ts,
                     size: event.size,
                     byVersion: event.by_version || {},
-                    evicted: event.evicted || {},
+                    fates: event.fates || { used: {}, wasted: {}, partial: {} },
                     version: currentVersion
                 });
             }
@@ -296,7 +312,183 @@ class HeartbeatViz {
     render() {
         this.renderTimeline();
         this.renderBuffer();
+        this.renderFates();
         this.renderMetrics();
+        this.renderRecommendations();
+    }
+
+    computeUtilization() {
+        // Compute utilization from first generation span (excludes startup overhead)
+        if (!this.vllmSpans.length) return { vllm: 0, trainer: 0, vllmPerReplica: {}, ddpDegree: 1, startTs: 0 };
+
+        // Find first vLLM generation as start time
+        const startTs = Math.min(...this.vllmSpans.map(s => s.ts));
+        const duration = this.maxTs - startTs;
+        if (duration <= 0) return { vllm: 0, trainer: 0, vllmPerReplica: {}, ddpDegree: 1, startTs };
+
+        // vLLM: sum of all generation time across replicas / (duration * num_replicas)
+        const replicas = new Set(this.vllmSpans.map(s => s.replica));
+        const numVllmReplicas = replicas.size || 1;
+        const vllmTotalTime = this.vllmSpans.reduce((sum, s) => sum + s.dur, 0);
+        const vllmUtil = (vllmTotalTime / (duration * numVllmReplicas)) * 100;
+
+        // Per-replica utilization
+        const vllmPerReplica = {};
+        for (const r of replicas) {
+            const replicaTime = this.vllmSpans.filter(s => s.replica === r).reduce((sum, s) => sum + s.dur, 0);
+            vllmPerReplica[r] = (replicaTime / duration) * 100;
+        }
+
+        // Detect DDP degree by checking for overlapping trainer spans
+        // If spans overlap, we have multiple replicas running in parallel
+        let ddpDegree = 1;
+        if (this.trainerSpans.length >= 2) {
+            // Check first few spans for overlap
+            const sorted = [...this.trainerSpans].sort((a, b) => a.ts - b.ts);
+            let maxOverlap = 1;
+            for (let i = 0; i < Math.min(10, sorted.length); i++) {
+                const span = sorted[i];
+                const spanEnd = span.ts + span.dur;
+                // Count how many spans overlap with this one
+                let overlapping = 0;
+                for (const other of sorted) {
+                    if (other.ts < spanEnd && (other.ts + other.dur) > span.ts) {
+                        overlapping++;
+                    }
+                }
+                maxOverlap = Math.max(maxOverlap, overlapping);
+            }
+            ddpDegree = maxOverlap;
+        }
+
+        // Trainer: sum of forward_backward time / (duration * ddp_degree)
+        // With DDP, each replica does 1/N of the work, so total GPU-time = sum / ddp_degree
+        const trainerTotalTime = this.trainerSpans.reduce((sum, s) => sum + s.dur, 0);
+        const trainerUtil = (trainerTotalTime / (duration * ddpDegree)) * 100;
+
+        return { vllm: vllmUtil, trainer: trainerUtil, vllmPerReplica, numVllmReplicas, ddpDegree, startTs };
+    }
+
+    computeFateSummary() {
+        if (!this.bufferEvents.length) return null;
+        const lastEvt = this.bufferEvents[this.bufferEvents.length - 1];
+        if (!lastEvt || !lastEvt.fates) return null;
+
+        const { used, wasted, partial } = lastEvt.fates;
+        const totalUsed = Object.values(used || {}).reduce((s, v) => s + v, 0);
+        const totalWasted = Object.values(wasted || {}).reduce((s, v) => s + v, 0);
+        const totalPartial = Object.values(partial || {}).reduce((s, v) => s + v, 0);
+        const grandTotal = totalUsed + totalWasted + totalPartial;
+
+        if (grandTotal === 0) return null;
+
+        return {
+            usedPct: (totalUsed / grandTotal) * 100,
+            wastedPct: (totalWasted / grandTotal) * 100,
+            partialPct: (totalPartial / grandTotal) * 100,
+            total: grandTotal
+        };
+    }
+
+    getRecommendations() {
+        const util = this.computeUtilization();
+        const fates = this.computeFateSummary();
+        const recommendations = [];
+
+        if (!fates || fates.total < 10) {
+            return [{ type: 'info', text: 'Collecting data...' }];
+        }
+
+        // Analyze sample efficiency
+        if (fates.wastedPct > 30) {
+            recommendations.push({
+                type: 'warning',
+                text: `${fates.wastedPct.toFixed(0)}% samples wasted - generating too fast`,
+                suggestion: 'Increase batch size, reduce vLLM replicas, allow for more staleness'
+            });
+        } else if (fates.wastedPct > 15) {
+            recommendations.push({
+                type: 'caution',
+                text: `${fates.wastedPct.toFixed(0)}% samples wasted`,
+                suggestion: 'Consider increasing batch size or sync interval'
+            });
+        }
+
+        // Check for vLLM underutilization with good sample efficiency
+        if (util.vllm < 50 && fates.wastedPct < 10) {
+            recommendations.push({
+                type: 'info',
+                text: `vLLM ${util.vllm.toFixed(0)}% utilized with low waste`,
+                suggestion: 'Could add more vLLM replicas for faster throughput'
+            });
+        }
+
+        // Check for trainer being the bottleneck
+        if (util.trainer > 80 && fates.wastedPct > 20) {
+            recommendations.push({
+                type: 'warning',
+                text: `Trainer busy (${util.trainer.toFixed(0)}%) but samples wasted`,
+                suggestion: 'Training throughput is the bottleneck - consider TP or larger batch'
+            });
+        }
+
+        // Check for trainer starved (low utilization, low waste)
+        if (util.trainer < 40 && fates.wastedPct < 5 && util.vllm > 70) {
+            recommendations.push({
+                type: 'info',
+                text: `Trainer ${util.trainer.toFixed(0)}% utilized, waiting for samples`,
+                suggestion: 'Trainer may be starved - add more vLLM capacity'
+            });
+        }
+
+        // Good state
+        if (fates.usedPct > 80 && util.trainer > 50 && util.vllm > 50) {
+            recommendations.push({
+                type: 'success',
+                text: `Well balanced: ${fates.usedPct.toFixed(0)}% samples used`,
+                suggestion: null
+            });
+        }
+
+        if (recommendations.length === 0) {
+            recommendations.push({
+                type: 'info',
+                text: `${fates.usedPct.toFixed(0)}% used, vLLM ${util.vllm.toFixed(0)}%, Trainer ${util.trainer.toFixed(0)}%`,
+                suggestion: null
+            });
+        }
+
+        return recommendations;
+    }
+
+    renderRecommendations() {
+        const container = document.getElementById('recommendations');
+        if (!container) return;
+
+        const recs = this.getRecommendations();
+        const util = this.computeUtilization();
+
+        // Build HTML
+        let html = '<div class="rec-utilization">';
+        html += `<span class="rec-stat">vLLM (${util.numVllmReplicas || 1}x): <strong>${util.vllm.toFixed(0)}%</strong></span>`;
+        const ddpLabel = util.ddpDegree > 1 ? ` (DDP ${util.ddpDegree}x)` : '';
+        html += `<span class="rec-stat">Trainer${ddpLabel}: <strong>${util.trainer.toFixed(0)}%</strong></span>`;
+        html += '</div>';
+
+        html += '<div class="rec-items">';
+        for (const rec of recs) {
+            const icon = rec.type === 'success' ? '✓' : rec.type === 'warning' ? '!' : rec.type === 'caution' ? '~' : '→';
+            html += `<div class="rec-item rec-${rec.type}">`;
+            html += `<span class="rec-icon">${icon}</span>`;
+            html += `<span class="rec-text">${rec.text}</span>`;
+            if (rec.suggestion) {
+                html += `<span class="rec-suggestion">${rec.suggestion}</span>`;
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+
+        container.innerHTML = html;
     }
 
     renderTimeline() {
@@ -575,6 +767,152 @@ class HeartbeatViz {
             const t = (duration * i / numTicks);
             const x = padding.left + (i / numTicks) * plotWidth;
             ctx.fillText(t.toFixed(1) + 's', x, height - 10);
+        }
+    }
+
+    renderFates() {
+        const canvas = document.getElementById('fates-canvas');
+        const ctx = this.fatesCtx;
+
+        // Handle high DPI
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear
+        ctx.fillStyle = '#0d1117';
+        ctx.fillRect(0, 0, width, height);
+
+        if (!this.bufferEvents.length) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '14px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Sample fates will appear here', width / 2, height / 2);
+            return;
+        }
+
+        // Get latest fates from last buffer event
+        const lastEvt = this.bufferEvents[this.bufferEvents.length - 1];
+        if (!lastEvt || !lastEvt.fates) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '12px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No fate data yet', width / 2, height / 2);
+            return;
+        }
+
+        const { used, wasted, partial } = lastEvt.fates;
+
+        // Collect all versions from fates
+        const allVersions = new Set([
+            ...Object.keys(used || {}),
+            ...Object.keys(wasted || {}),
+            ...Object.keys(partial || {})
+        ].map(v => parseInt(v)));
+        const versions = [...allVersions].sort((a, b) => a - b);
+
+        // Calculate totals per version
+        const fateData = [];
+        for (const v of versions) {
+            const u = (used || {})[v] || 0;
+            const w = (wasted || {})[v] || 0;
+            const p = (partial || {})[v] || 0;
+            const total = u + w + p;
+            if (total > 0) {
+                fateData.push({ version: v, used: u, wasted: w, partial: p, total });
+            }
+        }
+
+        if (fateData.length === 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '12px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No completed samples yet', width / 2, height / 2);
+            return;
+        }
+
+        const padding = { left: 35, right: 50, top: 10, bottom: 20 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        // Show up to 8 most recent versions
+        const recentFates = fateData.slice(-8);
+        const barHeight = Math.min(24, (plotHeight - 10) / recentFates.length - 4);
+        const barSpacing = (plotHeight - recentFates.length * barHeight) / (recentFates.length + 1);
+
+        // Find max total for scaling
+        const maxTotal = Math.max(...recentFates.map(f => f.total));
+
+        for (let i = 0; i < recentFates.length; i++) {
+            const f = recentFates[i];
+            const y = padding.top + barSpacing + i * (barHeight + barSpacing);
+
+            // Version label
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '11px -apple-system, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('v' + f.version, padding.left - 5, y + barHeight / 2 + 4);
+
+            // Calculate bar width proportional to total
+            const totalBarWidth = (f.total / maxTotal) * plotWidth;
+
+            // Stacked bar
+            let x = padding.left;
+            const scale = totalBarWidth / f.total;
+
+            // Used (green)
+            if (f.used > 0) {
+                ctx.fillStyle = '#3fb950';
+                const w = f.used * scale;
+                ctx.fillRect(x, y, w, barHeight);
+                x += w;
+            }
+            // Partial (yellow)
+            if (f.partial > 0) {
+                ctx.fillStyle = '#d29922';
+                const w = f.partial * scale;
+                ctx.fillRect(x, y, w, barHeight);
+                x += w;
+            }
+            // Wasted (red)
+            if (f.wasted > 0) {
+                ctx.fillStyle = '#f85149';
+                const w = f.wasted * scale;
+                ctx.fillRect(x, y, w, barHeight);
+            }
+
+            // Total count and percentage
+            const usedPct = Math.round(100 * f.used / f.total);
+            ctx.fillStyle = '#c9d1d9';
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`${f.total} (${usedPct}%)`, padding.left + totalBarWidth + 5, y + barHeight / 2 + 4);
+        }
+
+        // Summary at bottom
+        const totalUsed = fateData.reduce((s, f) => s + f.used, 0);
+        const totalWasted = fateData.reduce((s, f) => s + f.wasted, 0);
+        const totalPartial = fateData.reduce((s, f) => s + f.partial, 0);
+        const grandTotal = totalUsed + totalWasted + totalPartial;
+
+        if (grandTotal > 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            const usedPct = Math.round(100 * totalUsed / grandTotal);
+            const wastedPct = Math.round(100 * totalWasted / grandTotal);
+            ctx.fillText(
+                `Total: ${grandTotal} samples | ${usedPct}% used, ${wastedPct}% wasted`,
+                width / 2,
+                height - 5
+            );
         }
     }
 

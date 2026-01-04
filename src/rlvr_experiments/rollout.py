@@ -68,34 +68,18 @@ def make_batch(
     pad_token_id: int,
     max_seq_len: int | None = None,
     max_completion_len: int | None = None,
-) -> Batch | None:
-    """Combine samples into a training batch. Returns None if all zero-variance.
+) -> Batch:
+    """Combine pre-filtered samples into a training batch (pad and concatenate).
 
     Args:
-        samples: List of RolloutSample objects
+        samples: List of RolloutSample objects (already filtered for validity)
         pad_token_id: Token ID to use for padding
         max_seq_len: If provided, pad input_ids to this fixed length (avoids recompilation)
         max_completion_len: If provided, pad completion_ids to this fixed length
+
+    Note: Filtering (zero-variance, length limits) is done upstream in run().
     """
-    # Filter out samples that exceed fixed lengths
-    filtered = []
-    for s in samples:
-        seq_len = s.input_ids.shape[1]
-        comp_len = s.completion_ids.shape[1]
-        if max_seq_len is not None and seq_len > max_seq_len:
-            print(f"[make_batch] WARNING: dropping sample with seq_len={seq_len} > max_seq_len={max_seq_len}")
-            continue
-        if max_completion_len is not None and comp_len > max_completion_len:
-            print(f"[make_batch] WARNING: dropping sample with completion_len={comp_len} > max_completion_len={max_completion_len}")
-            continue
-        filtered.append(s)
-
-    if not filtered:
-        return None
-
-    valid = [s for s in filtered if torch.tensor(s.rewards, dtype=torch.float32).std() > 1e-6]
-    if not valid:
-        return None
+    assert samples, "make_batch requires non-empty samples list"
 
     def pad_cat(tensors, pad_value=0, fixed_len=None):
         max_len = fixed_len if fixed_len is not None else max(t.shape[1] for t in tensors)
@@ -103,16 +87,16 @@ def make_batch(
 
     # Build prompt_lens: each sample has N completions with the same prompt_len
     prompt_lens_list = []
-    for s in valid:
+    for s in samples:
         n_completions = s.input_ids.size(0)
         prompt_lens_list.extend([s.prompt_len] * n_completions)
 
     return Batch(
-        input_ids=pad_cat([s.input_ids for s in valid], pad_value=pad_token_id, fixed_len=max_seq_len),
-        completion_ids=pad_cat([s.completion_ids for s in valid], pad_value=pad_token_id, fixed_len=max_completion_len),
-        logprobs=pad_cat([s.logprobs for s in valid], fixed_len=max_completion_len),
-        rewards=torch.cat([torch.tensor(s.rewards, dtype=torch.float32) for s in valid]),
-        mask=pad_cat([(s.completion_ids != pad_token_id).float() for s in valid], fixed_len=max_completion_len),
+        input_ids=pad_cat([s.input_ids for s in samples], pad_value=pad_token_id, fixed_len=max_seq_len),
+        completion_ids=pad_cat([s.completion_ids for s in samples], pad_value=pad_token_id, fixed_len=max_completion_len),
+        logprobs=pad_cat([s.logprobs for s in samples], fixed_len=max_completion_len),
+        rewards=torch.cat([torch.tensor(s.rewards, dtype=torch.float32) for s in samples]),
+        mask=pad_cat([(s.completion_ids != pad_token_id).float() for s in samples], fixed_len=max_completion_len),
         prompt_lens=torch.tensor(prompt_lens_list, dtype=torch.long),
     )
 
@@ -124,7 +108,7 @@ async def run(
     *,
     verifier_fn: Callable,
     pad_token_id: int,
-    batch_size: int,
+    prompts_per_batch: int,
     sampling_params: dict | None = None,
     num_epochs: int | None = None,
     max_steps: int | None = None,
@@ -140,8 +124,9 @@ async def run(
         buffer: DataBuffer for producer/consumer coordination
         verifier_fn: async (problem, completions) -> list[float]
         pad_token_id: For padding tensors
-        batch_size: Samples per training batch
-        sampling_params: vLLM sampling parameters
+        prompts_per_batch: Number of prompts (valid, non-zero-variance) per training batch.
+                          Total samples = prompts_per_batch * n (completions per prompt).
+        sampling_params: vLLM sampling parameters (must include 'n' for completions per prompt)
         num_epochs: Number of epochs to run (mutually exclusive with max_steps)
         max_steps: Maximum steps to run (mutually exclusive with num_epochs)
         max_seq_len: If provided, pad input_ids to fixed length (avoids recompilation)
@@ -150,7 +135,7 @@ async def run(
 
     Yields:
         (step, epoch, batch) tuples. Step is global (doesn't reset per epoch).
-        Zero-variance batches are filtered.
+        Zero-variance samples are filtered upstream.
 
     Mid-epoch sync: When sync_titan_to_vllm is called, it increments rollout.model_version.
     Samples older than (current_version - max_staleness) are discarded from the buffer.
@@ -218,9 +203,27 @@ async def run(
                     done_count += 1
                     continue
 
+                # Skip zero-variance samples (all completions have same reward)
+                # This ensures batch_size means "valid prompts", not "total prompts"
+                if torch.tensor(item.rewards, dtype=torch.float32).std() < 1e-6:
+                    tracer.counter("skipped", {"zero_variance_samples": 1})
+                    continue
+
+                # Skip samples that exceed fixed lengths
+                seq_len = item.input_ids.shape[1]
+                comp_len = item.completion_ids.shape[1]
+                if max_seq_len is not None and seq_len > max_seq_len:
+                    print(f"[run] WARNING: dropping sample with seq_len={seq_len} > max_seq_len={max_seq_len}")
+                    tracer.counter("skipped", {"seq_too_long": 1})
+                    continue
+                if max_completion_len is not None and comp_len > max_completion_len:
+                    print(f"[run] WARNING: dropping sample with completion_len={comp_len} > max_completion_len={max_completion_len}")
+                    tracer.counter("skipped", {"completion_too_long": 1})
+                    continue
+
                 samples.append(item)
 
-                if len(samples) >= batch_size:
+                if len(samples) >= prompts_per_batch:
                     all_rewards = [r for s in samples for r in s.rewards]
                     tracer.counter("rewards", {
                         "mean": sum(all_rewards) / len(all_rewards) if all_rewards else 0,
@@ -230,16 +233,11 @@ async def run(
 
                     batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
                     samples = []
-
-                    if batch is None:
-                        tracer.counter("skipped", {"zero_variance_batches": 1})
-                        continue
-
                     global_step += 1
                     tracer.buffer(
                         size=buffer.size(),
                         by_version=buffer.get_by_version(),
-                        evicted=buffer.get_evicted_by_version(),
+                        fates=buffer.get_fates_by_version(),
                     )
                     yield global_step, epoch, batch
 

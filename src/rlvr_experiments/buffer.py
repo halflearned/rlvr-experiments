@@ -12,14 +12,21 @@ T = TypeVar("T")
 
 @dataclass
 class BufferStats:
-    """Lightweight stats tracking for buffer visualization."""
+    """Lightweight stats tracking for buffer visualization.
+
+    Tracks three item fates:
+    - used: Items fully consumed (all reads exhausted) - good
+    - wasted: Items evicted with all reads remaining (never used) - bad
+    - partial: Items evicted with some reads used - in between
+    """
 
     put: int = 0
     popped: int = 0
-    evicted_stale: int = 0
-    evicted_exhausted: int = 0
     by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
-    evicted_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    # Per-version fate tracking (cumulative)
+    used_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    wasted_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    partial_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
 
     def record_put(self, version: int) -> None:
         self.put += 1
@@ -29,30 +36,42 @@ class BufferStats:
     def record_pop(self, version: int, exhausted: bool) -> None:
         self.popped += 1
         if exhausted:
-            self.evicted_exhausted += 1
+            # Item fully consumed - good!
             if version >= 0:
+                self.used_by_version[version] += 1
                 self.by_version[version] = max(0, self.by_version[version] - 1)
 
-    def record_evict_stale(self, version: int) -> None:
-        self.evicted_stale += 1
+    def record_evict_stale(self, version: int, reads_remaining: int, max_reads: int) -> None:
+        """Record a stale eviction with fate categorization."""
         if version >= 0:
-            self.evicted_by_version[version] += 1
+            if reads_remaining == max_reads:
+                # Never used at all - wasted
+                self.wasted_by_version[version] += 1
+            else:
+                # Partially used
+                self.partial_by_version[version] += 1
             self.by_version[version] = max(0, self.by_version[version] - 1)
 
     def get_by_version(self) -> dict[int, int]:
         """Return per-version counts (excludes zeros)."""
         return {k: v for k, v in self.by_version.items() if v > 0}
 
-    def get_evicted_by_version(self) -> dict[int, int]:
-        """Return cumulative evicted counts per version."""
-        return dict(self.evicted_by_version)
+    def get_fates_by_version(self) -> dict[str, dict[int, int]]:
+        """Return cumulative fate counts per version."""
+        return {
+            "used": {k: v for k, v in self.used_by_version.items() if v > 0},
+            "wasted": {k: v for k, v in self.wasted_by_version.items() if v > 0},
+            "partial": {k: v for k, v in self.partial_by_version.items() if v > 0},
+        }
 
     def to_dict(self, current_size: int) -> dict:
+        fates = self.get_fates_by_version()
         return {
             "put": self.put,
             "popped": self.popped,
-            "evicted_stale": self.evicted_stale,
-            "evicted_exhausted": self.evicted_exhausted,
+            "used": sum(fates["used"].values()),
+            "wasted": sum(fates["wasted"].values()),
+            "partial": sum(fates["partial"].values()),
             "current_size": current_size,
         }
 
@@ -90,7 +109,7 @@ class DataBuffer(Generic[T]):
 
             # Negative version = never evict (control signals)
             if entry.version >= 0 and min_version is not None and entry.version < min_version:
-                self.stats.record_evict_stale(entry.version)
+                self.stats.record_evict_stale(entry.version, entry.reads_remaining, self._max_reads)
                 evicted_this_call += 1
                 if evicted_this_call % 10 == 0:
                     print(f"[buffer] evicted {evicted_this_call} stale samples (version {entry.version} < {min_version})")
@@ -128,5 +147,5 @@ class DataBuffer(Generic[T]):
     def get_by_version(self) -> dict[int, int]:
         return self.stats.get_by_version()
 
-    def get_evicted_by_version(self) -> dict[int, int]:
-        return self.stats.get_evicted_by_version()
+    def get_fates_by_version(self) -> dict[str, dict[int, int]]:
+        return self.stats.get_fates_by_version()
