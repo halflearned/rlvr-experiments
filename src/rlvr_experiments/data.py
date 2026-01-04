@@ -105,7 +105,7 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
     return ds.map(preprocess)
 
 
-def load_dummy(split: str = "train") -> ray.data.Dataset:
+def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
     """
     Load a dummy dataset with a single question repeated 64 times.
 
@@ -118,7 +118,7 @@ def load_dummy(split: str = "train") -> ray.data.Dataset:
             "prompt": "\n\nProblem:What is ((7/12) + (5/18)) / (31/36)?",
             "problem": {"answer": "1"},
         }
-    ] * 64
+    ] * num_samples
     return ray.data.from_items(rows)
 
 
@@ -176,7 +176,8 @@ class DataIterator:
 
     def new_epoch(self, seed: int | None = None) -> None:
         """Shuffle and reset iterator for a new epoch."""
-        shuffled = self.ds.random_shuffle(seed=seed)
+        # shuffled = self.ds.random_shuffle(seed=seed)
+        shuffled = self.ds # TEMPORARY
         self._iter = iter(shuffled.iter_batches(batch_size=self.batch_size))
 
     async def next_batch(self) -> dict | None:

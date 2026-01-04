@@ -467,8 +467,8 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         logger.debug(f"TitanModel.optim_step: done, step={self.step}")
         return grad_norm.item()
 
-    def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> None:
-        """Log metrics (MFU, TFLOPS, memory, etc.)."""
+    def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> dict | None:
+        """Log metrics (MFU, TFLOPS, memory, etc.). Returns metrics dict if logged."""
         import time
 
         # Accumulate tokens for throughput calculation
@@ -476,12 +476,12 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         # Check if we should log this step
         if self._metrics_log_freq <= 0 or self.step % self._metrics_log_freq != 0:
-            return
+            return None
 
         now = time.perf_counter()
         if self._time_last_log is None:
             self._time_last_log = now
-            return  # Skip first log (no time delta yet)
+            return None  # Skip first log (no time delta yet)
 
         time_delta = now - self._time_last_log
         self._time_last_log = now
@@ -508,6 +508,15 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
         # Reset token counter after logging
         self._ntokens_since_last_log = 0
+
+        # Return metrics for the main process to emit to tracer
+        return {
+            "tps": tps,
+            "tflops": tflops,
+            "mfu": mfu,
+            "memory_gib": peak_reserved,
+            "memory_pct": mem_pct,
+        }
 
     # Checkpointing and state management
 

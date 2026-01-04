@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_dummy
 from rlvr_experiments.losses import GRPOLoss
-from rlvr_experiments.rollout import run_epoch
+from rlvr_experiments.rollout import run
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier, MathVerifier
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
@@ -51,70 +51,80 @@ async def main():
     data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
     loss_fn = GRPOLoss(**plan.loss)
 
-    num_epochs = plan.training["num_epochs"]
-    max_steps = plan.training.get("iterations_per_epoch")
-    batch_size = plan.training.get("train_batch_size") or 1
-    sync_ref_every = plan.training.get("sync_reference_every", 1)
-    sync_model_every = plan.training.get("sync_reference_every", 2)
+    # NOTE TO CLAUDE: DONT CHANGE THE VALUES BELOW!
+    num_epochs = None #plan.training.get("num_epochs")
+    max_steps = 50 # plan.training.get("max_steps")
+
+    batch_size = 2 #plan.training.get("train_batch_size") or 1
+    sync_ref_every = 10  # plan.training.get("sync_reference_every", 10)
+    sync_model_every = 5 # plan.training.get("sync_model_every", 5)
+    log_every = 5 #plan.training.get("log_every", 5)
+    max_staleness = 0 # plan.training.get("max_staleness", 0)
 
     # Fixed sequence lengths to avoid dynamic shape recompilation
-    # max_completion_len = max_tokens from sampling config
-    # max_seq_len = prompt (estimate ~200) + completion
     max_completion_len = plan.sampling.get("max_tokens", 512)
     max_seq_len = plan.training.get("max_seq_len") or (max_completion_len + 256)
 
-    # --- Training loop ---
-    for epoch in range(num_epochs):
-        data_iter.new_epoch(seed=epoch)
+    # --- main loop ---
+    async for step, epoch, batch in run(
+        rollout, data_iter, buffer,
+        verifier_fn=verifier.verify_completions,
+        pad_token_id=pad_token_id,
+        batch_size=batch_size,
+        sampling_params=plan.sampling,
+        num_epochs=num_epochs,
+        max_steps=max_steps,
+        max_seq_len=max_seq_len,
+        max_completion_len=max_completion_len,
+        max_staleness=max_staleness,
+    ):
 
-        async for step, batch in run_epoch(
-            rollout, data_iter, buffer,
-            reward=verifier.verify_completions,
-            pad_token_id=pad_token_id,
-            batch_size=batch_size,
-            sampling_params=plan.sampling,
-            epoch=epoch,
-            max_seq_len=max_seq_len,
-            max_completion_len=max_completion_len,
-        ):
-            # The GRPO algorithm
-            with trace_span("train_step"):
-                with trace_span("ref_logprobs"):
-                    ref_logprobs = await reference.compute_logprobs(
-                        batch.input_ids, batch.completion_ids, batch.prompt_lens
-                    )
+        # ---- train step ----
+        with trace_span("ref_logprobs"):
+            ref_logprobs = await reference.compute_logprobs(
+                batch.input_ids, batch.completion_ids, batch.prompt_lens
+            )
 
-                with trace_span("forward_backward"):
-                    loss = await trainer.forward_backward(
-                        loss_fn,
-                        batch.input_ids,
-                        loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
-                        loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
-                    )
+        with trace_span("forward_backward"):
+            loss, grpo_debug = await trainer.forward_backward(
+                loss_fn,
+                batch.input_ids,
+                loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
+                loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
+            )
 
-                with trace_span("optim_step"):
-                    grad_norm = await trainer.optim_step()
+        with trace_span("optim_step"):
+            grad_norm = await trainer.optim_step()
 
-                # Log torchtitan-style metrics (MFU, TFLOPS, memory)
-                ntokens = batch.input_ids.numel()
-                await trainer.log_metrics(loss, grad_norm, ntokens)
-
-            avg_reward = batch.rewards.mean().item()
-            runtime.tracer.counter("metrics", {"loss": loss, "grad_norm": grad_norm, "avg_reward": avg_reward})
-
-            print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
-
-            if max_steps and step >= max_steps:
-                break
-
-            # Sync weights to vllm
-            if (step + 1) % sync_model_every == 0:
-                await sync_titan_to_vllm(trainer, rollout)
-
-        print(f"Epoch {epoch} complete: {step} steps")
-
-        if epoch % sync_ref_every == 0:
+        # ---- maybe sync ----
+        if step % sync_ref_every == 0:
             await sync_titan_to_titan(trainer, reference)
+
+        if step % sync_model_every == 0:
+            await sync_titan_to_vllm(trainer, rollout)
+
+
+        # ---- maybe log ----
+        titan_metrics = await trainer.log_metrics(loss, grad_norm, ntokens=batch.input_ids.numel())
+        if titan_metrics:
+            runtime.tracer.counter("titan.metrics", titan_metrics)
+
+        if grpo_debug:
+            runtime.tracer.counter("grpo.debug", grpo_debug)
+
+        avg_reward = batch.rewards.mean().item()
+        runtime.tracer.counter("metrics", {"loss": loss, "grad_norm": grad_norm, "avg_reward": avg_reward})
+
+        if step % log_every == 0:
+            await rollout.log_stats()
+
+        # Collect vLLM metrics and emit to tracer
+        vllm_metrics = await rollout.get_metrics()
+        if vllm_metrics["calls"] > 0:
+            runtime.tracer.counter("vllm.metrics", vllm_metrics)
+
+        print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
+
 
 
 if __name__ == "__main__":

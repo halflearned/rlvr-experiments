@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RLVR Heartbeat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .header-stats {
+            display: flex;
+            gap: 24px;
+            font-size: 13px;
+        }
+
+        .header-stat {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .header-stat .label {
+            color: #8b949e;
+        }
+
+        .header-stat .value {
+            color: #58a6ff;
+            font-weight: 500;
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .container {
+            display: grid;
+            grid-template-rows: 1fr 1fr 0.8fr 0.8fr;
+            height: calc(100vh - 60px);
+            gap: 1px;
+            background: #30363d;
+        }
+
+        .panel {
+            background: #0d1117;
+            padding: 16px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .panel-subtitle {
+            font-size: 11px;
+            color: #8b949e;
+        }
+
+        .panel-content {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Timeline Panel */
+        #timeline-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Buffer Panel */
+        #buffer-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Metrics Panel */
+        .metrics-panel {
+            padding: 8px 16px;
+            overflow: hidden;
+        }
+
+        .metrics-sections {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            height: 100%;
+        }
+
+        .metrics-section {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding-bottom: 4px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid #30363d;
+            flex-shrink: 0;
+        }
+
+        .section-cards {
+            display: grid;
+            grid-template-rows: 1fr 1fr 1fr;
+            gap: 6px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .metric-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 6px 10px;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 10px;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .metric-info {
+            flex-shrink: 0;
+            width: 75px;
+        }
+
+        .metric-label {
+            font-size: 10px;
+            color: #8b949e;
+            margin-bottom: 2px;
+            white-space: nowrap;
+        }
+
+        .metric-value {
+            font-size: 14px;
+            font-weight: 600;
+            font-family: 'SF Mono', Monaco, monospace;
+            white-space: nowrap;
+        }
+
+        .metric-chart {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            height: 100%;
+        }
+
+        .metric-chart canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Colors */
+        .color-green { color: #3fb950; }
+        .color-blue { color: #58a6ff; }
+        .color-purple { color: #a371f7; }
+        .color-orange { color: #d29922; }
+        .color-red { color: #f85149; }
+        .color-cyan { color: #39d4e0; }
+        .color-yellow { color: #e3b341; }
+        .color-teal { color: #2ea88a; }
+        .color-gray { color: #8b949e; }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 16px;
+            font-size: 11px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+        }
+
+        /* File input */
+        .file-input-wrapper {
+            position: relative;
+        }
+
+        .file-input-wrapper input[type="file"] {
+            position: absolute;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+
+        .file-input-btn {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .file-input-btn:hover {
+            background: #30363d;
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: #1f2428;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            display: none;
+        }
+
+        .tooltip.visible {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>RLVR Heartbeat</h1>
+        <div class="header-stats">
+            <div class="header-stat">
+                <span class="label">Step</span>
+                <span class="value" id="current-step">-</span>
+            </div>
+            <div class="header-stat">
+                <span class="label">Epoch</span>
+                <span class="value" id="current-epoch">-</span>
+            </div>
+            <div class="header-stat">
+                <span class="label">Version</span>
+                <span class="value" id="current-version">-</span>
+            </div>
+            <div class="header-stat">
+                <span class="label">Buffer</span>
+                <span class="value" id="buffer-size">-</span>
+            </div>
+            <div class="file-input-wrapper">
+                <input type="file" id="trace-file" accept=".json,.jsonl">
+                <button class="file-input-btn">Load trace</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Panel 1: Timeline -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Pipeline Timeline</div>
+                    <div class="panel-subtitle">vLLM generation, training steps, sync events</div>
+                </div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #3fb950;"></div>
+                        <span>vLLM Generate</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #58a6ff;"></div>
+                        <span>Training</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #f85149;"></div>
+                        <span>Sync</span>
+                    </div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <canvas id="timeline-canvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Panel 2: Buffer Dynamics -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Buffer Dynamics</div>
+                    <div class="panel-subtitle">Sample versions, fill/drain rate, evictions</div>
+                </div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #a371f7;"></div>
+                        <span>Buffer Size</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot" style="background: #f85149; opacity: 0.5;"></div>
+                        <span>Version Change</span>
+                    </div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <canvas id="buffer-canvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Panel 3: Three metric sections -->
+        <div class="panel metrics-panel">
+            <div class="metrics-sections">
+                <!-- Training Section -->
+                <div class="metrics-section">
+                    <div class="section-title">Training</div>
+                    <div class="section-cards">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Reward</div>
+                                <div class="metric-value color-green" id="metric-reward">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-reward"></canvas></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Loss</div>
+                                <div class="metric-value color-blue" id="metric-loss">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-loss"></canvas></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Grad Norm</div>
+                                <div class="metric-value color-red" id="metric-grad_norm">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-grad_norm"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <!-- TorchTitan Section -->
+                <div class="metrics-section">
+                    <div class="section-title">TorchTitan</div>
+                    <div class="section-cards">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">MFU</div>
+                                <div class="metric-value color-purple" id="metric-mfu">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-mfu"></canvas></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">tok/s</div>
+                                <div class="metric-value color-orange" id="metric-train_tps">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-train_tps"></canvas></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Memory</div>
+                                <div class="metric-value color-yellow" id="metric-memory_pct">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-memory_pct"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <!-- vLLM Section -->
+                <div class="metrics-section">
+                    <div class="section-title">vLLM</div>
+                    <div class="section-cards">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Gen tok/s</div>
+                                <div class="metric-value color-cyan" id="metric-vllm_tps">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-vllm_tps"></canvas></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Out toks</div>
+                                <div class="metric-value color-teal" id="metric-vllm_output_tokens">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-vllm_output_tokens"></canvas></div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Prompt toks</div>
+                                <div class="metric-value color-gray" id="metric-vllm_prompt_tokens">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-vllm_prompt_tokens"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel 4: Debug metrics -->
+        <div class="panel metrics-panel">
+            <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr);">
+                <!-- Debug Section -->
+                <div class="metrics-section">
+                    <div class="section-title">Debug</div>
+                    <div class="section-cards" style="grid-template-rows: 1fr;">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">KL Max</div>
+                                <div class="metric-value color-red" id="metric-kl_max">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-kl_max"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="metrics-section">
+                    <div class="section-title">&nbsp;</div>
+                    <div class="section-cards" style="grid-template-rows: 1fr;">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">Ratio Max</div>
+                                <div class="metric-value color-orange" id="metric-ratio_max">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-ratio_max"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="metrics-section">
+                    <div class="section-title">&nbsp;</div>
+                    <div class="section-cards" style="grid-template-rows: 1fr;">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">|T-Ref| Max</div>
+                                <div class="metric-value color-purple" id="metric-diff_ref">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-diff_ref"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="metrics-section">
+                    <div class="section-title">&nbsp;</div>
+                    <div class="section-cards" style="grid-template-rows: 1fr;">
+                        <div class="metric-card">
+                            <div class="metric-info">
+                                <div class="metric-label">|T-Roll| Max</div>
+                                <div class="metric-value color-cyan" id="metric-diff_rollout">-</div>
+                            </div>
+                            <div class="metric-chart"><canvas id="chart-diff_rollout"></canvas></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script src="heartbeat.js"></script>
+</body>
+</html>

@@ -66,7 +66,10 @@ class Runtime:
         plan = load_plan(plan_path)
 
         # Initialize tracing - use trace_path from config or default to ./traces/
-        trace_path = getattr(plan, "trace_path", None) or "traces/trace.json"
+        trace_path = getattr(plan, "trace_path", None) or "traces/trace.jsonl"
+        # Migrate old .json extension to .jsonl
+        if trace_path.endswith(".json"):
+            trace_path = trace_path[:-5] + ".jsonl"
         trace_dir = os.path.dirname(trace_path) or "."
         os.makedirs(trace_dir, exist_ok=True)
 
@@ -76,7 +79,8 @@ class Runtime:
         print(f"[runtime] tracing to {trace_path}")
         print(f"[runtime] sample logging to {sample_path}")
 
-        ray.init(address="auto")
+        if not ray.is_initialized():
+            ray.init(address="auto")
         host = ray.util.get_node_ip_address()
 
         run_name = plan.run.get("name", "unnamed_run")
@@ -200,6 +204,7 @@ class Runtime:
 
                 actor = VLLMEngineRank.options(**scheduling_opts).remote(
                     engine_kwargs=role.config,
+                    replica_id=replica_id,
                 )
                 actors.append(actor)
                 print(f"[runtime] spawning vllm role={name} replica={replica_id}")

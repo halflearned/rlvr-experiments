@@ -77,7 +77,23 @@ def make_batch(
         max_seq_len: If provided, pad input_ids to this fixed length (avoids recompilation)
         max_completion_len: If provided, pad completion_ids to this fixed length
     """
-    valid = [s for s in samples if torch.tensor(s.rewards, dtype=torch.float32).std() > 1e-6]
+    # Filter out samples that exceed fixed lengths
+    filtered = []
+    for s in samples:
+        seq_len = s.input_ids.shape[1]
+        comp_len = s.completion_ids.shape[1]
+        if max_seq_len is not None and seq_len > max_seq_len:
+            print(f"[make_batch] WARNING: dropping sample with seq_len={seq_len} > max_seq_len={max_seq_len}")
+            continue
+        if max_completion_len is not None and comp_len > max_completion_len:
+            print(f"[make_batch] WARNING: dropping sample with completion_len={comp_len} > max_completion_len={max_completion_len}")
+            continue
+        filtered.append(s)
+
+    if not filtered:
+        return None
+
+    valid = [s for s in filtered if torch.tensor(s.rewards, dtype=torch.float32).std() > 1e-6]
     if not valid:
         return None
 
@@ -101,18 +117,20 @@ def make_batch(
     )
 
 
-async def run_epoch(
+async def run(
     rollout,
     data_iter,
     buffer,
     *,
-    reward: Callable,
+    verifier_fn: Callable,
     pad_token_id: int,
     batch_size: int,
     sampling_params: dict | None = None,
-    epoch: int = 0,
+    num_epochs: int | None = None,
+    max_steps: int | None = None,
     max_seq_len: int | None = None,
     max_completion_len: int | None = None,
+    max_staleness: int = 0,
 ):
     """Run generation/verification and yield training batches.
 
@@ -120,62 +138,89 @@ async def run_epoch(
         rollout: VLLMHandle for generation
         data_iter: DataIterator yielding {"templates": [...], "problems": [...]}
         buffer: DataBuffer for producer/consumer coordination
-        reward: async (problem, completions) -> list[float]
+        verifier_fn: async (problem, completions) -> list[float]
         pad_token_id: For padding tensors
         batch_size: Samples per training batch
         sampling_params: vLLM sampling parameters
-        epoch: Current epoch (for buffer versioning)
+        num_epochs: Number of epochs to run (mutually exclusive with max_steps)
+        max_steps: Maximum steps to run (mutually exclusive with num_epochs)
         max_seq_len: If provided, pad input_ids to fixed length (avoids recompilation)
         max_completion_len: If provided, pad completions to fixed length
+        max_staleness: Allow samples up to this many versions old (0 = only current version)
 
     Yields:
-        (step, batch) tuples. Zero-variance batches are filtered.
+        (step, epoch, batch) tuples. Step is global (doesn't reset per epoch).
+        Zero-variance batches are filtered.
 
-    Mid-epoch sync: sync_titan_to_vllm can be called from another task at any time.
-    It will pause generation, wait for in-flight requests, sync, then resume.
+    Mid-epoch sync: When sync_titan_to_vllm is called, it increments rollout.model_version.
+    Samples older than (current_version - max_staleness) are discarded from the buffer.
     """
+    if num_epochs is None and max_steps is None:
+        raise ValueError("Must specify either num_epochs or max_steps")
+    if num_epochs is not None and max_steps is not None:
+        raise ValueError("Cannot specify both num_epochs and max_steps")
+
     tracer = get_tracer()
     sp = {**(sampling_params or {}), "logprobs": 0}
     num_producers = rollout.num_replicas
-    done_count = 0
 
-    async def produce():
-        """Generate completions, compute rewards, push to buffer."""
-        async def process_one(response, problem):
-            completions = [out.text for out in response.outputs]
-            rewards = await reward(problem, completions)
-            sample = RolloutSample.from_vllm(response, pad_token_id, rewards)
-            await buffer.put(sample, epoch)
+    global_step = 0
+    epoch = 0
 
-        async with asyncio.TaskGroup() as tg:
-            while True:
-                data_batch = await data_iter.next_batch()
-                if data_batch is None:
-                    break
-                responses = await rollout.generate(data_batch["templates"], **sp)
-                for response, problem in zip(responses, data_batch["problems"]):
-                    tg.create_task(process_one(response, problem))
+    while True:
+        # Check termination conditions
+        if num_epochs is not None and epoch >= num_epochs:
+            break
+        if max_steps is not None and global_step >= max_steps:
+            break
 
-        # Signal completion
-        await buffer.put(DONE, epoch)
+        # Start new epoch
+        data_iter.new_epoch(seed=epoch)
+        tracer.counter("epoch", {"epoch": epoch})
 
-    # Start one producer per vLLM replica
-    producers = [asyncio.create_task(produce()) for _ in range(num_producers)]
+        done_count = 0
+        producer_batch_counts = {}  # Track batches fetched per producer
 
-    step = 0
-    samples = []
-    try:
-        while done_count < num_producers:
-            item = await buffer.pop(epoch)
+        async def produce():
+            """Generate completions, compute rewards, push to buffer."""
+            async def process_one(response, problem, version):
+                completions = [out.text for out in response.outputs]
+                rewards = await verifier_fn(problem, completions)
+                sample = RolloutSample.from_vllm(response, pad_token_id, rewards)
+                await buffer.put(sample, version)
 
-            if isinstance(item, _Done):
-                done_count += 1
-                continue
+            async with asyncio.TaskGroup() as tg:
+                while True:
+                    data_batch = await data_iter.next_batch()
+                    if data_batch is None:
+                        break
+                    version = rollout.model_version
+                    responses = await rollout.generate(data_batch["templates"], **sp)
+                    for response, problem in zip(responses, data_batch["problems"]):
+                        tg.create_task(process_one(response, problem, version))
 
-            samples.append(item)
+            await buffer.put(DONE, -1)  # version=-1 means never evict
 
-            if len(samples) >= batch_size:
-                with trace_span("make_batch"):
+        producers = [asyncio.create_task(produce()) for _ in range(num_producers)]
+
+        samples = []
+        try:
+            while done_count < num_producers:
+                # Check if any producer crashed
+                for p in producers:
+                    if p.done() and p.exception():
+                        raise p.exception()
+
+                min_version = max(0, rollout.model_version - max_staleness)
+                item = await buffer.pop(min_version)
+
+                if isinstance(item, _Done):
+                    done_count += 1
+                    continue
+
+                samples.append(item)
+
+                if len(samples) >= batch_size:
                     all_rewards = [r for s in samples for r in s.rewards]
                     tracer.counter("rewards", {
                         "mean": sum(all_rewards) / len(all_rewards) if all_rewards else 0,
@@ -190,17 +235,32 @@ async def run_epoch(
                         tracer.counter("skipped", {"zero_variance_batches": 1})
                         continue
 
-                    step += 1
-                    yield step, batch
+                    global_step += 1
+                    tracer.buffer(
+                        size=buffer.size(),
+                        by_version=buffer.get_by_version(),
+                        evicted=buffer.get_evicted_by_version(),
+                    )
+                    yield global_step, epoch, batch
 
-        # Yield any remaining samples as final batch
-        if samples:
-            batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
-            if batch is not None:
-                step += 1
-                yield step, batch
+                    if max_steps is not None and global_step >= max_steps:
+                        return
 
-    finally:
-        for t in producers:
-            t.cancel()
-        await asyncio.gather(*producers, return_exceptions=True)
+            # Yield any remaining samples as final batch
+            # NOTE: Commented out to avoid CUDA graph recompilation from partial batches
+            # if samples:
+            #     batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
+            #     if batch is not None:
+            #         global_step += 1
+            #         yield global_step, epoch, batch
+            
+            #         if max_steps is not None and global_step >= max_steps:
+            #             return
+
+        finally:
+            for t in producers:
+                t.cancel()
+            await asyncio.gather(*producers, return_exceptions=True)
+
+        tracer.counter("epoch_complete", {"epoch": epoch, "steps_in_epoch": global_step})
+        epoch += 1

@@ -64,12 +64,22 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
 
 
 @traced("sync.trainer_to_vllm")
-async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype="bfloat16"):
+async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype="bfloat16", abort_in_flight=True):
     """Sync weights from trainer to vLLM.
 
-    Pauses generation, waits for in-flight requests, syncs, then resumes.
+    Pauses generation, aborts or waits for in-flight requests, syncs, then resumes.
+    Increments vllm.model_version BEFORE sync so in-flight samples get old version.
+
+    Args:
+        abort_in_flight: If True (default), abort in-flight requests instead of waiting.
+                         This avoids wasted generation/verification work for stale samples.
     """
-    await vllm.stop()  # Pause and wait for in-flight to complete
+    # Increment version BEFORE stopping - in-flight requests will capture old version
+    vllm.increment_version()
+
+    with trace_span("sync.waiting_for_vllm_pause"):
+        await vllm.stop(abort=abort_in_flight)
+
     try:
         channel = f"{trainer.name}_to_{vllm.name}"
         with trace_span("sync.titan_to_vllm"):

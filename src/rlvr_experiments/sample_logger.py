@@ -1,20 +1,3 @@
-"""Lightweight sample-level logging for RL training.
-
-Logs the journey of each sample through the pipeline as JSONL.
-Easy to query with jq or load into pandas.
-
-Usage:
-    from rlvr_experiments.sample_logger import init_sample_logger, log_sample, close_sample_logger
-
-    init_sample_logger("samples.jsonl")
-
-    # Log anything - just pass event type and data
-    log_sample("verification", problem_id="123", passed=3, failed=5)
-    log_sample("training", problem_id="123", step=42, included=True)
-
-    close_sample_logger()
-"""
-
 import atexit
 import json
 import os

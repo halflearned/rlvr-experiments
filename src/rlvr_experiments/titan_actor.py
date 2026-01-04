@@ -241,8 +241,8 @@ class TitanModelRank:
         input_ids: torch.Tensor,
         loss_args: tuple = (),
         loss_kwargs: dict | None = None,
-    ) -> float:
-        """Forward pass, compute loss, and backward pass. Returns loss value."""
+    ) -> tuple[float, dict | None]:
+        """Forward pass, compute loss, and backward pass. Returns (loss, debug_metrics)."""
         import time
 
         torch.cuda.synchronize()
@@ -292,12 +292,18 @@ class TitanModelRank:
                 flush=True
             )
 
-        return float(loss.detach().item())
+        # Get debug metrics if available (e.g. from GRPOLoss)
+        debug_metrics = None
+        if hasattr(loss_fn, 'get_debug_metrics'):
+            debug_metrics = loss_fn.get_debug_metrics()
 
-    def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> None:
+        return float(loss.detach().item()), debug_metrics
+
+    def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> dict | None:
         """Log metrics using torchtitan's MetricsProcessor (only rank 0 logs)."""
         if self.rank == 0:
-            self.model.log_metrics(loss, grad_norm, ntokens)
+            return self.model.log_metrics(loss, grad_norm, ntokens)
+        return None
 
 
 class DistributedModelHandle:

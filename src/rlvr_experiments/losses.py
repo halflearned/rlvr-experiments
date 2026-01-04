@@ -19,6 +19,13 @@ class GRPOLoss(torch.nn.Module):
         super().__init__()
         self.beta = beta
         self.eps = eps
+        self._last_debug: dict | None = None
+
+    def get_debug_metrics(self) -> dict | None:
+        """Return debug metrics from the last forward pass, then clear them."""
+        metrics = self._last_debug
+        self._last_debug = None
+        return metrics
 
     def forward(
         self,
@@ -66,17 +73,28 @@ class GRPOLoss(torch.nn.Module):
         with torch.no_grad():
             diff_trainer_ref = (trainer_logprobs_masked - ref_logprobs).abs()
             diff_trainer_rollout = (trainer_logprobs_masked - rollout_logprobs).abs()
+            kl_max = kl_t.max().item()
+            ratio_max = ratio.max().item()
+            diff_ref_max = diff_trainer_ref.max().item()
+            diff_rollout_max = diff_trainer_rollout.max().item()
             print(
                 f"[GRPO DEBUG] "
                 f"trainer_lp: [{trainer_logprobs_masked.min().item():.2f}, {trainer_logprobs_masked.max().item():.2f}]  "
                 f"ref_lp: [{ref_logprobs.min().item():.2f}, {ref_logprobs.max().item():.2f}]  "
                 f"rollout_lp: [{rollout_logprobs.min().item():.2f}, {rollout_logprobs.max().item():.2f}]  "
-                f"|trainer-ref|_max: {diff_trainer_ref.max().item():.4f}  "
-                f"|trainer-rollout|_max: {diff_trainer_rollout.max().item():.4f}  "
-                f"kl_max: {kl_t.max().item():.4f}  "
-                f"ratio_max: {ratio.max().item():.4f}",
+                f"|trainer-ref|_max: {diff_ref_max:.4f}  "
+                f"|trainer-rollout|_max: {diff_rollout_max:.4f}  "
+                f"kl_max: {kl_max:.4f}  "
+                f"ratio_max: {ratio_max:.4f}",
                 flush=True
             )
+            # Store debug metrics for caller to emit to tracer
+            self._last_debug = {
+                "kl_max": kl_max,
+                "ratio_max": ratio_max,
+                "diff_trainer_ref_max": diff_ref_max,
+                "diff_trainer_rollout_max": diff_rollout_max,
+            }
 
         # per-token loss with mask
         per_token_loss = -(surrogate - self.beta * kl_t)
