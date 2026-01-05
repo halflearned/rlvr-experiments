@@ -52,14 +52,14 @@ async def main():
     loss_fn = GRPOLoss(**plan.loss)
 
     # NOTE TO CLAUDE: DONT CHANGE THE VALUES BELOW!
-    num_epochs = None #plan.training.get("num_epochs")
-    max_steps = 50 # plan.training.get("max_steps")
+    num_epochs = 1 #plan.training.get("num_epochs")
+    max_steps = None # plan.training.get("max_steps")
 
-    prompts_per_batch = 3 #plan.training.get("prompts_per_batch") or 1
+    prompts_per_batch = 9 #plan.training.get("prompts_per_batch") or 1
     sync_ref_every = 10  # plan.training.get("sync_reference_every", 10)
     sync_model_every = 5 # plan.training.get("sync_model_every", 5)
     log_every = 5 #plan.training.get("log_every", 5)
-    max_staleness = 0 # plan.training.get("max_staleness", 0)
+    max_staleness = 1 # plan.training.get("max_staleness", 0)
 
     # Fixed sequence lengths to avoid dynamic shape recompilation
     max_completion_len = plan.sampling.get("max_tokens", 512)
@@ -124,6 +124,11 @@ async def main():
 
         print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
 
+    # --- Save final checkpoint ---
+    print("\n=== Training complete, saving checkpoint ===")
+    checkpoint_path = "/efs/rlvr-experiments/checkpoints/grpo_final"
+    await trainer.export_to_hf(checkpoint_path)
+    print(f"Checkpoint saved to {checkpoint_path}")
 
 
 if __name__ == "__main__":

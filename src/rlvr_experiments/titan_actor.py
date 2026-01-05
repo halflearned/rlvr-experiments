@@ -30,7 +30,6 @@ class TitanModelRank:
         master_port: str,
         group_name: str = "default",
         trainable: bool = True,
-        hf_compatible: bool = False,
     ) -> None:
         self.rank = rank
         self.world_size = world_size
@@ -48,8 +47,8 @@ class TitanModelRank:
         from torchtitan.config import ConfigManager
 
         job_config = ConfigManager().parse_args(["--job.config-file", config_path])
-        self.model = TitanModel(job_config, trainable=trainable, hf_compatible=hf_compatible)
-        logger.info(f"{group_name} Rank {rank}: Initialized Titan (hf_compatible={hf_compatible})")
+        self.model = TitanModel(job_config, trainable=trainable)
+        logger.info(f"{group_name} Rank {rank}: Initialized Titan")
 
     def add_sync_channel(self, channel_name: str, host: str, port: int, world_size: int, rank: int) -> None:
         if channel_name in self.sync_managers:
@@ -196,15 +195,14 @@ class TitanModelRank:
         return logits.detach().cpu() if self.rank == 0 else None
 
     def get_rope_cache_info(self) -> dict:
-        """Return info about rope_cache for debugging HF-compatibility."""
+        """Return info about rope_cache for debugging."""
         model = self.model.model_parts[0]
         if hasattr(model, 'rope_cache') and model.rope_cache is not None:
             return {
                 "dtype": str(model.rope_cache.dtype),
                 "shape": list(model.rope_cache.shape),
-                "hf_compatible": self.model.hf_compatible,
             }
-        return {"error": "No rope_cache found", "hf_compatible": self.model.hf_compatible}
+        return {"error": "No rope_cache found"}
 
     def export_to_hf(self, output_path: str) -> None:
         """Export model to HuggingFace format. All ranks must call (collective for DTensors)."""
@@ -396,11 +394,9 @@ class DistributedModelHandle:
 def create_titan_group(config: dict, name: str, world_size: int, port: int) -> DistributedModelHandle:
     master_addr = ray.util.get_node_ip_address()
     trainable = bool(config.get("trainable", True))
-    hf_compatible = bool(config.get("hf_compatible", False))
 
     cfg = dict(config)
     cfg.pop("trainable", None)
-    cfg.pop("hf_compatible", None)
 
     # Ray actors may be on different nodes - use shared filesystem for config
     config_dir = os.environ.get("RLVR_TITAN_CONFIG_DIR", os.path.join(os.getcwd(), ".rlvr_titan_job_configs"))
@@ -410,14 +406,7 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
         toml.dump(cfg, f)
         config_path = f.name
 
-    # Forward RLVR_* environment variables to Ray actors
-    # These control runtime behavior like HF-compatible precision mode
-    env_vars = {
-        k: v for k, v in os.environ.items()
-        if k.startswith("RLVR_")
-    }
-
-    logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port} (hf_compatible={hf_compatible})")
+    logger.info(f"Creating Titan group '{name}' with world_size={world_size} on {master_addr}:{port}")
 
     actors = [
         TitanModelRank.options(
@@ -431,7 +420,6 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
             master_port=str(port),
             group_name=name,
             trainable=trainable,
-            hf_compatible=hf_compatible,
         )
         for r in range(world_size)
     ]

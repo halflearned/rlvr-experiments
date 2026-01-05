@@ -2,10 +2,10 @@ run:
   name: qwen3_0_6b_grpo_dev
 
 model:
-  path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+  path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B-Base"
 
 tokenizer:
-  pretrained_model_name_or_path: "Qwen/Qwen3-0.6B"
+  pretrained_model_name_or_path: "Qwen/Qwen3-0.6B-Base"
   use_fast: false
 
 training:
@@ -67,7 +67,7 @@ roles:
       model:
         name: "qwen3"
         flavor: "0.6B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B-Base"
 
       optimizer:
         name: "AdamW"
@@ -108,7 +108,7 @@ roles:
         selective_ac_option: "op"
 
       compile:
-        enable: false
+        enable: true
         components:
           - "model"
 
@@ -121,7 +121,7 @@ roles:
       model:
         name: "qwen3"
         flavor: "0.6B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B-Base"
 
       parallelism:
         data_parallel_replicate_degree: 1
@@ -150,7 +150,7 @@ roles:
         selective_ac_option: op
 
       compile:
-        enable: false
+        enable: true
         components:
           - "model"
 
@@ -159,16 +159,15 @@ roles:
     kind: vllm
 
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B-Base"
       tensor_parallel_size: 1
-      data_parallel_size: 4
+      data_parallel_size: 1
       max_model_len: 1024 
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
-      logprobs_mode: "raw_logprobs"  # TODO: is this the right thing?....
+      logprobs_mode: "raw_logprobs" 
       max_num_seqs: 100
       max_num_batched_tokens: 32768
-      # Speed optimizations
       enable_prefix_caching: true  
       enable_chunked_prefill: true
 

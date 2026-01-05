@@ -13,6 +13,15 @@ class HeartbeatViz {
         this.fatesCtx = null;
         this.metricCharts = {};
 
+        // Zoom state per metric chart (xMin, xMax as fractions 0-1)
+        this.metricZoom = {};
+
+        // Shared zoom state for timeline and buffer (they share time axis)
+        this.timeZoom = { xMin: 0, xMax: 1 };
+
+        // Scroll offset for fates (how many versions to skip from bottom)
+        this.fatesScrollOffset = 0;
+
         // Metric history
         this.metrics = {
             // Training
@@ -108,6 +117,38 @@ class HeartbeatViz {
             this.updateFatesTooltip();
         });
 
+        // Fates scroll handling
+        fatesCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = Math.sign(e.deltaY);
+            this.fatesScrollOffset = Math.max(0, this.fatesScrollOffset + delta);
+            this.renderFates();
+        }, { passive: false });
+
+        // Timeline zoom/pan handling
+        timelineCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            this.handleTimeZoom(e, timelineCanvas);
+        }, { passive: false });
+
+        timelineCanvas.addEventListener('dblclick', () => {
+            this.timeZoom = { xMin: 0, xMax: 1 };
+            this.renderTimeline();
+            this.renderBuffer();
+        });
+
+        // Buffer zoom/pan handling (synced with timeline)
+        bufferCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            this.handleTimeZoom(e, bufferCanvas);
+        }, { passive: false });
+
+        bufferCanvas.addEventListener('dblclick', () => {
+            this.timeZoom = { xMin: 0, xMax: 1 };
+            this.renderTimeline();
+            this.renderBuffer();
+        });
+
         // Timeline hover handling for span tooltips
         timelineCanvas.addEventListener('mousemove', (e) => {
             const rect = timelineCanvas.getBoundingClientRect();
@@ -143,6 +184,9 @@ class HeartbeatViz {
             if (canvas) {
                 this.metricCharts[metric] = canvas.getContext('2d');
 
+                // Initialize zoom state
+                this.metricZoom[metric] = { xMin: 0, xMax: 1 };
+
                 // Add hover listeners
                 canvas.addEventListener('mousemove', (e) => {
                     const rect = canvas.getBoundingClientRect();
@@ -152,6 +196,63 @@ class HeartbeatViz {
                 });
                 canvas.addEventListener('mouseleave', () => {
                     this.hoverMetric = null;
+                    this.renderMetricChart(metric);
+                });
+
+                // Add zoom/pan with wheel
+                canvas.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    const rect = canvas.getBoundingClientRect();
+                    const mouseX = (e.clientX - rect.left) / rect.width;  // 0-1 position in canvas
+
+                    const zoom = this.metricZoom[metric];
+                    const currentRange = zoom.xMax - zoom.xMin;
+
+                    if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                        // Zoom: ctrl+wheel or vertical scroll
+                        const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;  // zoom out / zoom in
+                        const newRange = Math.min(1, Math.max(0.02, currentRange * zoomFactor));
+
+                        // Zoom centered on mouse position
+                        const mouseDataX = zoom.xMin + mouseX * currentRange;
+                        const newMin = mouseDataX - mouseX * newRange;
+                        const newMax = mouseDataX + (1 - mouseX) * newRange;
+
+                        // Clamp to [0, 1]
+                        if (newMin < 0) {
+                            zoom.xMin = 0;
+                            zoom.xMax = Math.min(1, newRange);
+                        } else if (newMax > 1) {
+                            zoom.xMax = 1;
+                            zoom.xMin = Math.max(0, 1 - newRange);
+                        } else {
+                            zoom.xMin = newMin;
+                            zoom.xMax = newMax;
+                        }
+                    } else {
+                        // Pan: horizontal scroll (two-finger swipe on trackpad)
+                        const panAmount = (e.deltaX / rect.width) * currentRange * 0.5;
+                        const newMin = zoom.xMin + panAmount;
+                        const newMax = zoom.xMax + panAmount;
+
+                        if (newMin >= 0 && newMax <= 1) {
+                            zoom.xMin = newMin;
+                            zoom.xMax = newMax;
+                        } else if (newMin < 0) {
+                            zoom.xMin = 0;
+                            zoom.xMax = currentRange;
+                        } else {
+                            zoom.xMax = 1;
+                            zoom.xMin = 1 - currentRange;
+                        }
+                    }
+
+                    this.renderMetricChart(metric);
+                }, { passive: false });
+
+                // Double-click to reset zoom
+                canvas.addEventListener('dblclick', () => {
+                    this.metricZoom[metric] = { xMin: 0, xMax: 1 };
                     this.renderMetricChart(metric);
                 });
             }
@@ -383,6 +484,57 @@ class HeartbeatViz {
         this.renderRecommendations();
     }
 
+    handleTimeZoom(e, canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = (e.clientX - rect.left) / rect.width;
+
+        const zoom = this.timeZoom;
+        const currentRange = zoom.xMax - zoom.xMin;
+
+        if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+            // Zoom: ctrl+wheel or vertical scroll
+            const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
+            const newRange = Math.min(1, Math.max(0.01, currentRange * zoomFactor));
+
+            // Zoom centered on mouse position
+            const mouseDataX = zoom.xMin + mouseX * currentRange;
+            const newMin = mouseDataX - mouseX * newRange;
+            const newMax = mouseDataX + (1 - mouseX) * newRange;
+
+            // Clamp to [0, 1]
+            if (newMin < 0) {
+                zoom.xMin = 0;
+                zoom.xMax = Math.min(1, newRange);
+            } else if (newMax > 1) {
+                zoom.xMax = 1;
+                zoom.xMin = Math.max(0, 1 - newRange);
+            } else {
+                zoom.xMin = newMin;
+                zoom.xMax = newMax;
+            }
+        } else {
+            // Pan: horizontal scroll
+            const panAmount = (e.deltaX / rect.width) * currentRange * 0.5;
+            const newMin = zoom.xMin + panAmount;
+            const newMax = zoom.xMax + panAmount;
+
+            if (newMin >= 0 && newMax <= 1) {
+                zoom.xMin = newMin;
+                zoom.xMax = newMax;
+            } else if (newMin < 0) {
+                zoom.xMin = 0;
+                zoom.xMax = currentRange;
+            } else {
+                zoom.xMax = 1;
+                zoom.xMin = 1 - currentRange;
+            }
+        }
+
+        // Render both timeline and buffer (they share time axis)
+        this.renderTimeline();
+        this.renderBuffer();
+    }
+
     computeUtilization() {
         // Compute utilization from first generation span (excludes startup overhead)
         if (!this.vllmSpans.length) return { vllm: 0, trainer: 0, vllmPerReplica: {}, ddpDegree: 1, startTs: 0 };
@@ -590,6 +742,28 @@ class HeartbeatViz {
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
+        // Apply zoom
+        const zoom = this.timeZoom;
+        const zoomRange = zoom.xMax - zoom.xMin;
+        const visibleStart = duration * zoom.xMin;
+        const visibleEnd = duration * zoom.xMax;
+        const visibleDuration = visibleEnd - visibleStart;
+
+        // Helper to convert time to x coordinate
+        const timeToX = (t) => {
+            return padding.left + ((t - visibleStart) / visibleDuration) * plotWidth;
+        };
+
+        // Draw zoom indicator if zoomed
+        if (zoomRange < 0.99) {
+            ctx.fillStyle = '#58a6ff';
+            ctx.font = '10px SF Mono, Monaco, monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'top';
+            const pct = Math.round((1 / zoomRange) * 100);
+            ctx.fillText(`${pct}%`, width - 5, 5);
+        }
+
         // Define swimlanes (new format uses type='span')
         const lanes = [
             { name: 'vLLM 0', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 0 },
@@ -641,11 +815,15 @@ class HeartbeatViz {
             const laneIdx = lanes.findIndex(l => l.filter(event));
             if (laneIdx === -1) continue;
 
-            const startTs = event.ts;  // Already in seconds
-            const dur = event.dur || 0;
+            const startTs = event.ts;
+            const endTs = startTs + (event.dur || 0);
 
-            const x = padding.left + (startTs / duration) * plotWidth;
-            const w = Math.max(1, (dur / duration) * plotWidth);
+            // Skip events outside visible range
+            if (endTs < visibleStart || startTs > visibleEnd) continue;
+
+            const x = timeToX(startTs);
+            const xEnd = timeToX(endTs);
+            const w = Math.max(1, xEnd - x);
             const y = padding.top + laneIdx * laneHeight + 4;
             const h = laneHeight - 8;
 
@@ -663,7 +841,7 @@ class HeartbeatViz {
 
         const numTicks = 10;
         for (let i = 0; i <= numTicks; i++) {
-            const t = (duration * i / numTicks);
+            const t = visibleStart + (visibleDuration * i / numTicks);
             const x = padding.left + (i / numTicks) * plotWidth;
             ctx.fillText(t.toFixed(1) + 's', x, height - 10);
         }
@@ -701,6 +879,28 @@ class HeartbeatViz {
         const padding = { left: 50, right: 20, top: 20, bottom: 30 };
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
+
+        // Apply zoom (synced with timeline)
+        const zoom = this.timeZoom;
+        const zoomRange = zoom.xMax - zoom.xMin;
+        const visibleStart = duration * zoom.xMin;
+        const visibleEnd = duration * zoom.xMax;
+        const visibleDuration = visibleEnd - visibleStart;
+
+        // Helper to convert time to x coordinate
+        const timeToX = (t) => {
+            return padding.left + ((t - visibleStart) / visibleDuration) * plotWidth;
+        };
+
+        // Draw zoom indicator if zoomed
+        if (zoomRange < 0.99) {
+            ctx.fillStyle = '#58a6ff';
+            ctx.font = '10px SF Mono, Monaco, monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'top';
+            const pct = Math.round((1 / zoomRange) * 100);
+            ctx.fillText(`${pct}%`, width - 5, 5);
+        }
 
         // Version colors (cycle through 10 distinct colors)
         const versionColors = [
@@ -744,14 +944,18 @@ class HeartbeatViz {
                 const version = versions[vi];
                 const color = versionColors[version % versionColors.length];
 
-                // Build path points for this version's band
+                // Build path points for this version's band (only visible range)
                 const points = [];
                 for (let i = 0; i < this.bufferEvents.length; i++) {
                     const evt = this.bufferEvents[i];
+                    // Skip events outside visible range (with some margin for continuity)
+                    if (evt.ts < visibleStart && i < this.bufferEvents.length - 1 && this.bufferEvents[i + 1].ts < visibleStart) continue;
+                    if (evt.ts > visibleEnd && points.length > 0) break;
+
                     const stack = stackedData[i][vi];
                     points.push({
                         ts: evt.ts,
-                        x: padding.left + (evt.ts / duration) * plotWidth,
+                        x: timeToX(evt.ts),
                         bottom: height - padding.bottom - (stack.bottom / maxSize) * plotHeight,
                         top: height - padding.bottom - (stack.top / maxSize) * plotHeight,
                         count: stack.count
@@ -819,9 +1023,10 @@ class HeartbeatViz {
             ctx.fill();
         }
 
-        // Draw sync event vertical lines
+        // Draw sync event vertical lines (only visible ones)
         for (const sync of this.syncEvents) {
-            const x = padding.left + (sync.ts / duration) * plotWidth;
+            if (sync.ts < visibleStart || sync.ts > visibleEnd) continue;
+            const x = timeToX(sync.ts);
             ctx.strokeStyle = '#f8514966';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -865,7 +1070,7 @@ class HeartbeatViz {
         ctx.textAlign = 'center';
         const numTicks = 10;
         for (let i = 0; i <= numTicks; i++) {
-            const t = (duration * i / numTicks);
+            const t = visibleStart + (visibleDuration * i / numTicks);
             const x = padding.left + (i / numTicks) * plotWidth;
             ctx.fillText(t.toFixed(1) + 's', x, height - 10);
         }
@@ -945,8 +1150,33 @@ class HeartbeatViz {
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
-        // Show up to 8 most recent versions
-        const recentFates = fateData.slice(-8);
+        // Calculate how many versions fit on screen
+        const maxVisible = 8;
+        const totalVersions = fateData.length;
+
+        // Apply scroll offset (clamp to valid range)
+        const maxOffset = Math.max(0, totalVersions - maxVisible);
+        this.fatesScrollOffset = Math.min(this.fatesScrollOffset, maxOffset);
+
+        // Get visible slice based on scroll
+        const startIdx = Math.max(0, totalVersions - maxVisible - this.fatesScrollOffset);
+        const endIdx = totalVersions - this.fatesScrollOffset;
+        const recentFates = fateData.slice(startIdx, endIdx);
+
+        // Draw scroll indicator if there are more versions
+        if (totalVersions > maxVisible) {
+            ctx.fillStyle = '#58a6ff';
+            ctx.font = '9px SF Mono, Monaco, monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'top';
+            const scrollInfo = this.fatesScrollOffset > 0 ? `↑${this.fatesScrollOffset} more` : `${totalVersions} versions`;
+            ctx.fillText(scrollInfo, width - 5, 2);
+            if (startIdx > 0) {
+                ctx.textBaseline = 'bottom';
+                ctx.fillText(`↓${startIdx} more`, width - 5, height - 2);
+            }
+        }
+
         const barHeight = Math.min(24, (plotHeight - 10) / recentFates.length - 4);
         const barSpacing = (plotHeight - recentFates.length * barHeight) / (recentFates.length + 1);
 
@@ -1116,11 +1346,22 @@ class HeartbeatViz {
             }
         }
 
+        // Get zoom state
+        const zoom = this.metricZoom[metric] || { xMin: 0, xMax: 1 };
+        const zoomRange = zoom.xMax - zoom.xMin;
+
+        // Calculate visible data range based on zoom
+        const startIdx = Math.floor(zoom.xMin * (data.length - 1));
+        const endIdx = Math.ceil(zoom.xMax * (data.length - 1));
+        const visibleData = data.slice(startIdx, endIdx + 1);
+
+        if (visibleData.length === 0) return;
+
         // Determine if log scale
         const useLog = this.logScaleMetrics.has(metric);
 
-        // Get values, apply log if needed
-        const rawValues = data.map(d => d.value);
+        // Get values for visible range, apply log if needed
+        const rawValues = visibleData.map(d => d.value);
         const values = useLog ? rawValues.map(v => v > 0 ? Math.log10(v) : -10) : rawValues;
 
         let minVal = Math.min(...values);
@@ -1136,6 +1377,13 @@ class HeartbeatViz {
         const valueToY = (val) => {
             const v = useLog ? (val > 0 ? Math.log10(val) : -10) : val;
             return padding.top + plotHeight - ((v - minVal) / range) * plotHeight;
+        };
+
+        // Helper to convert data index to x coordinate (accounting for zoom)
+        const idxToX = (idx) => {
+            const normalized = idx / (data.length - 1 || 1);  // 0-1 in full data
+            const visible = (normalized - zoom.xMin) / zoomRange;  // 0-1 in visible range
+            return padding.left + visible * plotWidth;
         };
 
         // Draw y-axis labels (min and max)
@@ -1159,13 +1407,28 @@ class HeartbeatViz {
         ctx.lineTo(padding.left, height - padding.bottom);
         ctx.stroke();
 
+        // Draw zoom indicator if zoomed
+        if (zoomRange < 0.99) {
+            ctx.fillStyle = '#58a6ff';
+            ctx.font = '8px SF Mono, Monaco, monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'top';
+            const pct = Math.round((1 / zoomRange) * 100);
+            ctx.fillText(`${pct}%`, width - 2, 1);
+        }
+
         // Draw sparkline
         ctx.beginPath();
-        for (let i = 0; i < data.length; i++) {
-            const x = padding.left + (i / (data.length - 1 || 1)) * plotWidth;
+        let firstPoint = true;
+        for (let i = startIdx; i <= endIdx && i < data.length; i++) {
+            const x = idxToX(i);
             const y = valueToY(data[i].value);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
+            if (firstPoint) {
+                ctx.moveTo(x, y);
+                firstPoint = false;
+            } else {
+                ctx.lineTo(x, y);
+            }
         }
 
         ctx.strokeStyle = colors[metric];
@@ -1174,8 +1437,10 @@ class HeartbeatViz {
 
         // Draw hover indicator and value
         if (this.hoverMetric === metric && data.length > 0) {
-            const idx = Math.min(Math.floor(this.hoverX * data.length), data.length - 1);
-            const x = padding.left + (idx / (data.length - 1 || 1)) * plotWidth;
+            // Map hover position to data index accounting for zoom
+            const dataFrac = zoom.xMin + this.hoverX * zoomRange;
+            const idx = Math.max(0, Math.min(data.length - 1, Math.round(dataFrac * (data.length - 1))));
+            const x = idxToX(idx);
             const y = valueToY(data[idx].value);
 
             // Vertical line
