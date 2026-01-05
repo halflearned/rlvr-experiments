@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_dummy
 from rlvr_experiments.losses import GRPOLoss
-from rlvr_experiments.rollout import run
+from rlvr_experiments.algorithms.grpo import grpo_samples
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier, MathVerifier
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
@@ -55,7 +55,7 @@ async def main():
     num_epochs = None #plan.training.get("num_epochs")
     max_steps = 50 # plan.training.get("max_steps")
 
-    prompts_per_batch = 9 #plan.training.get("prompts_per_batch") or 1
+    prompts_per_batch = 3 #plan.training.get("prompts_per_batch") or 1
     sync_ref_every = 10  # plan.training.get("sync_reference_every", 10)
     sync_model_every = 5 # plan.training.get("sync_model_every", 5)
     log_every = 5 #plan.training.get("log_every", 5)
@@ -66,7 +66,7 @@ async def main():
     max_seq_len = plan.training.get("max_seq_len") or (max_completion_len + 256)
 
     # --- main loop ---
-    async for step, epoch, batch in run(
+    async for step, epoch, batch in grpo_samples(
         rollout, data_iter, buffer,
         verifier_fn=verifier.verify_completions,
         pad_token_id=pad_token_id,

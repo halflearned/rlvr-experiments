@@ -84,7 +84,7 @@ roles:
         mixed_precision_reduce: "float32"
 
       parallelism: 
-        data_parallel_replicate_degree: 3
+        data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
         tensor_parallel_degree: 1
@@ -137,7 +137,6 @@ roles:
         mixed_precision_reduce: "float32"
 
       checkpoint:
-        # I think we actually won't use this in the end, but ok for now?
         enable: true
         folder: "checkpoint"
         initial_load_in_hf: true
@@ -151,7 +150,7 @@ roles:
         selective_ac_option: op
 
       compile:
-        enable: false
+        enable: true
         components:
           - "model"
 

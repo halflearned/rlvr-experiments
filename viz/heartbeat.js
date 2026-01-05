@@ -41,6 +41,12 @@ class HeartbeatViz {
         this.hoverMetric = null;
         this.hoverX = 0;
 
+        // Timeline hover state
+        this.timelineSpans = [];  // [{event, x, y, w, h}, ...] for hit testing
+        this.hoveredSpan = null;
+        this.tooltipX = 0;
+        this.tooltipY = 0;
+
         this.init();
     }
 
@@ -69,6 +75,66 @@ class HeartbeatViz {
         this.timelineCtx = timelineCanvas.getContext('2d');
         this.bufferCtx = bufferCanvas.getContext('2d');
         this.fatesCtx = fatesCanvas.getContext('2d');
+
+        // Store fate bar positions for hover detection
+        this.fateBars = [];
+        this.hoveredFate = null;
+
+        // Fates canvas hover handling
+        fatesCanvas.addEventListener('mousemove', (e) => {
+            const rect = fatesCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            this.tooltipX = e.clientX;
+            this.tooltipY = e.clientY;
+
+            // Find fate bar under cursor
+            let found = null;
+            for (const bar of this.fateBars) {
+                if (x >= bar.x && x <= bar.x + bar.w && y >= bar.y && y <= bar.y + bar.h) {
+                    found = bar;
+                    break;
+                }
+            }
+
+            if (found !== this.hoveredFate) {
+                this.hoveredFate = found;
+                this.updateFatesTooltip();
+            }
+        });
+
+        fatesCanvas.addEventListener('mouseleave', () => {
+            this.hoveredFate = null;
+            this.updateFatesTooltip();
+        });
+
+        // Timeline hover handling for span tooltips
+        timelineCanvas.addEventListener('mousemove', (e) => {
+            const rect = timelineCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            this.tooltipX = e.clientX;
+            this.tooltipY = e.clientY;
+
+            // Find span under cursor
+            let found = null;
+            for (const span of this.timelineSpans) {
+                if (x >= span.x && x <= span.x + span.w && y >= span.y && y <= span.y + span.h) {
+                    found = span;
+                    break;
+                }
+            }
+
+            if (found !== this.hoveredSpan) {
+                this.hoveredSpan = found;
+                this.updateTimelineTooltip();
+            }
+        });
+
+        timelineCanvas.addEventListener('mouseleave', () => {
+            this.hoveredSpan = null;
+            this.updateTimelineTooltip();
+        });
 
         // Setup metric mini-charts with hover handling
         const metricNames = Object.keys(this.metrics);
@@ -530,6 +596,7 @@ class HeartbeatViz {
             { name: 'vLLM 1', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 1 },
             { name: 'vLLM 2', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 2 },
             { name: 'vLLM 3', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 3 },
+            { name: 'Reference', filter: e => e.type === 'span' && e.name === 'ref_logprobs' },
             { name: 'Trainer', filter: e => e.type === 'span' && e.name === 'forward_backward' },
             { name: 'Sync', filter: e => e.type === 'span' && e.name.startsWith('sync.') }
         ];
@@ -557,12 +624,16 @@ class HeartbeatViz {
         const colors = {
             'vllm.generate': '#3fb950',
             'forward_backward': '#58a6ff',
+            'ref_logprobs': '#a371f7',
             'sync.trainer_to_vllm': '#f85149',
             'sync.trainer_to_reference': '#f0883e',
             'sync.waiting_for_vllm_pause': '#f8514966',
             'sync.titan_to_vllm': '#f85149',
             'sync.titan_to_titan': '#f0883e'
         };
+
+        // Clear span geometries for hit testing
+        this.timelineSpans = [];
 
         for (const event of this.events) {
             if (event.type !== 'span') continue;
@@ -580,6 +651,9 @@ class HeartbeatViz {
 
             ctx.fillStyle = colors[event.name] || '#8b949e';
             ctx.fillRect(x, y, w, h);
+
+            // Store geometry for hit testing
+            this.timelineSpans.push({ event, x, y, w, h });
         }
 
         // Draw time axis
@@ -646,48 +720,88 @@ class HeartbeatViz {
         // Find max size for scaling
         let maxSize = Math.max(...this.bufferEvents.map(e => e.size), 1);
 
-        // Draw stacked area chart
-        if (versions.length > 0) {
-            // For each version, draw its contribution as a filled area
-            // We need to draw from bottom up (oldest version first)
+        // Draw proper stacked area chart using actual by_version data
+        // Each version stacks on top of previous versions, showing true overlap
+        //
+        // Buffer events are now emitted on every state change (put/pop/evict),
+        // so we just draw what we see - no synthetic points needed.
+
+        if (versions.length > 0 && this.bufferEvents.length > 0) {
+            // Build stacked data directly from buffer events
+            const stackedData = this.bufferEvents.map(evt => {
+                const result = [];
+                let cumulative = 0;
+                for (const version of versions) {
+                    const count = evt.byVersion[version] || 0;
+                    result.push({ bottom: cumulative, top: cumulative + count, count });
+                    cumulative += count;
+                }
+                return result;
+            });
+
+            // Draw from bottom to top (oldest version first)
             for (let vi = 0; vi < versions.length; vi++) {
                 const version = versions[vi];
                 const color = versionColors[version % versionColors.length];
 
-                ctx.beginPath();
-                ctx.moveTo(padding.left, height - padding.bottom);
-
-                // First pass: draw top edge
+                // Build path points for this version's band
+                const points = [];
                 for (let i = 0; i < this.bufferEvents.length; i++) {
                     const evt = this.bufferEvents[i];
-                    const x = padding.left + (evt.ts / duration) * plotWidth;
-
-                    // Sum of this version and all older versions
-                    let stackedHeight = 0;
-                    for (let vj = 0; vj <= vi; vj++) {
-                        stackedHeight += (evt.byVersion[versions[vj]] || 0);
-                    }
-                    const y = height - padding.bottom - (stackedHeight / maxSize) * plotHeight;
-                    ctx.lineTo(x, y);
+                    const stack = stackedData[i][vi];
+                    points.push({
+                        ts: evt.ts,
+                        x: padding.left + (evt.ts / duration) * plotWidth,
+                        bottom: height - padding.bottom - (stack.bottom / maxSize) * plotHeight,
+                        top: height - padding.bottom - (stack.top / maxSize) * plotHeight,
+                        count: stack.count
+                    });
                 }
 
-                // Second pass: draw bottom edge (going backwards)
-                for (let i = this.bufferEvents.length - 1; i >= 0; i--) {
-                    const evt = this.bufferEvents[i];
-                    const x = padding.left + (evt.ts / duration) * plotWidth;
+                // Draw the filled band (top edge forward, bottom edge backward)
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].bottom);
 
-                    // Sum of all versions below this one
-                    let stackedHeight = 0;
-                    for (let vj = 0; vj < vi; vj++) {
-                        stackedHeight += (evt.byVersion[versions[vj]] || 0);
+                // Draw top edge (forward) - use step function (horizontal then vertical)
+                for (let i = 0; i < points.length; i++) {
+                    const p = points[i];
+                    if (i > 0) {
+                        // Step: horizontal to new x at old y, then vertical to new y
+                        const prev = points[i - 1];
+                        ctx.lineTo(p.x, prev.top);  // horizontal
                     }
-                    const y = height - padding.bottom - (stackedHeight / maxSize) * plotHeight;
-                    ctx.lineTo(x, y);
+                    ctx.lineTo(p.x, p.top);  // vertical (or first point)
+                }
+
+                // Draw bottom edge (backward) - also step function
+                for (let i = points.length - 1; i >= 0; i--) {
+                    const p = points[i];
+                    if (i < points.length - 1) {
+                        const next = points[i + 1];
+                        ctx.lineTo(p.x, next.bottom);  // horizontal
+                    }
+                    ctx.lineTo(p.x, p.bottom);  // vertical
                 }
 
                 ctx.closePath();
-                ctx.fillStyle = color + '99';  // Semi-transparent
+                ctx.fillStyle = color + 'cc';
                 ctx.fill();
+
+                // Draw top edge outline
+                ctx.beginPath();
+                for (let i = 0; i < points.length; i++) {
+                    const p = points[i];
+                    if (i === 0) {
+                        ctx.moveTo(p.x, p.top);
+                    } else {
+                        const prev = points[i - 1];
+                        ctx.lineTo(p.x, prev.top);  // horizontal
+                        ctx.lineTo(p.x, p.top);     // vertical
+                    }
+                }
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.stroke();
             }
         } else {
             // Fallback: simple line chart if no version data
@@ -704,19 +818,6 @@ class HeartbeatViz {
             ctx.fillStyle = '#a371f766';
             ctx.fill();
         }
-
-        // Draw total size outline
-        ctx.beginPath();
-        for (let i = 0; i < this.bufferEvents.length; i++) {
-            const evt = this.bufferEvents[i];
-            const x = padding.left + (evt.ts / duration) * plotWidth;
-            const y = height - padding.bottom - (evt.size / maxSize) * plotHeight;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
-        ctx.strokeStyle = '#f0f6fc';
-        ctx.lineWidth = 1;
-        ctx.stroke();
 
         // Draw sync event vertical lines
         for (const sync of this.syncEvents) {
@@ -808,13 +909,14 @@ class HeartbeatViz {
             return;
         }
 
-        const { used, wasted, partial } = lastEvt.fates;
+        const { used, wasted, partial, filtered } = lastEvt.fates;
 
         // Collect all versions from fates
         const allVersions = new Set([
             ...Object.keys(used || {}),
             ...Object.keys(wasted || {}),
-            ...Object.keys(partial || {})
+            ...Object.keys(partial || {}),
+            ...Object.keys(filtered || {})
         ].map(v => parseInt(v)));
         const versions = [...allVersions].sort((a, b) => a - b);
 
@@ -824,9 +926,10 @@ class HeartbeatViz {
             const u = (used || {})[v] || 0;
             const w = (wasted || {})[v] || 0;
             const p = (partial || {})[v] || 0;
-            const total = u + w + p;
+            const f = (filtered || {})[v] || 0;
+            const total = u + w + p + f;
             if (total > 0) {
-                fateData.push({ version: v, used: u, wasted: w, partial: p, total });
+                fateData.push({ version: v, used: u, wasted: w, partial: p, filtered: f, total });
             }
         }
 
@@ -850,6 +953,9 @@ class HeartbeatViz {
         // Find max total for scaling
         const maxTotal = Math.max(...recentFates.map(f => f.total));
 
+        // Clear fate bars for hover detection
+        this.fateBars = [];
+
         for (let i = 0; i < recentFates.length; i++) {
             const f = recentFates[i];
             const y = padding.top + barSpacing + i * (barHeight + barSpacing);
@@ -862,6 +968,15 @@ class HeartbeatViz {
 
             // Calculate bar width proportional to total
             const totalBarWidth = (f.total / maxTotal) * plotWidth;
+
+            // Store bar position for hover detection
+            this.fateBars.push({
+                x: padding.left,
+                y: y,
+                w: totalBarWidth,
+                h: barHeight,
+                fate: f
+            });
 
             // Stacked bar
             let x = padding.left;
@@ -886,30 +1001,37 @@ class HeartbeatViz {
                 ctx.fillStyle = '#f85149';
                 const w = f.wasted * scale;
                 ctx.fillRect(x, y, w, barHeight);
+                x += w;
+            }
+            // Filtered (gray/blue)
+            if (f.filtered > 0) {
+                ctx.fillStyle = '#8b949e';
+                const w = f.filtered * scale;
+                ctx.fillRect(x, y, w, barHeight);
             }
 
-            // Total count and percentage
-            const usedPct = Math.round(100 * f.used / f.total);
+            // Total count only (no percentage - hover for details)
             ctx.fillStyle = '#c9d1d9';
             ctx.font = '10px -apple-system, sans-serif';
             ctx.textAlign = 'left';
-            ctx.fillText(`${f.total} (${usedPct}%)`, padding.left + totalBarWidth + 5, y + barHeight / 2 + 4);
+            ctx.fillText(`${f.total}`, padding.left + totalBarWidth + 5, y + barHeight / 2 + 4);
         }
 
         // Summary at bottom
         const totalUsed = fateData.reduce((s, f) => s + f.used, 0);
         const totalWasted = fateData.reduce((s, f) => s + f.wasted, 0);
         const totalPartial = fateData.reduce((s, f) => s + f.partial, 0);
-        const grandTotal = totalUsed + totalWasted + totalPartial;
+        const totalFiltered = fateData.reduce((s, f) => s + f.filtered, 0);
+        const grandTotal = totalUsed + totalWasted + totalPartial + totalFiltered;
 
         if (grandTotal > 0) {
             ctx.fillStyle = '#8b949e';
             ctx.font = '10px -apple-system, sans-serif';
             ctx.textAlign = 'center';
             const usedPct = Math.round(100 * totalUsed / grandTotal);
-            const wastedPct = Math.round(100 * totalWasted / grandTotal);
+            const filteredPct = Math.round(100 * totalFiltered / grandTotal);
             ctx.fillText(
-                `Total: ${grandTotal} samples | ${usedPct}% used, ${wastedPct}% wasted`,
+                `Total: ${grandTotal} | ${usedPct}% used, ${filteredPct}% filtered`,
                 width / 2,
                 height - 5
             );
@@ -975,10 +1097,23 @@ class HeartbeatViz {
         if (data.length === 0) return;
 
         // Update current value display
-        const lastValue = data[data.length - 1].value;
+        // Use rolling average for perf metrics (TorchTitan/vLLM), actual value for training metrics
+        const perfMetrics = new Set(['mfu', 'train_tps', 'memory_pct', 'vllm_tps', 'vllm_output_tokens', 'vllm_prompt_tokens']);
         const el = document.getElementById(`metric-${metric}`);
         if (el) {
-            el.textContent = this.formatMetricValue(metric, lastValue);
+            if (perfMetrics.has(metric)) {
+                // Rolling average for perf metrics
+                const avgWindow = 10;
+                const recentValues = data.slice(-avgWindow).map(d => d.value);
+                const avgValue = recentValues.reduce((a, b) => a + b, 0) / recentValues.length;
+                const formattedValue = this.formatMetricValue(metric, avgValue);
+                const windowLabel = recentValues.length < avgWindow ? `avg ${recentValues.length}` : 'avg 10';
+                el.innerHTML = `${formattedValue} <span style="font-size: 9px; color: #6e7681;">(${windowLabel})</span>`;
+            } else {
+                // Actual last value for training/debug metrics
+                const lastValue = data[data.length - 1].value;
+                el.textContent = this.formatMetricValue(metric, lastValue);
+            }
         }
 
         // Determine if log scale
@@ -1108,6 +1243,122 @@ class HeartbeatViz {
                 return value.toFixed(4);
             default:
                 return value.toFixed(2);
+        }
+    }
+
+    updateTimelineTooltip() {
+        let tooltip = document.getElementById('timeline-tooltip');
+
+        if (!this.hoveredSpan) {
+            if (tooltip) tooltip.style.display = 'none';
+            return;
+        }
+
+        // Create tooltip element if it doesn't exist
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'timeline-tooltip';
+            tooltip.style.cssText = `
+                position: fixed;
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 12px;
+                color: #f0f6fc;
+                pointer-events: none;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            `;
+            document.body.appendChild(tooltip);
+        }
+
+        const event = this.hoveredSpan.event;
+        const dur = event.dur || 0;
+
+        // Format duration nicely
+        let durStr;
+        if (dur >= 1) {
+            durStr = dur.toFixed(2) + 's';
+        } else if (dur >= 0.001) {
+            durStr = (dur * 1000).toFixed(1) + 'ms';
+        } else {
+            durStr = (dur * 1000000).toFixed(0) + 'µs';
+        }
+
+        tooltip.innerHTML = `
+            <div style="font-weight: 600; margin-bottom: 4px;">${event.name}</div>
+            <div style="color: #8b949e;">Duration: <span style="color: #f0f6fc;">${durStr}</span></div>
+        `;
+
+        tooltip.style.display = 'block';
+        tooltip.style.left = (this.tooltipX + 12) + 'px';
+        tooltip.style.top = (this.tooltipY + 12) + 'px';
+
+        // Keep tooltip in viewport
+        const rect = tooltip.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            tooltip.style.left = (this.tooltipX - rect.width - 12) + 'px';
+        }
+        if (rect.bottom > window.innerHeight) {
+            tooltip.style.top = (this.tooltipY - rect.height - 12) + 'px';
+        }
+    }
+
+    updateFatesTooltip() {
+        let tooltip = document.getElementById('fates-tooltip');
+
+        if (!this.hoveredFate) {
+            if (tooltip) tooltip.style.display = 'none';
+            return;
+        }
+
+        // Create tooltip element if it doesn't exist
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'fates-tooltip';
+            tooltip.style.cssText = `
+                position: fixed;
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 12px;
+                color: #c9d1d9;
+                pointer-events: none;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            `;
+            document.body.appendChild(tooltip);
+        }
+
+        const f = this.hoveredFate.fate;
+        const usedPct = Math.round(100 * f.used / f.total);
+
+        tooltip.innerHTML = `
+            <div style="font-weight: 600; margin-bottom: 6px;">Version ${f.version}</div>
+            <div style="display: grid; grid-template-columns: auto auto; gap: 2px 12px; font-size: 11px;">
+                <span style="color: #3fb950;">Used:</span><span style="text-align: right;">${f.used}</span>
+                <span style="color: #d29922;">Partial:</span><span style="text-align: right;">${f.partial}</span>
+                <span style="color: #f85149;">Wasted:</span><span style="text-align: right;">${f.wasted}</span>
+                <span style="color: #8b949e;">Filtered:</span><span style="text-align: right;">${f.filtered}</span>
+            </div>
+            <div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid #30363d; color: #8b949e;">
+                Total: ${f.total} (${usedPct}% used)
+            </div>
+        `;
+
+        tooltip.style.display = 'block';
+        tooltip.style.left = (this.tooltipX + 12) + 'px';
+        tooltip.style.top = (this.tooltipY + 12) + 'px';
+
+        // Keep tooltip in viewport
+        const rect = tooltip.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            tooltip.style.left = (this.tooltipX - rect.width - 12) + 'px';
+        }
+        if (rect.bottom > window.innerHeight) {
+            tooltip.style.top = (this.tooltipY - rect.height - 12) + 'px';
         }
     }
 }

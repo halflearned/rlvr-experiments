@@ -93,6 +93,7 @@
             flex: 1;
             position: relative;
             overflow: hidden;
+            min-height: 0;  /* Allow flex item to shrink below content size */
         }
 
         /* Timeline Panel */
@@ -383,7 +384,7 @@
     </div>
 
     <div class="container">
-        <!-- Panel 1: Timeline -->
+        <!-- Panel 1: Pipeline Timeline -->
         <div class="panel">
             <div class="panel-header">
                 <div>
@@ -411,23 +412,13 @@
         </div>
 
         <!-- Panel 2: Buffer Dynamics + Sample Fates + Recommendations -->
-        <div class="panel" style="display: grid; grid-template-columns: 5fr 2fr 2fr; gap: 1px; padding: 0; background: #30363d;">
+        <div class="panel" style="display: grid; grid-template-columns: 5fr 2fr 2fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
             <!-- Buffer Dynamics -->
-            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column;">
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
                     <div>
                         <div class="panel-title">Buffer Dynamics</div>
                         <div class="panel-subtitle">Sample versions over time</div>
-                    </div>
-                    <div class="legend">
-                        <div class="legend-item">
-                            <div class="legend-dot" style="background: #a371f7;"></div>
-                            <span>Buffer Size</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-dot" style="background: #f85149; opacity: 0.5;"></div>
-                            <span>Version Change</span>
-                        </div>
                     </div>
                 </div>
                 <div class="panel-content">
@@ -435,25 +426,11 @@
                 </div>
             </div>
             <!-- Sample Fates -->
-            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column;">
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
                     <div>
                         <div class="panel-title">Sample Fates</div>
-                        <div class="panel-subtitle">Per-version utilization</div>
-                    </div>
-                    <div class="legend">
-                        <div class="legend-item">
-                            <div class="legend-dot" style="background: #3fb950;"></div>
-                            <span>Used</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-dot" style="background: #d29922;"></div>
-                            <span>Partial</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-dot" style="background: #f85149;"></div>
-                            <span>Wasted</span>
-                        </div>
+                        <div class="panel-subtitle">Per-version utilization (hover for details)</div>
                     </div>
                 </div>
                 <div class="panel-content">
@@ -461,7 +438,7 @@
                 </div>
             </div>
             <!-- Recommendations -->
-            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column;">
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
                     <div>
                         <div class="panel-title">Balance</div>
@@ -474,10 +451,10 @@
             </div>
         </div>
 
-        <!-- Panel 3: Three metric sections -->
+        <!-- Panel 3: Three metric sections (Training, TorchTitan, vLLM) -->
         <div class="panel metrics-panel">
             <div class="metrics-sections">
-                <!-- Training Section -->
+                <!-- Training -->
                 <div class="metrics-section">
                     <div class="section-title">Training</div>
                     <div class="section-cards">
@@ -504,7 +481,7 @@
                         </div>
                     </div>
                 </div>
-                <!-- TorchTitan Section -->
+                <!-- TorchTitan -->
                 <div class="metrics-section">
                     <div class="section-title">TorchTitan</div>
                     <div class="section-cards">
@@ -531,7 +508,7 @@
                         </div>
                     </div>
                 </div>
-                <!-- vLLM Section -->
+                <!-- vLLM -->
                 <div class="metrics-section">
                     <div class="section-title">vLLM</div>
                     <div class="section-cards">
@@ -564,7 +541,6 @@
         <!-- Panel 4: Debug metrics -->
         <div class="panel metrics-panel">
             <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr);">
-                <!-- Debug Section -->
                 <div class="metrics-section">
                     <div class="section-title">Debug</div>
                     <div class="section-cards" style="grid-template-rows: 1fr;">
@@ -578,7 +554,7 @@
                     </div>
                 </div>
                 <div class="metrics-section">
-                    <div class="section-title">&nbsp;</div>
+                    <div class="section-title" style="visibility: hidden;">-</div>
                     <div class="section-cards" style="grid-template-rows: 1fr;">
                         <div class="metric-card">
                             <div class="metric-info">
@@ -590,11 +566,11 @@
                     </div>
                 </div>
                 <div class="metrics-section">
-                    <div class="section-title">&nbsp;</div>
+                    <div class="section-title" style="visibility: hidden;">-</div>
                     <div class="section-cards" style="grid-template-rows: 1fr;">
                         <div class="metric-card">
                             <div class="metric-info">
-                                <div class="metric-label">|T-Ref| Max</div>
+                                <div class="metric-label">|T-Ref|</div>
                                 <div class="metric-value color-purple" id="metric-diff_ref">-</div>
                             </div>
                             <div class="metric-chart"><canvas id="chart-diff_ref"></canvas></div>
@@ -602,11 +578,11 @@
                     </div>
                 </div>
                 <div class="metrics-section">
-                    <div class="section-title">&nbsp;</div>
+                    <div class="section-title" style="visibility: hidden;">-</div>
                     <div class="section-cards" style="grid-template-rows: 1fr;">
                         <div class="metric-card">
                             <div class="metric-info">
-                                <div class="metric-label">|T-Roll| Max</div>
+                                <div class="metric-label">|T-Roll|</div>
                                 <div class="metric-value color-cyan" id="metric-diff_rollout">-</div>
                             </div>
                             <div class="metric-chart"><canvas id="chart-diff_rollout"></canvas></div>
@@ -619,6 +595,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js"></script>
+    <script src="heartbeat.js?v=14"></script>
 </body>
 </html>

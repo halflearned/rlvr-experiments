@@ -7,10 +7,11 @@ from typing import Generic, TypeVar
 
 from ray.util.queue import Queue
 
+from .tracer import get_tracer
+
 T = TypeVar("T")
 
 
-@dataclass
 class BufferStats:
     """Lightweight stats tracking for buffer visualization.
 
@@ -18,20 +19,36 @@ class BufferStats:
     - used: Items fully consumed (all reads exhausted) - good
     - wasted: Items evicted with all reads remaining (never used) - bad
     - partial: Items evicted with some reads used - in between
+
+    Emits buffer events to tracer on every state change.
     """
 
-    put: int = 0
-    popped: int = 0
-    by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
-    # Per-version fate tracking (cumulative)
-    used_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
-    wasted_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
-    partial_by_version: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    def __init__(self, get_size: callable):
+        self._get_size = get_size  # Callback to get current queue size
+        self.put = 0
+        self.popped = 0
+        self.by_version: dict[int, int] = defaultdict(int)
+        # Per-version fate tracking (cumulative)
+        self.used_by_version: dict[int, int] = defaultdict(int)
+        self.wasted_by_version: dict[int, int] = defaultdict(int)
+        self.partial_by_version: dict[int, int] = defaultdict(int)
+        self.filtered_by_version: dict[int, int] = defaultdict(int)
+
+    def _emit(self) -> None:
+        """Emit current state to tracer."""
+        tracer = get_tracer()
+        if tracer is not None:
+            tracer.buffer(
+                size=self._get_size(),
+                by_version=self.get_by_version(),
+                fates=self.get_fates_by_version(),
+            )
 
     def record_put(self, version: int) -> None:
         self.put += 1
         if version >= 0:
             self.by_version[version] += 1
+        self._emit()
 
     def record_pop(self, version: int, exhausted: bool) -> None:
         self.popped += 1
@@ -40,6 +57,7 @@ class BufferStats:
             if version >= 0:
                 self.used_by_version[version] += 1
                 self.by_version[version] = max(0, self.by_version[version] - 1)
+            self._emit()
 
     def record_evict_stale(self, version: int, reads_remaining: int, max_reads: int) -> None:
         """Record a stale eviction with fate categorization."""
@@ -51,6 +69,13 @@ class BufferStats:
                 # Partially used
                 self.partial_by_version[version] += 1
             self.by_version[version] = max(0, self.by_version[version] - 1)
+        self._emit()
+
+    def record_filtered(self, version: int) -> None:
+        """Record a sample filtered due to zero-variance rewards."""
+        if version >= 0:
+            self.filtered_by_version[version] += 1
+        self._emit()
 
     def get_by_version(self) -> dict[int, int]:
         """Return per-version counts (excludes zeros)."""
@@ -62,17 +87,26 @@ class BufferStats:
             "used": {k: v for k, v in self.used_by_version.items() if v > 0},
             "wasted": {k: v for k, v in self.wasted_by_version.items() if v > 0},
             "partial": {k: v for k, v in self.partial_by_version.items() if v > 0},
+            "filtered": {k: v for k, v in self.filtered_by_version.items() if v > 0},
         }
 
     def to_dict(self, current_size: int) -> dict:
         fates = self.get_fates_by_version()
+        used = sum(fates["used"].values())
+        wasted = sum(fates["wasted"].values())
+        partial = sum(fates["partial"].values())
+        filtered = sum(fates["filtered"].values())
         return {
             "put": self.put,
             "popped": self.popped,
-            "used": sum(fates["used"].values()),
-            "wasted": sum(fates["wasted"].values()),
-            "partial": sum(fates["partial"].values()),
+            "used": used,
+            "wasted": wasted,
+            "partial": partial,
+            "filtered": filtered,
             "current_size": current_size,
+            # Legacy keys for backwards compatibility with tests
+            "evicted_exhausted": used,
+            "evicted_stale": wasted + partial,
         }
 
 
@@ -89,7 +123,7 @@ class DataBuffer(Generic[T]):
     def __init__(self, maxsize: int = 0, max_reads: int = 1):
         self._queue: Queue = Queue(maxsize=maxsize)
         self._max_reads = max_reads
-        self.stats = BufferStats()
+        self.stats = BufferStats(get_size=self.size)
 
     async def put(self, item: T, version: int) -> None:
         entry = Entry(item=item, version=version, reads_remaining=self._max_reads)
@@ -111,8 +145,6 @@ class DataBuffer(Generic[T]):
             if entry.version >= 0 and min_version is not None and entry.version < min_version:
                 self.stats.record_evict_stale(entry.version, entry.reads_remaining, self._max_reads)
                 evicted_this_call += 1
-                if evicted_this_call % 10 == 0:
-                    print(f"[buffer] evicted {evicted_this_call} stale samples (version {entry.version} < {min_version})")
                 continue
 
             entry.reads_remaining -= 1
@@ -143,9 +175,3 @@ class DataBuffer(Generic[T]):
 
     def get_stats(self) -> dict:
         return self.stats.to_dict(self.size())
-
-    def get_by_version(self) -> dict[int, int]:
-        return self.stats.get_by_version()
-
-    def get_fates_by_version(self) -> dict[str, dict[int, int]]:
-        return self.stats.get_fates_by_version()

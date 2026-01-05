@@ -7,7 +7,7 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 
-from .tracer import get_tracer, trace_span
+from ..tracer import get_tracer, trace_span
 
 
 # Sentinel to signal producer completion
@@ -36,9 +36,10 @@ class RolloutSample:
     logprobs: torch.Tensor
     rewards: list[float]
     prompt_len: int  # Length of the prompt (same for all completions in this sample)
+    version: int = -1  # Model version that generated this sample
 
     @classmethod
-    def from_vllm(cls, response, pad_token_id: int, rewards: list[float]):
+    def from_vllm(cls, response, pad_token_id: int, rewards: list[float], version: int = -1):
         prompt = response.prompt_token_ids
         outputs = response.outputs
         n = len(outputs)
@@ -60,7 +61,7 @@ class RolloutSample:
             completion_ids[i, :L] = torch.tensor(o.token_ids)
             logprobs[i, :L] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
 
-        return cls(input_ids, completion_ids, logprobs, rewards, prompt_len)
+        return cls(input_ids, completion_ids, logprobs, rewards, prompt_len, version)
 
 
 def make_batch(
@@ -101,7 +102,7 @@ def make_batch(
     )
 
 
-async def run(
+async def grpo_samples(
     rollout,
     data_iter,
     buffer,
@@ -171,7 +172,7 @@ async def run(
             async def process_one(response, problem, version):
                 completions = [out.text for out in response.outputs]
                 rewards = await verifier_fn(problem, completions)
-                sample = RolloutSample.from_vllm(response, pad_token_id, rewards)
+                sample = RolloutSample.from_vllm(response, pad_token_id, rewards, version)
                 await buffer.put(sample, version)
 
             async with asyncio.TaskGroup() as tg:
@@ -207,6 +208,7 @@ async def run(
                 # This ensures batch_size means "valid prompts", not "total prompts"
                 if torch.tensor(item.rewards, dtype=torch.float32).std() < 1e-6:
                     tracer.counter("skipped", {"zero_variance_samples": 1})
+                    buffer.stats.record_filtered(item.version)
                     continue
 
                 # Skip samples that exceed fixed lengths
@@ -234,11 +236,6 @@ async def run(
                     batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
                     samples = []
                     global_step += 1
-                    tracer.buffer(
-                        size=buffer.size(),
-                        by_version=buffer.get_by_version(),
-                        fates=buffer.get_fates_by_version(),
-                    )
                     yield global_step, epoch, batch
 
                     if max_steps is not None and global_step >= max_steps:
