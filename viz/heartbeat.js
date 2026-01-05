@@ -1,4 +1,5 @@
 // RLVR Heartbeat Visualization
+console.log('[heartbeat.js] Script loaded, version 21');
 
 class HeartbeatViz {
     constructor() {
@@ -40,11 +41,40 @@ class HeartbeatViz {
             kl_max: [],
             ratio_max: [],
             diff_ref: [],
-            diff_rollout: []
+            diff_rollout: [],
+            // Efficiency (padding/truncation)
+            seq_padding_pct: [],
+            completion_padding_pct: [],
+            completion_len_mean: [],
+            finish_stop_pct: [],
+            finish_length_pct: []
         };
 
         // Metrics that use log scale
         this.logScaleMetrics = new Set(['grad_norm']);
+
+        // Cumulative histograms for length distributions (binned for efficiency)
+        // Bins: 0-49, 50-99, ..., up to 2048+ (42 bins covers 0-2048 in steps of 50)
+        this.histograms = {
+            seq_lens: new Array(50).fill(0),      // bins of 50 tokens, up to 2500
+            completion_lens: new Array(50).fill(0),
+            // Padding token count histograms: bins of 10 tokens, up to 1000
+            seq_padding_tokens: new Array(100).fill(0),
+            completion_padding_tokens: new Array(100).fill(0)
+        };
+        this.histogramBinSize = 50;
+        this.histogramMax = 2500;
+        this.paddingBinSize = 10;  // 10-token bins for padding counts
+
+        // Scatter plot data: reward vs completion length
+        this.rewardVsLen = [];  // [{reward, len}, ...]
+
+        // Hover state for quantile charts
+        this.quantileHover = {
+            completion_len_mean: null,  // percentile being hovered (0-1), or null
+            seq_padding_tokens: null,
+            completion_padding_tokens: null
+        };
 
         // Hover state for tooltips
         this.hoverMetric = null;
@@ -190,13 +220,36 @@ class HeartbeatViz {
                 // Add hover listeners
                 canvas.addEventListener('mousemove', (e) => {
                     const rect = canvas.getBoundingClientRect();
-                    this.hoverMetric = metric;
-                    this.hoverX = (e.clientX - rect.left) / rect.width;
-                    this.renderMetricChart(metric);
+                    // Quantile charts use their own hover logic
+                    if (metric === 'completion_len_mean') {
+                        this.quantileHover.completion_len_mean = (e.clientX - rect.left) / rect.width;
+                        this.renderQuantileChart('completion_len_mean', this.histograms.completion_lens, this.histogramBinSize, '', 'completion_len_mean');
+                    } else if (metric === 'seq_padding_pct') {
+                        this.quantileHover.seq_padding_tokens = (e.clientX - rect.left) / rect.width;
+                        this.renderQuantileChart('seq_padding_pct', this.histograms.seq_padding_tokens, this.paddingBinSize, ' toks', 'seq_padding_tokens');
+                    } else if (metric === 'completion_padding_pct') {
+                        this.quantileHover.completion_padding_tokens = (e.clientX - rect.left) / rect.width;
+                        this.renderQuantileChart('completion_padding_pct', this.histograms.completion_padding_tokens, this.paddingBinSize, ' toks', 'completion_padding_tokens');
+                    } else {
+                        this.hoverMetric = metric;
+                        this.hoverX = (e.clientX - rect.left) / rect.width;
+                        this.renderMetricChart(metric);
+                    }
                 });
                 canvas.addEventListener('mouseleave', () => {
-                    this.hoverMetric = null;
-                    this.renderMetricChart(metric);
+                    if (metric === 'completion_len_mean') {
+                        this.quantileHover.completion_len_mean = null;
+                        this.renderQuantileChart('completion_len_mean', this.histograms.completion_lens, this.histogramBinSize, '', 'completion_len_mean');
+                    } else if (metric === 'seq_padding_pct') {
+                        this.quantileHover.seq_padding_tokens = null;
+                        this.renderQuantileChart('seq_padding_pct', this.histograms.seq_padding_tokens, this.paddingBinSize, ' toks', 'seq_padding_tokens');
+                    } else if (metric === 'completion_padding_pct') {
+                        this.quantileHover.completion_padding_tokens = null;
+                        this.renderQuantileChart('completion_padding_pct', this.histograms.completion_padding_tokens, this.paddingBinSize, ' toks', 'completion_padding_tokens');
+                    } else {
+                        this.hoverMetric = null;
+                        this.renderMetricChart(metric);
+                    }
                 });
 
                 // Add zoom/pan with wheel
@@ -265,6 +318,8 @@ class HeartbeatViz {
             const paths = [
                 '../traces/trace.jsonl',
                 'traces/trace.jsonl',
+                '../tracers/trace.jsonl',
+                'tracers/trace.jsonl',
                 '../trace.jsonl',
                 '/efs/rlvr-experiments/traces/trace.jsonl'
             ];
@@ -309,6 +364,7 @@ class HeartbeatViz {
     }
 
     processJSONL(text) {
+        console.log('[processJSONL] Parsing', text.length, 'chars');
         // Parse JSONL format
         this.events = [];
         for (const line of text.split('\n')) {
@@ -367,10 +423,24 @@ class HeartbeatViz {
             reward: [], loss: [], grad_norm: [],
             mfu: [], train_tps: [], memory_pct: [],
             vllm_tps: [], vllm_output_tokens: [], vllm_prompt_tokens: [],
-            kl_max: [], ratio_max: [], diff_ref: [], diff_rollout: []
+            kl_max: [], ratio_max: [], diff_ref: [], diff_rollout: [],
+            // Efficiency (padding/truncation)
+            seq_padding_pct: [], completion_padding_pct: [], completion_len_mean: [],
+            finish_stop_pct: [], finish_length_pct: []
         };
         this.bufferEvents = [];
         this.syncEvents = [];
+
+        // Reset cumulative histograms
+        this.histograms = {
+            seq_lens: new Array(50).fill(0),
+            completion_lens: new Array(50).fill(0),
+            seq_padding_tokens: new Array(100).fill(0),
+            completion_padding_tokens: new Array(100).fill(0)
+        };
+
+        // Reset scatter data
+        this.rewardVsLen = [];
 
         // For utilization tracking
         this.vllmSpans = [];  // {replica, ts, dur}
@@ -430,6 +500,67 @@ class HeartbeatViz {
                         this.metrics.diff_rollout.push({ ts, value: event.diff_trainer_rollout_max });
                     }
                 }
+                // Efficiency: padding stats
+                if (event.name === 'batch.padding') {
+                    console.log('[extractMetrics] batch.padding event:', 'seq_lens' in event, 'completion_lens' in event);
+                    if (event.seq_padding_pct !== undefined) {
+                        this.metrics.seq_padding_pct.push({ ts, value: event.seq_padding_pct });
+                    }
+                    if (event.completion_padding_pct !== undefined) {
+                        this.metrics.completion_padding_pct.push({ ts, value: event.completion_padding_pct });
+                    }
+                    // Accumulate raw lengths into histograms for cumulative quantiles
+                    if (event.seq_lens && Array.isArray(event.seq_lens)) {
+                        for (const len of event.seq_lens) {
+                            const bin = Math.min(Math.floor(len / this.histogramBinSize), this.histograms.seq_lens.length - 1);
+                            this.histograms.seq_lens[bin]++;
+                        }
+                    }
+                    if (event.completion_lens && Array.isArray(event.completion_lens)) {
+                        for (const len of event.completion_lens) {
+                            const bin = Math.min(Math.floor(len / this.histogramBinSize), this.histograms.completion_lens.length - 1);
+                            this.histograms.completion_lens[bin]++;
+                        }
+                        // Also track mean completion length for the sparkline
+                        const mean = event.completion_lens.reduce((a, b) => a + b, 0) / event.completion_lens.length;
+                        this.metrics.completion_len_mean.push({ ts, value: mean });
+                    }
+                    // Accumulate per-sample padding token counts into histograms
+                    if (event.seq_padding_tokens && Array.isArray(event.seq_padding_tokens)) {
+                        for (const tokens of event.seq_padding_tokens) {
+                            const bin = Math.min(Math.floor(tokens / this.paddingBinSize), this.histograms.seq_padding_tokens.length - 1);
+                            this.histograms.seq_padding_tokens[bin]++;
+                        }
+                    }
+                    if (event.completion_padding_tokens && Array.isArray(event.completion_padding_tokens)) {
+                        for (const tokens of event.completion_padding_tokens) {
+                            const bin = Math.min(Math.floor(tokens / this.paddingBinSize), this.histograms.completion_padding_tokens.length - 1);
+                            this.histograms.completion_padding_tokens[bin]++;
+                        }
+                    }
+                }
+                // Reward vs completion length scatter data
+                if (event.name === 'batch.reward_vs_len') {
+                    if (event.rewards && event.completion_lens) {
+                        const rewards = event.rewards;
+                        const lens = event.completion_lens;
+                        const n = Math.min(rewards.length, lens.length);
+                        for (let i = 0; i < n; i++) {
+                            this.rewardVsLen.push({ reward: rewards[i], len: lens[i] });
+                        }
+                    }
+                }
+                // Efficiency: finish reason distribution
+                if (event.name === 'batch.finish_reasons') {
+                    // Calculate percentages from counts
+                    const stop = event.stop || 0;
+                    const length = event.length || 0;
+                    const total = stop + length + (event.abort || 0) + (event.unknown || 0);
+                    if (total > 0) {
+                        this.metrics.finish_stop_pct.push({ ts, value: 100 * stop / total });
+                        this.metrics.finish_length_pct.push({ ts, value: 100 * length / total });
+                    }
+                }
             }
 
             // Span events for timeline
@@ -462,6 +593,36 @@ class HeartbeatViz {
         }
     }
 
+    /**
+     * Compute quantiles from a binned histogram.
+     * @param {number[]} histogram - Array of bin counts
+     * @param {number[]} quantiles - Array of quantiles to compute (e.g., [0.5, 0.9, 0.99])
+     * @returns {number[]} - Array of values at each quantile (bin midpoints)
+     */
+    computeQuantiles(histogram, quantiles) {
+        const total = histogram.reduce((a, b) => a + b, 0);
+        if (total === 0) return quantiles.map(() => 0);
+
+        const results = [];
+        for (const q of quantiles) {
+            const target = q * total;
+            let cumulative = 0;
+            for (let i = 0; i < histogram.length; i++) {
+                cumulative += histogram[i];
+                if (cumulative >= target) {
+                    // Return bin midpoint
+                    results.push((i + 0.5) * this.histogramBinSize);
+                    break;
+                }
+            }
+            if (results.length < quantiles.indexOf(q) + 1) {
+                // Fell through, use last bin
+                results.push((histogram.length - 0.5) * this.histogramBinSize);
+            }
+        }
+        return results;
+    }
+
     updateHeaderStats() {
         // Find latest values from new format
         const epochs = this.events.filter(e => e.type === 'counter' && e.name === 'epoch');
@@ -481,7 +642,9 @@ class HeartbeatViz {
         this.renderBuffer();
         this.renderFates();
         this.renderMetrics();
+        this.renderEfficiencyQuantiles();
         this.renderRecommendations();
+        this.renderRewardVsLen();
     }
 
     handleTimeZoom(e, canvas) {
@@ -1274,7 +1437,211 @@ class HeartbeatViz {
         }
     }
 
+    renderEfficiencyQuantiles() {
+        // Render quantile chart for completion lengths
+        const complTotal = this.histograms.completion_lens.reduce((a, b) => a + b, 0);
+        console.log('[renderEfficiencyQuantiles] histogram total:', complTotal, 'bins with data:', this.histograms.completion_lens.filter(x => x > 0).length);
+        this.renderQuantileChart('completion_len_mean', this.histograms.completion_lens, this.histogramBinSize, '', 'completion_len_mean');
+
+        // Render quantile charts for padding token counts (absolute waste)
+        this.renderQuantileChart('seq_padding_pct', this.histograms.seq_padding_tokens, this.paddingBinSize, ' toks', 'seq_padding_tokens');
+        this.renderQuantileChart('completion_padding_pct', this.histograms.completion_padding_tokens, this.paddingBinSize, ' toks', 'completion_padding_tokens');
+    }
+
+    /**
+     * Render a quantile/CDF chart from a histogram.
+     * X-axis: percentile (0-100), Y-axis: value
+     * @param {string} metricName - Name of the metric (for canvas lookup and display)
+     * @param {number[]} histogram - Array of bin counts
+     * @param {number} binSize - Size of each bin (default: this.histogramBinSize)
+     * @param {string} unit - Unit suffix for display (default: '' for tokens, '%' for percentages)
+     * @param {string} hoverKey - Key in quantileHover for hover state (default: metricName)
+     */
+    renderQuantileChart(metricName, histogram, binSize = this.histogramBinSize, unit = '', hoverKey = null) {
+        hoverKey = hoverKey || metricName;
+        const ctx = this.metricCharts[metricName];
+        if (!ctx) return;
+
+        const canvas = ctx.canvas;
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        const targetWidth = Math.floor(width * dpr);
+        const targetHeight = Math.floor(height * dpr);
+
+        if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+        }
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const padding = { left: 35, right: 5, top: 3, bottom: 3 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const total = histogram.reduce((a, b) => a + b, 0);
+        if (total === 0) return;
+
+        // Build CDF: for each percentile (0-100), what's the value?
+        // We'll sample at 100 points for smooth curve
+        const cdfPoints = [];
+        let cumulative = 0;
+        let binIdx = 0;
+        for (let p = 0; p <= 100; p++) {
+            const target = (p / 100) * total;
+            while (binIdx < histogram.length && cumulative + histogram[binIdx] < target) {
+                cumulative += histogram[binIdx];
+                binIdx++;
+            }
+            // Interpolate within bin
+            const binValue = (binIdx + 0.5) * binSize;
+            cdfPoints.push({ p, value: binValue });
+        }
+
+        // Find max value for y-axis scaling
+        const maxValue = Math.max(...cdfPoints.map(pt => pt.value), binSize);
+
+        // Update the metric value display with p50/p90/p99
+        const [p50, p90, p99] = this.computeQuantilesWithBinSize(histogram, [0.5, 0.9, 0.99], binSize);
+        const el = document.getElementById(`metric-${metricName}`);
+        if (el) {
+            const fmt = (v) => unit === '%' ? v.toFixed(1) + unit : Math.round(v).toString();
+            el.innerHTML = `<span style="color: #8b949e">${fmt(p50)}</span> / ` +
+                           `<span style="color: #d29922">${fmt(p90)}</span> / ` +
+                           `<span style="color: #f85149">${fmt(p99)}</span>`;
+        }
+
+        // Draw y-axis labels
+        ctx.fillStyle = '#6e7681';
+        ctx.font = '9px SF Mono, Monaco, monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        const maxLabel = unit === '%' ? maxValue.toFixed(0) + unit : Math.round(maxValue).toString();
+        ctx.fillText(maxLabel, padding.left - 4, padding.top);
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('0' + unit, padding.left - 4, height - padding.bottom);
+
+        // Draw subtle axis line
+        ctx.strokeStyle = '#30363d';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(padding.left, height - padding.bottom);
+        ctx.stroke();
+
+        // Draw the CDF curve (percentile on x, value on y)
+        ctx.beginPath();
+        for (let i = 0; i < cdfPoints.length; i++) {
+            const pt = cdfPoints[i];
+            const x = padding.left + (pt.p / 100) * plotWidth;
+            const y = height - padding.bottom - (pt.value / maxValue) * plotHeight;
+            if (i === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+        ctx.strokeStyle = '#58a6ff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Draw p50, p90, p99 markers
+        const markers = [
+            { p: 50, value: p50, color: '#8b949e' },
+            { p: 90, value: p90, color: '#d29922' },
+            { p: 99, value: p99, color: '#f85149' }
+        ];
+        for (const m of markers) {
+            const x = padding.left + (m.p / 100) * plotWidth;
+            const y = height - padding.bottom - (m.value / maxValue) * plotHeight;
+            ctx.fillStyle = m.color;
+            ctx.beginPath();
+            ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Draw hover indicator
+        const hoverPct = this.quantileHover[hoverKey];
+        if (hoverPct !== null && hoverPct >= 0 && hoverPct <= 1) {
+            const pctIdx = Math.round(hoverPct * 100);
+            const pt = cdfPoints[Math.min(pctIdx, cdfPoints.length - 1)];
+            const x = padding.left + hoverPct * plotWidth;
+            const y = height - padding.bottom - (pt.value / maxValue) * plotHeight;
+
+            // Vertical line
+            ctx.strokeStyle = '#6e7681';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 2]);
+            ctx.beginPath();
+            ctx.moveTo(x, padding.top);
+            ctx.lineTo(x, height - padding.bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Point
+            ctx.fillStyle = '#58a6ff';
+            ctx.beginPath();
+            ctx.arc(x, y, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Value label with background
+            const valStr = unit === '%' ? pt.value.toFixed(1) + unit : Math.round(pt.value).toString();
+            const label = `p${pt.p}: ${valStr}`;
+            ctx.font = '10px SF Mono, Monaco, monospace';
+            const textWidth = ctx.measureText(label).width;
+            const labelX = x > width / 2 ? x - textWidth - 8 : x + 6;
+
+            ctx.fillStyle = '#161b22';
+            ctx.fillRect(labelX - 2, 2, textWidth + 4, 12);
+
+            ctx.fillStyle = '#f0f6fc';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText(label, labelX, 3);
+        }
+    }
+
+    /**
+     * Compute quantiles from a binned histogram with custom bin size.
+     * @param {number[]} histogram - Array of bin counts
+     * @param {number[]} quantiles - Array of quantiles to compute (e.g., [0.5, 0.9, 0.99])
+     * @param {number} binSize - Size of each bin
+     * @returns {number[]} - Array of values at each quantile (bin midpoints)
+     */
+    computeQuantilesWithBinSize(histogram, quantiles, binSize) {
+        const total = histogram.reduce((a, b) => a + b, 0);
+        if (total === 0) return quantiles.map(() => 0);
+
+        const results = [];
+        for (const q of quantiles) {
+            const target = q * total;
+            let cumulative = 0;
+            for (let i = 0; i < histogram.length; i++) {
+                cumulative += histogram[i];
+                if (cumulative >= target) {
+                    // Return bin midpoint
+                    results.push((i + 0.5) * binSize);
+                    break;
+                }
+            }
+            if (results.length < quantiles.indexOf(q) + 1) {
+                // Fell through, use last bin
+                results.push((histogram.length - 0.5) * binSize);
+            }
+        }
+        return results;
+    }
+
     renderMetricChart(metric) {
+        // Skip metrics that use renderQuantileChart instead
+        if (metric === 'completion_len_mean' || metric === 'seq_padding_pct' || metric === 'completion_padding_pct') return;
+
         const colors = {
             reward: '#3fb950',
             loss: '#58a6ff',
@@ -1288,7 +1655,12 @@ class HeartbeatViz {
             kl_max: '#f85149',
             ratio_max: '#d29922',
             diff_ref: '#a371f7',
-            diff_rollout: '#39d4e0'
+            diff_rollout: '#39d4e0',
+            // Efficiency metrics
+            seq_padding_pct: '#f0883e',      // orange - padding is waste
+            completion_padding_pct: '#d29922', // yellow
+            finish_stop_pct: '#3fb950',       // green - good (natural stop)
+            finish_length_pct: '#f85149'      // red - truncated
         };
 
         const data = this.metrics[metric];
@@ -1328,9 +1700,10 @@ class HeartbeatViz {
 
         // Update current value display
         // Use rolling average for perf metrics (TorchTitan/vLLM), actual value for training metrics
+        // Skip completion_len_mean - it's handled by renderEfficiencyQuantiles with p50/90/99
         const perfMetrics = new Set(['mfu', 'train_tps', 'memory_pct', 'vllm_tps', 'vllm_output_tokens', 'vllm_prompt_tokens']);
         const el = document.getElementById(`metric-${metric}`);
-        if (el) {
+        if (el && metric !== 'completion_len_mean') {
             if (perfMetrics.has(metric)) {
                 // Rolling average for perf metrics
                 const avgWindow = 10;
@@ -1495,7 +1868,13 @@ class HeartbeatViz {
                 return value.toFixed(2);
             case 'mfu':
             case 'memory_pct':
+            case 'seq_padding_pct':
+            case 'completion_padding_pct':
+            case 'finish_stop_pct':
+            case 'finish_length_pct':
                 return value.toFixed(1) + '%';
+            case 'completion_len_mean':
+                return Math.round(value).toLocaleString();
             case 'train_tps':
             case 'vllm_tps':
             case 'vllm_output_tokens':
@@ -1625,6 +2004,125 @@ class HeartbeatViz {
         if (rect.bottom > window.innerHeight) {
             tooltip.style.top = (this.tooltipY - rect.height - 12) + 'px';
         }
+    }
+
+    renderRewardVsLen() {
+        const canvas = document.getElementById('reward-vs-len-canvas');
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear
+        ctx.fillStyle = '#0d1117';
+        ctx.fillRect(0, 0, width, height);
+
+        const data = this.rewardVsLen;
+        if (data.length === 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '14px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Reward vs Completion Length scatter will appear here', width / 2, height / 2);
+            return;
+        }
+
+        const padding = { left: 50, right: 20, top: 20, bottom: 40 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        // Find data ranges
+        const lens = data.map(d => d.len);
+        const rewards = data.map(d => d.reward);
+        const minLen = Math.min(...lens);
+        const maxLen = Math.max(...lens);
+        const minReward = Math.min(...rewards);
+        const maxReward = Math.max(...rewards);
+
+        // Add padding to ranges
+        const lenRange = maxLen - minLen || 1;
+        const rewardRange = maxReward - minReward || 1;
+
+        // Coordinate transforms
+        const lenToX = (len) => padding.left + ((len - minLen) / lenRange) * plotWidth;
+        const rewardToY = (reward) => height - padding.bottom - ((reward - minReward) / rewardRange) * plotHeight;
+
+        // Draw axes
+        ctx.strokeStyle = '#30363d';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(padding.left, height - padding.bottom);
+        ctx.lineTo(width - padding.right, height - padding.bottom);
+        ctx.stroke();
+
+        // Y-axis labels
+        ctx.fillStyle = '#6e7681';
+        ctx.font = '10px SF Mono, Monaco, monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(maxReward.toFixed(1), padding.left - 5, padding.top);
+        ctx.fillText(minReward.toFixed(1), padding.left - 5, height - padding.bottom);
+
+        // X-axis labels
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(minLen.toString(), padding.left, height - padding.bottom + 5);
+        ctx.fillText(maxLen.toString(), width - padding.right, height - padding.bottom + 5);
+        ctx.fillText('Completion Length', width / 2, height - 15);
+
+        // Y-axis label
+        ctx.save();
+        ctx.translate(12, height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('Reward', 0, 0);
+        ctx.restore();
+
+        // Draw points - use transparency for overlap visualization
+        // Color by reward: red for 0, green for 1
+        const maxPoints = 5000;  // Limit points for performance
+        const step = Math.max(1, Math.floor(data.length / maxPoints));
+
+        for (let i = 0; i < data.length; i += step) {
+            const d = data[i];
+            const x = lenToX(d.len);
+            const y = rewardToY(d.reward);
+
+            // Color gradient: red (0) -> yellow (0.5) -> green (1)
+            let r, g, b;
+            if (d.reward <= 0.5) {
+                const t = d.reward * 2;  // 0-1 for first half
+                r = 248;  // red to yellow
+                g = Math.round(81 + (210 - 81) * t);
+                b = Math.round(73 + (34 - 73) * t);
+            } else {
+                const t = (d.reward - 0.5) * 2;  // 0-1 for second half
+                r = Math.round(210 + (63 - 210) * t);  // yellow to green
+                g = Math.round(153 + (185 - 153) * t);
+                b = Math.round(34 + (80 - 34) * t);
+            }
+
+            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.5)`;
+            ctx.beginPath();
+            ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Show point count
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '10px SF Mono, Monaco, monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(`n=${data.length.toLocaleString()}`, width - padding.right, padding.top);
     }
 }
 

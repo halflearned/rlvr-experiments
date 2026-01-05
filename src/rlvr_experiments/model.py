@@ -159,7 +159,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 base_folder=job_config.job.dump_folder,
                 ft_manager=self.ft_manager,
             )
-            self.checkpointer.load(step=None)
+            self.checkpointer.load(step=-1)  # -1 = auto-find latest or skip if none
         else:
             # Reference / non-trainable models should be deterministic and not build graphs.
             # Keep them in eval mode and disable gradients to save memory.
@@ -181,7 +181,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                 base_folder=job_config.job.dump_folder,
                 ft_manager=None,
             )
-            self.checkpointer.load(step=None)
+            self.checkpointer.load(step=-1)  # -1 = auto-find latest or skip if none
 
         # Metrics tracking for MFU/TFLOPS (without using MetricsProcessor which calls empty_cache)
         _, self._num_flops_per_token = self.model_args.get_nparams_and_flops(

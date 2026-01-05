@@ -57,8 +57,8 @@
 
         .container {
             display: grid;
-            grid-template-rows: 1fr 1fr 0.8fr 0.8fr;
-            height: calc(100vh - 60px);
+            grid-template-rows: 250px 200px 180px 180px 180px 180px 180px 200px;
+            min-height: calc(100vh - 60px);
             gap: 1px;
             background: #30363d;
         }
@@ -451,150 +451,279 @@
             </div>
         </div>
 
-        <!-- Panel 3: Three metric sections (Training, TorchTitan, vLLM) -->
-        <div class="panel metrics-panel">
-            <div class="metrics-sections">
-                <!-- Training -->
-                <div class="metrics-section">
-                    <div class="section-title">Training</div>
-                    <div class="section-cards">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Reward</div>
-                                <div class="metric-value color-green" id="metric-reward">-</div>
+        <!-- Panel 3: Training Dynamics -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Training Dynamics</div>
+                    <div class="panel-subtitle">Reward, loss, gradient norms</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="metrics-sections" style="grid-template-columns: repeat(3, 1fr); height: 100%;">
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Reward</div>
+                                    <div class="metric-value color-green" id="metric-reward">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-reward"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-reward"></canvas></div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Loss</div>
-                                <div class="metric-value color-blue" id="metric-loss">-</div>
-                            </div>
-                            <div class="metric-chart"><canvas id="chart-loss"></canvas></div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Grad Norm</div>
-                                <div class="metric-value color-red" id="metric-grad_norm">-</div>
-                            </div>
-                            <div class="metric-chart"><canvas id="chart-grad_norm"></canvas></div>
                         </div>
                     </div>
-                </div>
-                <!-- TorchTitan -->
-                <div class="metrics-section">
-                    <div class="section-title">TorchTitan</div>
-                    <div class="section-cards">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">MFU</div>
-                                <div class="metric-value color-purple" id="metric-mfu">-</div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Loss</div>
+                                    <div class="metric-value color-blue" id="metric-loss">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-loss"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-mfu"></canvas></div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">tok/s</div>
-                                <div class="metric-value color-orange" id="metric-train_tps">-</div>
-                            </div>
-                            <div class="metric-chart"><canvas id="chart-train_tps"></canvas></div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Memory</div>
-                                <div class="metric-value color-yellow" id="metric-memory_pct">-</div>
-                            </div>
-                            <div class="metric-chart"><canvas id="chart-memory_pct"></canvas></div>
                         </div>
                     </div>
-                </div>
-                <!-- vLLM -->
-                <div class="metrics-section">
-                    <div class="section-title">vLLM</div>
-                    <div class="section-cards">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Gen tok/s</div>
-                                <div class="metric-value color-cyan" id="metric-vllm_tps">-</div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Grad Norm</div>
+                                    <div class="metric-value color-red" id="metric-grad_norm">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-grad_norm"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-vllm_tps"></canvas></div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Out toks</div>
-                                <div class="metric-value color-teal" id="metric-vllm_output_tokens">-</div>
-                            </div>
-                            <div class="metric-chart"><canvas id="chart-vllm_output_tokens"></canvas></div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Prompt toks</div>
-                                <div class="metric-value color-gray" id="metric-vllm_prompt_tokens">-</div>
-                            </div>
-                            <div class="metric-chart"><canvas id="chart-vllm_prompt_tokens"></canvas></div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Panel 4: Debug metrics -->
-        <div class="panel metrics-panel">
-            <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr);">
-                <div class="metrics-section">
-                    <div class="section-title">Debug</div>
-                    <div class="section-cards" style="grid-template-rows: 1fr;">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">KL Max</div>
-                                <div class="metric-value color-red" id="metric-kl_max">-</div>
+        <!-- Panel 4: Trainer Profiling -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Trainer Profiling</div>
+                    <div class="panel-subtitle">TorchTitan MFU, throughput, memory</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="metrics-sections" style="grid-template-columns: repeat(3, 1fr); height: 100%;">
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">MFU</div>
+                                    <div class="metric-value color-purple" id="metric-mfu">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-mfu"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-kl_max"></canvas></div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">tok/s</div>
+                                    <div class="metric-value color-orange" id="metric-train_tps">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-train_tps"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Memory</div>
+                                    <div class="metric-value color-yellow" id="metric-memory_pct">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-memory_pct"></canvas></div>
+                            </div>
                         </div>
                     </div>
                 </div>
-                <div class="metrics-section">
-                    <div class="section-title" style="visibility: hidden;">-</div>
-                    <div class="section-cards" style="grid-template-rows: 1fr;">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">Ratio Max</div>
-                                <div class="metric-value color-orange" id="metric-ratio_max">-</div>
+            </div>
+        </div>
+
+        <!-- Panel 5: Generation Profiling -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Generation Profiling</div>
+                    <div class="panel-subtitle">vLLM throughput</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="metrics-sections" style="grid-template-columns: repeat(3, 1fr); height: 100%;">
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Gen tok/s</div>
+                                    <div class="metric-value color-cyan" id="metric-vllm_tps">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-vllm_tps"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-ratio_max"></canvas></div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Out toks</div>
+                                    <div class="metric-value color-teal" id="metric-vllm_output_tokens">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-vllm_output_tokens"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Prompt toks</div>
+                                    <div class="metric-value color-gray" id="metric-vllm_prompt_tokens">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-vllm_prompt_tokens"></canvas></div>
+                            </div>
                         </div>
                     </div>
                 </div>
-                <div class="metrics-section">
-                    <div class="section-title" style="visibility: hidden;">-</div>
-                    <div class="section-cards" style="grid-template-rows: 1fr;">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">|T-Ref|</div>
-                                <div class="metric-value color-purple" id="metric-diff_ref">-</div>
+            </div>
+        </div>
+
+        <!-- Panel 6: Padding Efficiency -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Padding Efficiency</div>
+                    <div class="panel-subtitle">Wasted tokens per sample (p50/p90/p99)</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr); height: 100%;">
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Seq Pad Toks</div>
+                                    <div class="metric-value" style="color: #f0883e;" id="metric-seq_padding_pct">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-seq_padding_pct"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-diff_ref"></canvas></div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Compl Pad Toks</div>
+                                    <div class="metric-value color-orange" id="metric-completion_padding_pct">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-completion_padding_pct"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Compl Len p50/90/99</div>
+                                    <div class="metric-value color-gray" id="metric-completion_len_mean">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-completion_len_mean"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Stop %</div>
+                                    <div class="metric-value color-green" id="metric-finish_stop_pct">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-finish_stop_pct"></canvas></div>
+                            </div>
                         </div>
                     </div>
                 </div>
-                <div class="metrics-section">
-                    <div class="section-title" style="visibility: hidden;">-</div>
-                    <div class="section-cards" style="grid-template-rows: 1fr;">
-                        <div class="metric-card">
-                            <div class="metric-info">
-                                <div class="metric-label">|T-Roll|</div>
-                                <div class="metric-value color-cyan" id="metric-diff_rollout">-</div>
+            </div>
+        </div>
+
+        <!-- Panel 7: Debug metrics -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Debug</div>
+                    <div class="panel-subtitle">KL divergence, ratio clipping diagnostics</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr); height: 100%;">
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">KL Max</div>
+                                    <div class="metric-value color-red" id="metric-kl_max">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-kl_max"></canvas></div>
                             </div>
-                            <div class="metric-chart"><canvas id="chart-diff_rollout"></canvas></div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Ratio Max</div>
+                                    <div class="metric-value color-orange" id="metric-ratio_max">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-ratio_max"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">|T-Ref|</div>
+                                    <div class="metric-value color-purple" id="metric-diff_ref">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-diff_ref"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">|T-Roll|</div>
+                                    <div class="metric-value color-cyan" id="metric-diff_rollout">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-diff_rollout"></canvas></div>
+                            </div>
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Panel 8: Reward vs Completion Length -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Reward vs Completion Length</div>
+                    <div class="panel-subtitle">Scatter plot of reward by completion length</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <canvas id="reward-vs-len-canvas" style="width: 100%; height: 100%;"></canvas>
             </div>
         </div>
     </div>
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=14"></script>
+    <script src="heartbeat.js?v=29"></script>
 </body>
 </html>

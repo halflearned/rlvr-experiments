@@ -37,6 +37,9 @@ class RolloutSample:
     rewards: list[float]
     prompt_len: int  # Length of the prompt (same for all completions in this sample)
     version: int = -1  # Model version that generated this sample
+    # Per-completion metadata from vLLM
+    finish_reasons: list[str] | None = None  # e.g. ["stop", "length", "stop", ...]
+    completion_lens: list[int] | None = None  # Actual completion lengths before padding
 
     @classmethod
     def from_vllm(cls, response, pad_token_id: int, rewards: list[float], version: int = -1):
@@ -55,13 +58,38 @@ class RolloutSample:
         completion_ids = torch.full((n, max_completion_len), pad_token_id, dtype=torch.long)
         logprobs = torch.zeros((n, max_completion_len), dtype=torch.float32)
 
+        # Track per-completion metadata
+        finish_reasons = []
+        completion_lens = []
+
         for i, o in enumerate(outputs):
             L = len(o.token_ids)
             # Left-align to match input_ids (prompt + completion, then padding)
             completion_ids[i, :L] = torch.tensor(o.token_ids)
             logprobs[i, :L] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
+            # Track finish reason and actual length
+            finish_reasons.append(getattr(o, 'finish_reason', None) or 'unknown')
+            completion_lens.append(L)
 
-        return cls(input_ids, completion_ids, logprobs, rewards, prompt_len, version)
+        return cls(input_ids, completion_ids, logprobs, rewards, prompt_len, version,
+                   finish_reasons, completion_lens)
+
+
+@dataclass
+class BatchStats:
+    """Statistics about a training batch for monitoring padding/truncation waste."""
+    # Sequence length stats
+    actual_seq_lens: list[int]  # Per-sample actual sequence lengths
+    padded_seq_len: int  # Final padded length
+    seq_padding_tokens: int  # Total padding tokens added
+    seq_padding_pct: float  # % of batch that is padding
+    # Completion length stats
+    actual_completion_lens: list[int]  # Per-sample actual completion lengths
+    padded_completion_len: int  # Final padded length
+    completion_padding_tokens: int  # Total padding tokens added
+    completion_padding_pct: float  # % of completions that is padding
+    # Stop reason distribution
+    finish_reasons: dict[str, int]  # e.g. {"stop": 10, "length": 6}
 
 
 def make_batch(
@@ -69,7 +97,7 @@ def make_batch(
     pad_token_id: int,
     max_seq_len: int | None = None,
     max_completion_len: int | None = None,
-) -> Batch:
+) -> tuple[Batch, BatchStats]:
     """Combine pre-filtered samples into a training batch (pad and concatenate).
 
     Args:
@@ -77,6 +105,9 @@ def make_batch(
         pad_token_id: Token ID to use for padding
         max_seq_len: If provided, pad input_ids to this fixed length (avoids recompilation)
         max_completion_len: If provided, pad completion_ids to this fixed length
+
+    Returns:
+        (Batch, BatchStats) tuple with the batch and statistics about padding/truncation.
 
     Note: Filtering (zero-variance, length limits) is done upstream in run().
     """
@@ -92,7 +123,52 @@ def make_batch(
         n_completions = s.input_ids.size(0)
         prompt_lens_list.extend([s.prompt_len] * n_completions)
 
-    return Batch(
+    # Compute actual sequence lengths per completion
+    actual_seq_lens = []
+    actual_completion_lens = []
+    finish_reasons: dict[str, int] = {}
+
+    for s in samples:
+        n_completions = s.input_ids.size(0)
+        for i in range(n_completions):
+            # Actual seq len = prompt_len + completion_len for this completion
+            comp_len = s.completion_lens[i] if s.completion_lens else s.completion_ids.size(1)
+            actual_seq_lens.append(s.prompt_len + comp_len)
+            actual_completion_lens.append(comp_len)
+            # Track finish reasons
+            if s.finish_reasons:
+                reason = s.finish_reasons[i]
+                finish_reasons[reason] = finish_reasons.get(reason, 0) + 1
+
+    # Compute padding stats
+    natural_max_seq = max(t.shape[1] for t in [s.input_ids for s in samples])
+    natural_max_comp = max(t.shape[1] for t in [s.completion_ids for s in samples])
+
+    padded_seq_len = max_seq_len if max_seq_len else natural_max_seq
+    padded_completion_len = max_completion_len if max_completion_len else natural_max_comp
+
+    n_samples = len(actual_seq_lens)
+    total_actual_seq_tokens = sum(actual_seq_lens)
+    total_padded_seq_tokens = n_samples * padded_seq_len
+    seq_padding_tokens = total_padded_seq_tokens - total_actual_seq_tokens
+
+    total_actual_comp_tokens = sum(actual_completion_lens)
+    total_padded_comp_tokens = n_samples * padded_completion_len
+    completion_padding_tokens = total_padded_comp_tokens - total_actual_comp_tokens
+
+    stats = BatchStats(
+        actual_seq_lens=actual_seq_lens,
+        padded_seq_len=padded_seq_len,
+        seq_padding_tokens=seq_padding_tokens,
+        seq_padding_pct=100 * seq_padding_tokens / total_padded_seq_tokens if total_padded_seq_tokens > 0 else 0,
+        actual_completion_lens=actual_completion_lens,
+        padded_completion_len=padded_completion_len,
+        completion_padding_tokens=completion_padding_tokens,
+        completion_padding_pct=100 * completion_padding_tokens / total_padded_comp_tokens if total_padded_comp_tokens > 0 else 0,
+        finish_reasons=finish_reasons,
+    )
+
+    batch = Batch(
         input_ids=pad_cat([s.input_ids for s in samples], pad_value=pad_token_id, fixed_len=max_seq_len),
         completion_ids=pad_cat([s.completion_ids for s in samples], pad_value=pad_token_id, fixed_len=max_completion_len),
         logprobs=pad_cat([s.logprobs for s in samples], fixed_len=max_completion_len),
@@ -100,6 +176,8 @@ def make_batch(
         mask=pad_cat([(s.completion_ids != pad_token_id).float() for s in samples], fixed_len=max_completion_len),
         prompt_lens=torch.tensor(prompt_lens_list, dtype=torch.long),
     )
+
+    return batch, stats
 
 
 async def grpo_samples(
@@ -233,7 +311,35 @@ async def grpo_samples(
                         "num_positive": sum(1 for r in all_rewards if r > 0),
                     })
 
-                    batch = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
+                    batch, batch_stats = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
+
+                    # Emit batch stats to tracer (include raw lengths for cumulative quantile tracking)
+                    # Compute per-sample padding token counts (padded_len - actual_len)
+                    seq_padding_tokens = [batch_stats.padded_seq_len - l for l in batch_stats.actual_seq_lens]
+                    completion_padding_tokens = [batch_stats.padded_completion_len - l for l in batch_stats.actual_completion_lens]
+                    tracer.counter("batch.padding", {
+                        "seq_padding_pct": batch_stats.seq_padding_pct,
+                        "completion_padding_pct": batch_stats.completion_padding_pct,
+                        "padded_seq_len": batch_stats.padded_seq_len,
+                        "padded_completion_len": batch_stats.padded_completion_len,
+                        # Raw lengths for histogram/quantile computation in viz
+                        "seq_lens": batch_stats.actual_seq_lens,
+                        "completion_lens": batch_stats.actual_completion_lens,
+                        # Per-sample padding token counts for absolute waste visualization
+                        "seq_padding_tokens": seq_padding_tokens,
+                        "completion_padding_tokens": completion_padding_tokens,
+                    })
+
+                    # Emit finish reason distribution
+                    if batch_stats.finish_reasons:
+                        tracer.counter("batch.finish_reasons", batch_stats.finish_reasons)
+
+                    # Emit reward vs completion length pairs for scatter plot
+                    tracer.counter("batch.reward_vs_len", {
+                        "rewards": all_rewards,
+                        "completion_lens": batch_stats.actual_completion_lens,
+                    })
+
                     samples = []
                     global_step += 1
                     yield global_step, epoch, batch

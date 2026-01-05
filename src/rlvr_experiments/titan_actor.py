@@ -18,6 +18,9 @@ import tomli_w as toml
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Set to True to enable detailed timing logs (requires cuda.synchronize, adds overhead)
+_PROFILE_TITAN = os.environ.get("RLVR_PROFILE_TITAN", "0") == "1"
+
 
 @ray.remote(num_gpus=1, num_cpus=2)
 class TitanModelRank:
@@ -208,6 +211,14 @@ class TitanModelRank:
         """Export model to HuggingFace format. All ranks must call (collective for DTensors)."""
         self.model.export_to_hf(output_path)
 
+    def save_checkpoint(self, step: int | None = None, last_step: bool = False) -> None:
+        """Save a distributed checkpoint. All ranks must call."""
+        self.model.save_checkpoint(step=step, last_step=last_step)
+
+    def get_step(self) -> int:
+        """Get the current training step."""
+        return self.model.step
+
     def compute_logprobs(
         self,
         input_ids: torch.Tensor,
@@ -231,25 +242,29 @@ class TitanModelRank:
         if prompt_lens is not None:
             prompt_lens = self._get_dp_shard(prompt_lens)
 
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
         logits = self.model.forward(input_ids)
 
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
 
         if isinstance(logits, DTensor):
             logits = logits.full_tensor()
 
-        torch.cuda.synchronize()
-        t2 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t2 = time.perf_counter()
 
         completion_ids = completion_ids.to(self.model.device)
         logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
 
-        torch.cuda.synchronize()
-        t3 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t3 = time.perf_counter()
 
         # Gather logprobs from all DP replicate ranks to reconstruct full batch
         dp_degree = self.model.parallel_dims.dp_replicate
@@ -263,20 +278,21 @@ class TitanModelRank:
             dist.all_gather(gathered, logprobs, group=dp_group)
             logprobs = torch.cat(gathered, dim=0)
 
-        torch.cuda.synchronize()
-        t4 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t4 = time.perf_counter()
 
-        if self.rank == 0:
-            print(
-                f"[PROFILE compute_logprobs] "
-                f"forward={1000*(t1-t0):.0f}ms, "
-                f"full_tensor={1000*(t2-t1):.0f}ms, "
-                f"logprobs={1000*(t3-t2):.0f}ms, "
-                f"gather={1000*(t4-t3):.0f}ms, "
-                f"TOTAL={1000*(t4-t0):.0f}ms | "
-                f"shape={list(input_ids.shape)}",
-                flush=True
-            )
+            if self.rank == 0:
+                print(
+                    f"[PROFILE compute_logprobs] "
+                    f"forward={1000*(t1-t0):.0f}ms, "
+                    f"full_tensor={1000*(t2-t1):.0f}ms, "
+                    f"logprobs={1000*(t3-t2):.0f}ms, "
+                    f"gather={1000*(t4-t3):.0f}ms, "
+                    f"TOTAL={1000*(t4-t0):.0f}ms | "
+                    f"shape={list(input_ids.shape)}",
+                    flush=True
+                )
 
         return logprobs.detach().cpu() if self.rank == 0 else None
 
@@ -302,13 +318,15 @@ class TitanModelRank:
                 for k, v in loss_kwargs.items()
             }
 
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
         logits = self.model.forward(input_ids)
 
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
 
         device = self.model.device
 
@@ -320,8 +338,9 @@ class TitanModelRank:
         args_local = tuple(to_device(a) for a in loss_args)
         kwargs_local = {k: to_device(v) for k, v in (loss_kwargs or {}).items()}
 
-        torch.cuda.synchronize()
-        t2 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t2 = time.perf_counter()
 
         with self.model.train_context_mgr(None):
             loss = loss_fn(logits, *args_local, **kwargs_local)
@@ -329,25 +348,27 @@ class TitanModelRank:
             if not torch.is_tensor(loss) or loss.ndim != 0:
                 raise RuntimeError("loss_fn must return a scalar torch.Tensor")
 
-            torch.cuda.synchronize()
-            t3 = time.perf_counter()
+            if _PROFILE_TITAN:
+                torch.cuda.synchronize()
+                t3 = time.perf_counter()
 
             loss.backward()
 
-        torch.cuda.synchronize()
-        t4 = time.perf_counter()
+        if _PROFILE_TITAN:
+            torch.cuda.synchronize()
+            t4 = time.perf_counter()
 
-        if self.rank == 0:
-            print(
-                f"[PROFILE forward_backward] "
-                f"forward={1000*(t1-t0):.0f}ms, "
-                f"to_device={1000*(t2-t1):.0f}ms, "
-                f"loss_fn={1000*(t3-t2):.0f}ms, "
-                f"backward={1000*(t4-t3):.0f}ms, "
-                f"TOTAL={1000*(t4-t0):.0f}ms | "
-                f"shape={list(input_ids.shape)}",
-                flush=True
-            )
+            if self.rank == 0:
+                print(
+                    f"[PROFILE forward_backward] "
+                    f"forward={1000*(t1-t0):.0f}ms, "
+                    f"to_device={1000*(t2-t1):.0f}ms, "
+                    f"loss_fn={1000*(t3-t2):.0f}ms, "
+                    f"backward={1000*(t4-t3):.0f}ms, "
+                    f"TOTAL={1000*(t4-t0):.0f}ms | "
+                    f"shape={list(input_ids.shape)}",
+                    flush=True
+                )
 
         # Get debug metrics if available (e.g. from GRPOLoss)
         debug_metrics = None
