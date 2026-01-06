@@ -37,12 +37,16 @@ def get_instances(stack_name):
 
 def cmd_create(args):
     print(f"Creating stack '{args.stack_name}' with {args.instances} instances...")
+    params = f"ParameterKey=KeyName,ParameterValue={args.key} ParameterKey=InstanceCount,ParameterValue={args.instances}"
+    if args.vpc:
+        params += f" ParameterKey=ExistingVpcId,ParameterValue={args.vpc}"
+    if args.subnet:
+        params += f" ParameterKey=ExistingSubnetId,ParameterValue={args.subnet}"
     run(f"""aws cloudformation create-stack \
         --stack-name {args.stack_name} \
         --template-body file://infra/cloudformation.yaml \
         --capabilities CAPABILITY_IAM \
-        --parameters ParameterKey=KeyName,ParameterValue={args.key} \
-                     ParameterKey=InstanceCount,ParameterValue={args.instances}""", capture=False)
+        --parameters {params}""", capture=False)
     print("Waiting for stack creation...")
     run(f"aws cloudformation wait stack-create-complete --stack-name {args.stack_name}", capture=False)
     print("Stack created. Waiting for instances...")
@@ -102,6 +106,8 @@ if __name__ == "__main__":
 
     c = sub.add_parser("create", help="Create cluster")
     c.add_argument("-n", "--instances", type=int, default=2)
+    c.add_argument("--vpc", help="Existing VPC ID (skip VPC creation)")
+    c.add_argument("--subnet", help="Existing Subnet ID (required if --vpc is set)")
 
     sub.add_parser("status", help="Show instance IPs")
 

@@ -27,6 +27,16 @@ Parameters:
     Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
     Description: Ubuntu 22.04 AMI (or use Deep Learning AMI ID directly)
 
+  ExistingVpcId:
+    Type: String
+    Default: ''
+    Description: (Optional) Existing VPC ID. Leave empty to create a new VPC.
+
+  ExistingSubnetId:
+    Type: String
+    Default: ''
+    Description: (Optional) Existing Subnet ID. Required if ExistingVpcId is provided.
+
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -37,11 +47,21 @@ Metadata:
           - InstanceType
           - InstanceCount
           - AmiId
+      - Label:
+          default: "Networking (Optional - use existing VPC)"
+        Parameters:
+          - ExistingVpcId
+          - ExistingSubnetId
+
+Conditions:
+  CreateVpc: !Equals [!Ref ExistingVpcId, '']
+  UseExistingVpc: !Not [!Equals [!Ref ExistingVpcId, '']]
 
 Resources:
-  # ============ NETWORKING ============
+  # ============ NETWORKING (only created if no existing VPC) ============
   VPC:
     Type: AWS::EC2::VPC
+    Condition: CreateVpc
     Properties:
       CidrBlock: 10.0.0.0/16
       EnableDnsHostnames: true
@@ -52,6 +72,7 @@ Resources:
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
+    Condition: CreateVpc
     Properties:
       Tags:
         - Key: Name
@@ -59,12 +80,14 @@ Resources:
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateVpc
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
   PublicSubnet:
     Type: AWS::EC2::Subnet
+    Condition: CreateVpc
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
@@ -76,6 +99,7 @@ Resources:
 
   RouteTable:
     Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
     Properties:
       VpcId: !Ref VPC
       Tags:
@@ -84,6 +108,7 @@ Resources:
 
   PublicRoute:
     Type: AWS::EC2::Route
+    Condition: CreateVpc
     DependsOn: AttachGateway
     Properties:
       RouteTableId: !Ref RouteTable
@@ -92,6 +117,7 @@ Resources:
 
   SubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
     Properties:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref RouteTable
@@ -101,7 +127,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: RLVR cluster - SSH + internal traffic
-      VpcId: !Ref VPC
+      VpcId: !If [CreateVpc, !Ref VPC, !Ref ExistingVpcId]
       SecurityGroupIngress:
         # SSH from anywhere
         - IpProtocol: tcp
@@ -135,7 +161,7 @@ Resources:
     Type: AWS::EFS::MountTarget
     Properties:
       FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnet
+      SubnetId: !If [CreateVpc, !Ref PublicSubnet, !Ref ExistingSubnetId]
       SecurityGroups:
         - !Ref SecurityGroup
 
@@ -183,7 +209,7 @@ Resources:
           Arn: !GetAtt InstanceProfile.Arn
         NetworkInterfaces:
           - DeviceIndex: 0
-            SubnetId: !Ref PublicSubnet
+            SubnetId: !If [CreateVpc, !Ref PublicSubnet, !Ref ExistingSubnetId]
             Groups:
               - !Ref SecurityGroup
             AssociatePublicIpAddress: true
@@ -272,8 +298,8 @@ Resources:
       MinSize: !Ref InstanceCount
       MaxSize: !Ref InstanceCount
       DesiredCapacity: !Ref InstanceCount
-      AvailabilityZones:
-        - !GetAtt PublicSubnet.AvailabilityZone
+      VPCZoneIdentifier:
+        - !If [CreateVpc, !Ref PublicSubnet, !Ref ExistingSubnetId]
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-node'
@@ -282,11 +308,11 @@ Resources:
 Outputs:
   VPCID:
     Description: VPC ID
-    Value: !Ref VPC
+    Value: !If [CreateVpc, !Ref VPC, !Ref ExistingVpcId]
 
   SubnetID:
     Description: Subnet ID
-    Value: !Ref PublicSubnet
+    Value: !If [CreateVpc, !Ref PublicSubnet, !Ref ExistingSubnetId]
 
   SecurityGroupID:
     Description: Security Group ID
