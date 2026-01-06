@@ -276,13 +276,17 @@ Resources:
             # Install uv as ubuntu user
             su - ubuntu -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 
-            # Clone repo (if /efs/rlvr-experiments doesn't exist)
-            if [ ! -d /efs/rlvr-experiments ]; then
-              su - ubuntu -c 'git clone https://github.com/halflearned/rlvr-experiments.git /efs/rlvr-experiments'
-            fi
-
-            # Install the package
-            su - ubuntu -c 'cd /efs/rlvr-experiments && $HOME/.local/bin/uv sync'
+            # Clone repo and install deps (use flock to prevent race condition on shared EFS)
+            (
+              flock -n 200 || { echo "Another node is setting up, waiting..."; flock 200; }
+              if [ ! -d /efs/rlvr-experiments/.git ]; then
+                rm -rf /efs/rlvr-experiments  # clean up any partial clone
+                su - ubuntu -c 'git clone https://github.com/halflearned/rlvr-experiments.git /efs/rlvr-experiments'
+              fi
+              if [ ! -d /efs/rlvr-experiments/.venv ]; then
+                su - ubuntu -c 'cd /efs/rlvr-experiments && $HOME/.local/bin/uv sync'
+              fi
+            ) 200>/efs/.clone.lock
 
             echo "=== RLVR setup complete ==="
 

@@ -35,6 +35,29 @@ def get_instances(stack_name):
         --output json""")
     return [ip for r in json.loads(out) for ip in r if ip[0]]
 
+def check_instance_ready(pub_ip, key):
+    """Check if instance has completed setup (has .venv)."""
+    result = subprocess.run(
+        f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/{key}.pem ubuntu@{pub_ip} 'test -d /efs/rlvr-experiments/.venv'",
+        shell=True, capture_output=True
+    )
+    return result.returncode == 0
+
+def wait_for_setup(instances, key, timeout=300):
+    """Wait for all instances to complete setup."""
+    print("Waiting for instance setup to complete...")
+    start = time.time()
+    while time.time() - start < timeout:
+        ready = [check_instance_ready(pub, key) for pub, _ in instances]
+        done = sum(ready)
+        print(f"  {done}/{len(instances)} instances ready", end="\r")
+        if all(ready):
+            print(f"\nAll {len(instances)} instances ready!")
+            return True
+        time.sleep(10)
+    print(f"\nTimeout waiting for setup. {sum(ready)}/{len(instances)} ready.")
+    return False
+
 def cmd_create(args):
     print(f"Creating stack '{args.stack_name}' with {args.instances} instances...")
     params = f"ParameterKey=KeyName,ParameterValue={args.key} ParameterKey=InstanceCount,ParameterValue={args.instances}"
@@ -55,6 +78,9 @@ def cmd_create(args):
         if len(instances) >= args.instances:
             break
         time.sleep(10)
+
+    # Wait for setup to complete on all instances
+    wait_for_setup(instances, args.key)
     cmd_status(args)
 
 def cmd_status(args):
@@ -63,11 +89,12 @@ def cmd_status(args):
         print("No running instances found.")
         return
     head = get_head()
-    print(f"\n{'Role':<8} {'Public IP':<18} {'Private IP':<18}")
-    print("-" * 46)
+    print(f"\n{'Role':<8} {'Public IP':<18} {'Private IP':<18} {'Ready':<6}")
+    print("-" * 54)
     for pub, priv in instances:
         role = "HEAD" if priv == head else ""
-        print(f"{role:<8} {pub:<18} {priv:<18}")
+        ready = "yes" if check_instance_ready(pub, args.key) else "no"
+        print(f"{role:<8} {pub:<18} {priv:<18} {ready:<6}")
     if head:
         head_pub = next((pub for pub, priv in instances if priv == head), None)
         if head_pub:

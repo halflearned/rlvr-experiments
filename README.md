@@ -10,11 +10,15 @@ git clone https://github.com/halflearned/rlvr-experiments.git
 cd rlvr-experiments
 
 # 1. Create SSH key (if needed)
-aws ec2 create-key-pair --key-name rlvr-key --query 'KeyMaterial' --output text > ~/.ssh/rlvr-key.pem
+# You may need to add --profile some_configured_profile 
+aws ec2 create-key-pair --key-name rlvr-key --query 'KeyMaterial' --output text --region us-west-2  > ~/.ssh/rlvr-key.pem
 chmod 400 ~/.ssh/rlvr-key.pem
 
 # 2. Create cluster (waits for instances)
 python infra/launch.py create -n 2
+
+# Or use an existing VPC (if you've hit VPC limits):
+# python infra/launch.py create -n 2 --vpc vpc-xxxxx --subnet subnet-xxxxx
 
 # 3. Check status / get IPs
 python infra/launch.py status
