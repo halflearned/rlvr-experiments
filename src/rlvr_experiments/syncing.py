@@ -40,14 +40,24 @@ def _chunk_elems_from_mb(chunk_mb: int, dtype_str: str) -> int:
     return (chunk_mb * 1024 * 1024) // _BYTES_PER_ELEM[dtype_str]
 
 
-async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, label):
-    """Sync weights from src to dst_actors via chunked NCCL broadcast."""
+async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, label, *, dst_is_titan=False):
+    """Sync weights from src to dst_actors via chunked NCCL broadcast.
+
+    Args:
+        dst_is_titan: If True, dst_actors are Titan actors that support prepare_recv_state/clear_recv_state
+                      for faster chunk reception. vLLM actors don't need this optimization.
+    """
     loop = asyncio.get_event_loop()
 
     async def resolve(ref):
         return await loop.run_in_executor(None, ray.get, ref)
 
+    # Prepare source actors (cache HF state dict)
     await asyncio.gather(*[resolve(a.prepare_sync_state.remote()) for a in src.actors])
+
+    # Prepare destination actors if they support it (Titan only)
+    if dst_is_titan:
+        await asyncio.gather(*[resolve(a.prepare_recv_state.remote()) for a in dst_actors])
 
     try:
         max_chunk_elems = _chunk_elems_from_mb(chunk_mb, dtype_str)
@@ -59,6 +69,8 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
             await asyncio.gather(*src_futs, *dst_futs)
     finally:
         await asyncio.gather(*[resolve(a.clear_sync_state.remote()) for a in src.actors])
+        if dst_is_titan:
+            await asyncio.gather(*[resolve(a.clear_recv_state.remote()) for a in dst_actors])
 
     logger.info(label)
 
@@ -95,4 +107,4 @@ async def sync_titan_to_titan(src, dst, chunk_mb=100, src_rank=0, wire_dtype="bf
     channel = f"{src.name}_to_{dst.name}"
     with trace_span("sync.titan_to_titan"):
         await _sync_chunks(src, dst.actors, channel, chunk_mb, wire_dtype, src_rank,
-                           f"synced {src.name} -> {dst.name}")
+                           f"synced {src.name} -> {dst.name}", dst_is_titan=True)

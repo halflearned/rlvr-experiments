@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RLVR Experiments - Multi-node GPU cluster with EFS and EFA'
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair for SSH access
+
+  InstanceType:
+    Type: String
+    Default: p4de.24xlarge
+    AllowedValues:
+      - p4de.24xlarge
+      - p4d.24xlarge
+      - p5.48xlarge
+    Description: GPU instance type (must support EFA)
+
+  InstanceCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 8
+    Description: Number of GPU instances to launch
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: Ubuntu 22.04 AMI (or use Deep Learning AMI ID directly)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Instance Configuration"
+        Parameters:
+          - KeyName
+          - InstanceType
+          - InstanceCount
+          - AmiId
+
+Resources:
+  # ============ NETWORKING ============
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet'
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  # ============ SECURITY GROUP ============
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RLVR cluster - SSH + internal traffic
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # SSH from anywhere
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg'
+
+  # Allow all traffic within the security group (for Ray, NCCL, EFA)
+  SecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref SecurityGroup
+
+  # ============ EFS ============
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-efs'
+
+  EFSMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnet
+      SecurityGroups:
+        - !Ref SecurityGroup
+
+  # ============ PLACEMENT GROUP (for EFA) ============
+  PlacementGroup:
+    Type: AWS::EC2::PlacementGroup
+    Properties:
+      Strategy: cluster
+      GroupName: !Sub '${AWS::StackName}-placement'
+
+  # ============ IAM ROLE ============
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-role'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ============ LAUNCH TEMPLATE ============
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-template'
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            SubnetId: !Ref PublicSubnet
+            Groups:
+              - !Ref SecurityGroup
+            AssociatePublicIpAddress: true
+            InterfaceType: efa
+        Placement:
+          GroupName: !Ref PlacementGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 200
+              VolumeType: gp3
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-node'
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -ex
+
+            # Log everything
+            exec > >(tee /var/log/user-data.log) 2>&1
+
+            echo "=== Starting RLVR setup ==="
+
+            # Wait for network
+            sleep 10
+
+            # Install dependencies
+            apt-get update -y
+            apt-get install -y nfs-common git build-essential
+
+            # Create mount point and mount EFS
+            mkdir -p /efs
+            REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 \
+              ${EFSFileSystem}.efs.${!REGION}.amazonaws.com:/ /efs
+
+            # Make persistent
+            echo "${EFSFileSystem}.efs.${!REGION}.amazonaws.com:/ /efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" >> /etc/fstab
+
+            # Fix ownership
+            chown ubuntu:ubuntu /efs
+
+            # Setup Ray tmpdir on NVMe
+            mkdir -p /opt/dlami/nvme/ray_tmp
+            chown ubuntu:ubuntu /opt/dlami/nvme/ray_tmp
+
+            # Add to ubuntu's bashrc
+            cat >> /home/ubuntu/.bashrc << 'EOF'
+
+            # RLVR environment
+            export RAY_TMPDIR=/opt/dlami/nvme/ray_tmp
+            export PATH="$HOME/.local/bin:$PATH"
+            export NUMEXPR_MAX_THREADS=64
+
+            # Up/down arrow command history search
+            bind '"\e[A": history-search-backward'
+            bind '"\e[B": history-search-forward'
+            EOF
+
+            # Install uv as ubuntu user
+            su - ubuntu -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+
+            # Clone repo (if /efs/rlvr-experiments doesn't exist)
+            if [ ! -d /efs/rlvr-experiments ]; then
+              su - ubuntu -c 'git clone https://github.com/halflearned/rlvr-experiments.git /efs/rlvr-experiments'
+            fi
+
+            # Install the package
+            su - ubuntu -c 'cd /efs/rlvr-experiments && $HOME/.local/bin/uv sync'
+
+            echo "=== RLVR setup complete ==="
+
+  # ============ INSTANCES ============
+  # Using AutoScaling Group to manage multiple instances
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${AWS::StackName}-asg'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref InstanceCount
+      MaxSize: !Ref InstanceCount
+      DesiredCapacity: !Ref InstanceCount
+      AvailabilityZones:
+        - !GetAtt PublicSubnet.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node'
+          PropagateAtLaunch: true
+
+Outputs:
+  VPCID:
+    Description: VPC ID
+    Value: !Ref VPC
+
+  SubnetID:
+    Description: Subnet ID
+    Value: !Ref PublicSubnet
+
+  SecurityGroupID:
+    Description: Security Group ID
+    Value: !Ref SecurityGroup
+
+  EFSFileSystemID:
+    Description: EFS File System ID
+    Value: !Ref EFSFileSystem
+
+  SSHCommand:
+    Description: SSH command (get instance IPs from EC2 console)
+    Value: !Sub 'ssh -i ~/.ssh/${KeyName}.pem ubuntu@<INSTANCE_PUBLIC_IP>'
+
+  NextSteps:
+    Description: After instances are running
+    Value: |
+      1. Get instance IPs from EC2 console
+      2. SSH to any instance: ssh -i <key>.pem ubuntu@<ip>
+      3. Check setup logs: cat /var/log/user-data.log
+      4. Activate env: cd /efs/rlvr-experiments && source .venv/bin/activate
+      5. Run training: python entrypoints/train_grpo.py configs/qwen3-06B-base.yaml

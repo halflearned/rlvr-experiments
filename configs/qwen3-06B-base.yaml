@@ -12,7 +12,7 @@ training:
   num_epochs: 2
   iterations_per_epoch: null  # null = run full epoch until data exhausted
   sync_reference_every: 5
-  train_batch_size: 9  # number of prompts (will be multiplied by n completions)
+  train_batch_size: 3  # number of prompts (will be multiplied by n completions)
 
 verifier:
   num_workers: 2

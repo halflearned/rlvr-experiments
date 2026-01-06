@@ -51,15 +51,14 @@ async def main():
     data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
     loss_fn = GRPOLoss(**plan.loss)
 
-    # NOTE TO CLAUDE: DONT CHANGE THE VALUES BELOW!
-    num_epochs = 1 #plan.training.get("num_epochs")
-    max_steps = None # plan.training.get("max_steps")
+    num_epochs = plan.training.get("num_epochs")
+    max_steps = plan.training.get("max_steps")
 
-    prompts_per_batch = 9 #plan.training.get("prompts_per_batch") or 1
-    sync_ref_every = 10  # plan.training.get("sync_reference_every", 10)
-    sync_model_every = 5 # plan.training.get("sync_model_every", 5)
-    log_every = 5 #plan.training.get("log_every", 5)
-    max_staleness = 1 # plan.training.get("max_staleness", 0)
+    prompts_per_batch = plan.training.get("prompts_per_batch", 4)
+    sync_ref_every = plan.training.get("sync_ref_every", 10)
+    sync_model_every = plan.training.get("sync_model_every", 5)
+    log_every = plan.training.get("log_every", 5)
+    max_staleness = plan.training.get("max_staleness", 0)
 
     # Fixed sequence lengths to avoid dynamic shape recompilation
     max_completion_len = plan.sampling.get("max_tokens", 512)
@@ -100,7 +99,7 @@ async def main():
             await sync_titan_to_titan(trainer, reference)
 
         if step % sync_model_every == 0:
-            await sync_titan_to_vllm(trainer, rollout)
+            await sync_titan_to_vllm(trainer, rollout, abort_in_flight=False)
 
 
         # ---- maybe log ----

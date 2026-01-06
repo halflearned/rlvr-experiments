@@ -39,6 +39,7 @@ class TitanModelRank:
         self.group_name = group_name
         self.sync_managers: Dict[str, WeightSyncManager] = {}
         self._sync_cache: Dict[str, torch.Tensor] | None = None
+        self._recv_state_cache: Dict[str, torch.Tensor] | None = None
 
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
@@ -66,13 +67,22 @@ class TitanModelRank:
         return fn(*args, **kwargs)
 
     def prepare_sync_state(self) -> None:
-        """Cache HF state dict (involves DTensor collectives, all ranks must call)."""
+        """Cache HF state dict for sending (involves DTensor collectives, all ranks must call)."""
         self._sync_cache = self.model.hf_state_dict()
 
     def clear_sync_state(self) -> None:
         self._sync_cache = None
         # NOTE: Removed torch.cuda.empty_cache() - it was causing slowdown
         # on the next forward pass due to CUDA memory reorganization
+
+    def prepare_recv_state(self) -> None:
+        """Cache model state dict for receiving (avoids repeated get_model_state_dict calls)."""
+        from torch.distributed.checkpoint.state_dict import get_model_state_dict
+        model = self.model.model_parts[0]
+        self._recv_state_cache = get_model_state_dict(model)
+
+    def clear_recv_state(self) -> None:
+        self._recv_state_cache = None
 
     def build_chunk_plan(self, max_chunk_elems: int) -> list[dict]:
         """Build a chunk plan from cached HF state (metadata only, single rank)."""
@@ -122,13 +132,11 @@ class TitanModelRank:
         manager.communicator.broadcast(flat, src=src_rank)
 
     def recv_chunk(self, channel: str, chunk: dict, dtype_str: str, src_rank: int) -> None:
-        """Receive a chunk and load into model parameters."""
-        from torch.distributed.checkpoint.state_dict import (
-            set_model_state_dict,
-            get_model_state_dict,
-            StateDictOptions,
-        )
+        """Receive a chunk and load into model parameters.
 
+        Uses cached state dict from prepare_recv_state() if available,
+        otherwise falls back to fetching it (slower).
+        """
         manager = self.sync_managers[channel]
         dtype = getattr(torch, dtype_str)
         device = self.model.device
@@ -136,10 +144,15 @@ class TitanModelRank:
         flat = torch.empty(chunk["total_numel"], dtype=dtype, device=device)
         manager.communicator.broadcast(flat, src=src_rank)
 
-        # Get current model state dict to understand param name mapping
-        # (handles FSDP + activation checkpointing wrappers)
-        model = self.model.model_parts[0]
-        current_state = get_model_state_dict(model)
+        # Use cached state dict if available (much faster for many chunks)
+        if self._recv_state_cache is not None:
+            current_state = self._recv_state_cache
+        else:
+            # Fallback: fetch state dict (slow, logs warning)
+            from torch.distributed.checkpoint.state_dict import get_model_state_dict
+            logger.warning("recv_chunk called without prepare_recv_state - this is slow!")
+            model = self.model.model_parts[0]
+            current_state = get_model_state_dict(model)
 
         with torch.no_grad():
             offset = 0
