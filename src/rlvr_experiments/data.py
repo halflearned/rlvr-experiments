@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from typing import Iterator
 import ray.data
 from datasets import load_dataset
+
+
+def _hash_prompt(prompt: str) -> str:
+    """Generate a short hash for prompts without explicit IDs."""
+    return hashlib.sha256(prompt.encode()).hexdigest()[:12]
 
 
 
@@ -13,7 +19,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     Load GSM8k dataset as a Ray Dataset.
 
     Returns dataset with columns: "prompt", "problem"
-    where "problem" is a dict with "answer" for use with MathVerifier.
+    where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
     """
     hf_dataset = load_dataset("openai/gsm8k", "main", split=split)
     ds = ray.data.from_huggingface(hf_dataset)
@@ -21,9 +27,11 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     def preprocess(row):
         question = f"\n\nProblem:{row['question'].strip()}"
         answer = row["answer"].split("####")[-1].strip()
+        # GSM8K doesn't have task_id, so use hash of question
+        prompt_id = f"gsm8k_{_hash_prompt(question)}"
         return {
             "prompt": question,
-            "problem": {"answer": answer},
+            "problem": {"answer": answer, "prompt_id": prompt_id},
         }
 
     return ds.map(preprocess)
@@ -45,7 +53,7 @@ def load_humaneval(**kwargs) -> ray.data.Dataset:
     parameter is ignored. kwargs are accepted for config compatibility.
 
     Returns dataset with columns: "prompt", "problem"
-    where "problem" is a dict containing test, entry_point, task_id
+    where "problem" is a dict containing test, entry_point, task_id, prompt_id
     for use with HumanEvalVerifier.
     """
     # HumanEval only has "test" split - ignore any split param from config
@@ -55,6 +63,7 @@ def load_humaneval(**kwargs) -> ray.data.Dataset:
     def preprocess(row):
         # The prompt is the function signature + docstring
         # Model needs to generate the function body
+        # Use task_id as prompt_id (e.g., "HumanEval/0")
         return {
             "prompt": row["prompt"],
             "problem": {
@@ -62,6 +71,7 @@ def load_humaneval(**kwargs) -> ray.data.Dataset:
                 "test": row["test"],
                 "entry_point": row["entry_point"],
                 "task_id": row["task_id"],
+                "prompt_id": row["task_id"],
             },
         }
 
@@ -93,12 +103,15 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
     def preprocess(row):
         # The prompt is the problem description
         # Model needs to generate a complete function
+        # Use task_id as prompt_id (e.g., "mbpp_123")
+        prompt_id = f"mbpp_{row['task_id']}"
         return {
             "prompt": row["text"],
             "problem": {
                 "text": row["text"],
                 "test_list": row["test_list"],
                 "task_id": row["task_id"],
+                "prompt_id": prompt_id,
             },
         }
 
@@ -111,12 +124,13 @@ def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
 
     Useful for testing that rewards are increasing on a single problem.
     Returns dataset with columns: "prompt", "problem"
-    where "problem" is a dict with "answer" for use with MathVerifier.
+    where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
     """
+    prompt = "\n\nProblem:What is ((7/12) + (5/18)) / (31/36)?"
     rows = [
         {
-            "prompt": "\n\nProblem:What is ((7/12) + (5/18)) / (31/36)?",
-            "problem": {"answer": "1"},
+            "prompt": prompt,
+            "problem": {"answer": "1", "prompt_id": "dummy_0"},
         }
     ] * num_samples
     return ray.data.from_items(rows)
@@ -186,6 +200,7 @@ class DataIterator:
 
         Returns dict with:
             - "templates": list of chat-formatted strings ready for vLLM
+            - "prompts": list of original prompt strings (for logging)
             - "problems": list of problem dicts for the verifier
         """
         if self._iter is None:
@@ -205,7 +220,9 @@ class DataIterator:
         if batch is None:
             return None
 
+        prompts = list(batch["prompt"])
         return {
-            "templates": [self._apply_template(p) for p in batch["prompt"]],
+            "templates": [self._apply_template(p) for p in prompts],
+            "prompts": prompts,
             "problems": list(batch["problem"]),
         }

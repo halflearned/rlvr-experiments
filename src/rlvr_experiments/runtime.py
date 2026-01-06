@@ -10,6 +10,7 @@ import ray
 
 from .config_plan import Plan, load_plan
 from .buffer import DataBuffer
+from .rollout_logger import init_rollout_logger
 from .sample_logger import init_sample_logger
 from .titan_actor import create_titan_group
 from .tracer import init_global_tracer, get_tracer
@@ -86,8 +87,11 @@ class Runtime:
         init_global_tracer(trace_path)
         sample_path = os.path.join(trace_dir, "samples.jsonl")
         init_sample_logger(sample_path)
+        rollout_path = os.path.join(trace_dir, f"rollouts_{timestamp}.jsonl")
+        init_rollout_logger(rollout_path)
         print(f"[runtime] tracing to {trace_path}")
         print(f"[runtime] sample logging to {sample_path}")
+        print(f"[runtime] rollout logging to {rollout_path}")
 
         # Emit run configuration metadata for visualization
         tracer = get_tracer()

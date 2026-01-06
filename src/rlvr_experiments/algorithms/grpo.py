@@ -7,6 +7,7 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 
+from ..rollout_logger import log_rollout
 from ..tracer import get_tracer, trace_span
 
 
@@ -247,11 +248,21 @@ async def grpo_samples(
 
         async def produce():
             """Generate completions, compute rewards, push to buffer."""
-            async def process_one(response, problem, version):
+            async def process_one(response, problem, prompt, version):
                 completions = [out.text for out in response.outputs]
                 rewards = await verifier_fn(problem, completions)
                 sample = RolloutSample.from_vllm(response, pad_token_id, rewards, version)
                 await buffer.put(sample, version)
+
+                # Log rollout for debugging/analysis
+                prompt_id = problem.get("prompt_id", "unknown")
+                log_rollout(
+                    prompt_id=prompt_id,
+                    prompt=prompt,
+                    completions=completions,
+                    rewards=rewards,
+                    version=version,
+                )
 
             async with asyncio.TaskGroup() as tg:
                 while True:
@@ -260,8 +271,8 @@ async def grpo_samples(
                         break
                     version = rollout.model_version
                     responses = await rollout.generate(data_batch["templates"], **sp)
-                    for response, problem in zip(responses, data_batch["problems"]):
-                        tg.create_task(process_one(response, problem, version))
+                    for response, problem, prompt in zip(responses, data_batch["problems"], data_batch["prompts"]):
+                        tg.create_task(process_one(response, problem, prompt, version))
 
             await buffer.put(DONE, -1)  # version=-1 means never evict
 
