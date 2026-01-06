@@ -11,7 +11,8 @@ tokenizer:
 training:
   num_epochs: 2
   iterations_per_epoch: null  # null = run full epoch until data exhausted
-  sync_reference_every: 5
+  sync_ref_every: 10
+  sync_model_every: 5
   train_batch_size: 2  # number of prompts (will be multiplied by n completions)
 
 verifier:

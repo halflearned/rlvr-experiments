@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 25');
+console.log('[heartbeat.js] Script loaded, version 26');
 
 class HeartbeatViz {
     constructor() {
@@ -102,10 +102,11 @@ class HeartbeatViz {
         // Handle resize
         window.addEventListener('resize', () => this.render());
 
-        // Setup verifier toggle
-        this.verifiersCollapsed = false;
+        // Setup verifier toggle (collapsed by default)
+        this.verifiersCollapsed = true;
         const verifyToggle = document.getElementById('verify-toggle');
         if (verifyToggle) {
+            verifyToggle.classList.add('collapsed');  // Start collapsed
             verifyToggle.addEventListener('click', () => {
                 this.verifiersCollapsed = !this.verifiersCollapsed;
                 verifyToggle.classList.toggle('collapsed', this.verifiersCollapsed);

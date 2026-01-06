@@ -9,7 +9,7 @@ tokenizer:
   use_fast: false
 
 training:
-  max_steps: 50
+  max_steps: 20
   sync_reference_every: 5
   sync_ref_every: 10
   sync_model_every: 5
