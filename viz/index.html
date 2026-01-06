@@ -57,10 +57,47 @@
 
         .container {
             display: grid;
-            grid-template-rows: 250px 200px 180px 180px 180px 180px 180px 200px;
+            grid-template-rows: 100px 325px 200px 180px 180px 180px 180px 180px 200px;
             min-height: calc(100vh - 60px);
             gap: 1px;
             background: #30363d;
+        }
+
+        /* Run config panel styling */
+        .config-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-content: flex-start;
+        }
+
+        .config-item {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 4px 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .config-label {
+            font-size: 10px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            white-space: nowrap;
+        }
+
+        .config-value {
+            font-size: 12px;
+            font-weight: 500;
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #58a6ff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
         }
 
         .panel {
@@ -216,6 +253,35 @@
             gap: 4px;
         }
 
+        .legend-toggle {
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: background 0.15s;
+        }
+
+        .legend-toggle:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .legend-toggle.collapsed {
+            opacity: 0.5;
+        }
+
+        .legend-toggle.collapsed .legend-dot {
+            background: #8b949e !important;
+        }
+
+        .toggle-indicator {
+            font-size: 8px;
+            margin-left: 2px;
+            transition: transform 0.15s;
+        }
+
+        .legend-toggle.collapsed .toggle-indicator {
+            transform: rotate(-90deg);
+        }
+
         .legend-dot {
             width: 8px;
             height: 8px;
@@ -278,22 +344,24 @@
             flex: 1;
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 6px;
             overflow-y: auto;
         }
 
         .rec-utilization {
             display: flex;
-            gap: 16px;
-            padding: 8px 10px;
+            gap: 12px;
+            padding: 4px 8px;
             background: #161b22;
-            border-radius: 6px;
+            border-radius: 4px;
             border: 1px solid #30363d;
+            flex-wrap: wrap;
         }
 
         .rec-stat {
-            font-size: 12px;
+            font-size: 11px;
             color: #8b949e;
+            white-space: nowrap;
         }
 
         .rec-stat strong {
@@ -303,17 +371,17 @@
 
         .rec-items {
             display: flex;
-            flex-direction: column;
-            gap: 6px;
+            flex-wrap: wrap;
+            gap: 4px;
         }
 
         .rec-item {
-            padding: 8px 10px;
-            border-radius: 6px;
-            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
             display: flex;
-            flex-direction: column;
-            gap: 2px;
+            align-items: center;
+            gap: 4px;
         }
 
         .rec-icon {
@@ -326,6 +394,7 @@
         }
 
         .rec-suggestion {
+            display: none;  /* Hide in compact mode */
             font-size: 10px;
             opacity: 0.8;
             margin-left: 16px;
@@ -384,6 +453,59 @@
     </div>
 
     <div class="container">
+        <!-- Panel 0: Run Config + Overview -->
+        <div class="panel" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
+            <!-- Run Configuration -->
+            <div style="background: #0d1117; padding: 12px 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+                <div class="panel-header" style="margin-bottom: 8px;">
+                    <div>
+                        <div class="panel-title">Run Configuration</div>
+                    </div>
+                </div>
+                <div id="run-config" class="config-grid">
+                    <div class="config-item">
+                        <div class="config-label">Started</div>
+                        <div class="config-value" id="config-start-time">-</div>
+                    </div>
+                    <div class="config-item">
+                        <div class="config-label">Config</div>
+                        <div class="config-value" id="config-file">-</div>
+                    </div>
+                    <div class="config-item">
+                        <div class="config-label">Run Name</div>
+                        <div class="config-value" id="config-run-name">-</div>
+                    </div>
+                    <div class="config-item">
+                        <div class="config-label">Model</div>
+                        <div class="config-value" id="config-model">-</div>
+                    </div>
+                    <div class="config-item">
+                        <div class="config-label">Dataset</div>
+                        <div class="config-value" id="config-dataset">-</div>
+                    </div>
+                    <div class="config-item">
+                        <div class="config-label">vLLM Batch</div>
+                        <div class="config-value" id="config-vllm-batch">-</div>
+                    </div>
+                    <div class="config-item">
+                        <div class="config-label">Train Batch</div>
+                        <div class="config-value" id="config-train-batch">-</div>
+                    </div>
+                </div>
+            </div>
+            <!-- Overview (moved from Balance) -->
+            <div style="background: #0d1117; padding: 12px 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+                <div class="panel-header" style="margin-bottom: 8px;">
+                    <div>
+                        <div class="panel-title">Overview</div>
+                    </div>
+                </div>
+                <div id="overview" class="recommendations-content">
+                    <div class="rec-item rec-info">Waiting for data...</div>
+                </div>
+            </div>
+        </div>
+
         <!-- Panel 1: Pipeline Timeline -->
         <div class="panel">
             <div class="panel-header">
@@ -404,6 +526,11 @@
                         <div class="legend-dot" style="background: #f85149;"></div>
                         <span>Sync</span>
                     </div>
+                    <div class="legend-item legend-toggle" id="verify-toggle" title="Click to show/hide verifier lanes">
+                        <div class="legend-dot" style="background: #39d4e0;"></div>
+                        <span>Verify</span>
+                        <span class="toggle-indicator">▼</span>
+                    </div>
                 </div>
             </div>
             <div class="panel-content">
@@ -411,8 +538,8 @@
             </div>
         </div>
 
-        <!-- Panel 2: Buffer Dynamics + Sample Fates + Recommendations -->
-        <div class="panel" style="display: grid; grid-template-columns: 5fr 2fr 2fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
+        <!-- Panel 2: Buffer Dynamics + Sample Fates -->
+        <div class="panel" style="display: grid; grid-template-columns: 5fr 2fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
             <!-- Buffer Dynamics -->
             <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
@@ -435,18 +562,6 @@
                 </div>
                 <div class="panel-content">
                     <canvas id="fates-canvas"></canvas>
-                </div>
-            </div>
-            <!-- Recommendations -->
-            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
-                <div class="panel-header">
-                    <div>
-                        <div class="panel-title">Balance</div>
-                        <div class="panel-subtitle">Utilization & recommendations</div>
-                    </div>
-                </div>
-                <div id="recommendations" class="recommendations-content">
-                    <div class="rec-item rec-info">Waiting for data...</div>
                 </div>
             </div>
         </div>
@@ -724,6 +839,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=29"></script>
+    <script src="heartbeat.js?v=31"></script>
 </body>
 </html>

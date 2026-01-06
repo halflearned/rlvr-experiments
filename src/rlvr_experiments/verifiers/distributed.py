@@ -66,7 +66,9 @@ class VerifierPool:
         tracer = get_tracer()
         if not tracer:
             return
-        tracer.meta(verifier_workers=self.num_workers)
+        # Get max_concurrent from verifier_kwargs (default 2)
+        max_concurrent = self.verifier_kwargs.get('max_concurrent', 2)
+        tracer.meta(verifier_workers=self.num_workers, verifier_max_concurrent=max_concurrent)
 
     async def verify_completions(self, problem: dict, completions: list[str], worker_id: int | None = None) -> list[float]:
         """Verify N completions for one problem. Returns list of scores (0.0 or 1.0)."""
@@ -84,21 +86,36 @@ class VerifierPool:
         future = worker.verify_batch.remote([problem] * len(completions), completions)
         scores, durations, timing_spans, _, worker_duration_ms = await asyncio.wrap_future(future.future())
 
-        # Emit verification span in new JSONL format (seconds)
+        # Emit per-slot verification spans for visualization
+        # timing_spans contains (start_offset_ms, duration_ms) for each completion
         if tracer:
             now_s = tracer._now_s()
-            dur_s = worker_duration_ms / 1000.0
-            passed_count = sum(1 for s in scores if s > 0)
+            batch_dur_s = worker_duration_ms / 1000.0
+            batch_start_s = now_s - batch_dur_s
+            max_concurrent = self.verifier_kwargs.get('max_concurrent', 2)
 
-            tracer._emit({
-                "type": "span",
-                "name": "verify",
-                "ts": now_s - dur_s,
-                "dur": dur_s,
-                "worker": wid,
-                "n": len(completions),
-                "passed": passed_count,
-            })
+            # Assign each completion to a slot based on timing order
+            # Sort by start time to assign slots in order of execution
+            indexed_spans = [(i, timing_spans[i]) for i in range(len(timing_spans))]
+            indexed_spans.sort(key=lambda x: x[1][0])  # Sort by start_offset_ms
+
+            # Track when each slot becomes free
+            slot_free_times = [0.0] * max_concurrent
+
+            for idx, (start_offset_ms, dur_ms) in indexed_spans:
+                # Find the slot that becomes free earliest
+                slot = min(range(max_concurrent), key=lambda s: slot_free_times[s])
+                slot_free_times[slot] = start_offset_ms + dur_ms
+
+                tracer._emit({
+                    "type": "span",
+                    "name": "verify",
+                    "ts": batch_start_s + start_offset_ms / 1000.0,
+                    "dur": dur_ms / 1000.0,
+                    "worker": wid,
+                    "slot": slot,
+                    "passed": 1 if scores[idx] > 0 else 0,
+                })
 
         return scores
 

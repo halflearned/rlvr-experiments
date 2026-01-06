@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 21');
+console.log('[heartbeat.js] Script loaded, version 24');
 
 class HeartbeatViz {
     constructor() {
@@ -101,6 +101,18 @@ class HeartbeatViz {
 
         // Handle resize
         window.addEventListener('resize', () => this.render());
+
+        // Setup verifier toggle
+        this.verifiersCollapsed = false;
+        const verifyToggle = document.getElementById('verify-toggle');
+        if (verifyToggle) {
+            verifyToggle.addEventListener('click', () => {
+                this.verifiersCollapsed = !this.verifiersCollapsed;
+                verifyToggle.classList.toggle('collapsed', this.verifiersCollapsed);
+                this.updateTimelinePanelHeight();
+                this.render();
+            });
+        }
 
         // Try to load default trace
         this.loadDefaultTrace();
@@ -314,8 +326,10 @@ class HeartbeatViz {
 
     async loadDefaultTrace() {
         try {
-            // Try loading from common locations (now JSONL format)
+            // Try /trace first (served by serve.py with configured trace file)
+            // Then fall back to common file locations
             const paths = [
+                '/trace',  // serve.py endpoint (latest or specified trace)
                 '../traces/trace.jsonl',
                 'traces/trace.jsonl',
                 '../tracers/trace.jsonl',
@@ -330,6 +344,7 @@ class HeartbeatViz {
                     if (response.ok) {
                         const text = await response.text();
                         this.processJSONL(text);
+                        console.log(`Loaded trace from ${path}`);
                         return;
                     }
                 } catch (e) {
@@ -445,6 +460,12 @@ class HeartbeatViz {
         // For utilization tracking
         this.vllmSpans = [];  // {replica, ts, dur}
         this.trainerSpans = [];  // {ts, dur}
+        this.verifierSpans = [];  // {worker, ts, dur, n, passed}
+
+        // Metadata from trace (for dynamic lane configuration)
+        this.numVllmReplicas = 0;  // Detected from spans
+        this.numVerifierWorkers = 0;  // From meta event or detected from spans
+        this.verifierMaxConcurrent = 0;  // From meta event (max_concurrent containers per worker)
 
         let currentVersion = 0;
 
@@ -578,6 +599,40 @@ class HeartbeatViz {
                 if (event.name === 'forward_backward') {
                     this.trainerSpans.push({ ts: event.ts, dur: event.dur || 0 });
                 }
+                // Track verifier spans
+                if (event.name === 'verify') {
+                    this.verifierSpans.push({
+                        worker: event.worker,
+                        slot: event.slot !== undefined ? event.slot : 0,  // slot within worker
+                        ts: event.ts,
+                        dur: event.dur || 0,
+                        passed: event.passed || 0
+                    });
+                }
+            }
+
+            // Meta events for configuration
+            if (event.type === 'meta') {
+                if (event.verifier_workers !== undefined) {
+                    this.numVerifierWorkers = event.verifier_workers;
+                }
+                if (event.verifier_max_concurrent !== undefined) {
+                    this.verifierMaxConcurrent = event.verifier_max_concurrent;
+                }
+                // Run configuration metadata
+                if (event.config_file !== undefined) {
+                    this.runConfig = {
+                        configFile: event.config_file,
+                        runName: event.run_name || '',
+                        modelPath: event.model_path || '',
+                        dataset: event.dataset || '',
+                        vllmBatchSize: event.vllm_batch_size || 0,
+                        promptsPerBatch: event.prompts_per_batch || 0,
+                        nCompletions: event.n_completions || 1,
+                        titanParallelism: event.titan_parallelism || {},
+                        startTime: event.start_time || '',
+                    };
+                }
             }
 
             // Buffer events (new specialized type)
@@ -590,6 +645,48 @@ class HeartbeatViz {
                     version: currentVersion
                 });
             }
+        }
+
+        // Compute actual replica/worker counts from span data
+        const vllmReplicas = new Set(this.vllmSpans.map(s => s.replica));
+        this.numVllmReplicas = Math.max(this.numVllmReplicas, vllmReplicas.size);
+
+        const verifierWorkers = new Set(this.verifierSpans.map(s => s.worker));
+        this.numVerifierWorkers = Math.max(this.numVerifierWorkers, verifierWorkers.size);
+
+        // Detect max_concurrent from slot field if not in metadata
+        if (this.verifierMaxConcurrent === 0 && this.verifierSpans.length > 0) {
+            const maxSlot = Math.max(...this.verifierSpans.map(s => s.slot));
+            this.verifierMaxConcurrent = maxSlot + 1;  // slots are 0-indexed
+        }
+
+        // Update timeline panel height based on number of lanes
+        this.updateTimelinePanelHeight();
+    }
+
+    /**
+     * Dynamically adjust timeline panel height based on number of lanes.
+     */
+    updateTimelinePanelHeight() {
+        // Calculate number of lanes: vLLM replicas + Reference + Trainer + Sync + Verifier (workers × slots)
+        const numVllm = Math.max(1, this.numVllmReplicas);  // At least 1
+        const numVerifierSlots = this.verifiersCollapsed ? 0 : this.numVerifierWorkers * Math.max(1, this.verifierMaxConcurrent);
+        const fixedLanes = 3;  // Reference, Trainer, Sync
+        const totalLanes = numVllm + fixedLanes + numVerifierSlots;
+
+        // Base height per lane (pixels), with min/max bounds
+        const heightPerLane = 28;
+        const minHeight = 200;
+        const maxHeight = 650;
+        const targetHeight = Math.min(maxHeight, Math.max(minHeight, totalLanes * heightPerLane + 50));
+
+        // Update the CSS grid row height for the timeline panel (index 1, after config panel)
+        const container = document.querySelector('.container');
+        if (container) {
+            const currentRows = container.style.gridTemplateRows || '100px 325px 200px 180px 180px 180px 180px 180px 200px';
+            const rowParts = currentRows.split(' ');
+            rowParts[1] = `${targetHeight}px`;  // Timeline panel is now index 1 (after config panel)
+            container.style.gridTemplateRows = rowParts.join(' ');
         }
     }
 
@@ -638,6 +735,7 @@ class HeartbeatViz {
     }
 
     render() {
+        this.renderRunConfig();
         this.renderTimeline();
         this.renderBuffer();
         this.renderFates();
@@ -645,6 +743,78 @@ class HeartbeatViz {
         this.renderEfficiencyQuantiles();
         this.renderRecommendations();
         this.renderRewardVsLen();
+    }
+
+    renderRunConfig() {
+        // Update run configuration panel
+        if (!this.runConfig) return;
+
+        const cfg = this.runConfig;
+
+        // Basic config values
+        const setEl = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val || '-';
+        };
+
+        // Format start time nicely (ISO to readable)
+        let startTimeStr = cfg.startTime || '-';
+        if (cfg.startTime) {
+            try {
+                const d = new Date(cfg.startTime);
+                startTimeStr = d.toLocaleString('en-US', {
+                    month: 'short', day: 'numeric',
+                    hour: '2-digit', minute: '2-digit', hour12: false
+                });
+            } catch (e) {
+                startTimeStr = cfg.startTime;
+            }
+        }
+        setEl('config-start-time', startTimeStr);
+
+        setEl('config-file', cfg.configFile);
+        setEl('config-run-name', cfg.runName);
+
+        // Model: show just the model name from path
+        const modelName = cfg.modelPath ? cfg.modelPath.split('/').pop() : '-';
+        setEl('config-model', modelName);
+
+        setEl('config-dataset', cfg.dataset);
+        setEl('config-vllm-batch', cfg.vllmBatchSize ? String(cfg.vllmBatchSize) : '-');
+
+        // Train batch: "X prompts × Y completions"
+        if (cfg.promptsPerBatch && cfg.nCompletions) {
+            setEl('config-train-batch', `${cfg.promptsPerBatch} × ${cfg.nCompletions}`);
+        }
+
+        // Parallelism info - dynamically add items for each Titan role
+        const configGrid = document.getElementById('run-config');
+        if (configGrid && cfg.titanParallelism) {
+            // Remove any previously added parallelism items
+            const oldItems = configGrid.querySelectorAll('.parallelism-item');
+            oldItems.forEach(el => el.remove());
+
+            for (const [role, p] of Object.entries(cfg.titanParallelism)) {
+                const item = document.createElement('div');
+                item.className = 'config-item parallelism-item';
+
+                // Format: "dp=2, tp=4" (omit dp_replicate if 1)
+                let parts = [];
+                if (p.dp_replicate > 1) parts.push(`dp_rep=${p.dp_replicate}`);
+                if (p.dp_shard > 1) parts.push(`dp=${p.dp_shard}`);
+                if (p.tp > 1) parts.push(`tp=${p.tp}`);
+                const parallelStr = parts.length > 0 ? parts.join(', ') : 'none';
+
+                // Capitalize role name
+                const roleName = role.charAt(0).toUpperCase() + role.slice(1);
+
+                item.innerHTML = `
+                    <div class="config-label">${roleName} Parallelism</div>
+                    <div class="config-value">${parallelStr}</div>
+                `;
+                configGrid.appendChild(item);
+            }
+        }
     }
 
     handleTimeZoom(e, canvas) {
@@ -843,7 +1013,7 @@ class HeartbeatViz {
     }
 
     renderRecommendations() {
-        const container = document.getElementById('recommendations');
+        const container = document.getElementById('overview');
         if (!container) return;
 
         const recs = this.getRecommendations();
@@ -927,16 +1097,36 @@ class HeartbeatViz {
             ctx.fillText(`${pct}%`, width - 5, 5);
         }
 
-        // Define swimlanes (new format uses type='span')
-        const lanes = [
-            { name: 'vLLM 0', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 0 },
-            { name: 'vLLM 1', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 1 },
-            { name: 'vLLM 2', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 2 },
-            { name: 'vLLM 3', filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === 3 },
-            { name: 'Reference', filter: e => e.type === 'span' && e.name === 'ref_logprobs' },
-            { name: 'Trainer', filter: e => e.type === 'span' && e.name === 'forward_backward' },
-            { name: 'Sync', filter: e => e.type === 'span' && e.name.startsWith('sync.') }
-        ];
+        // Build dynamic swimlanes based on actual data
+        const lanes = [];
+
+        // vLLM lanes (dynamic count, max 8)
+        const numVllm = Math.min(8, Math.max(1, this.numVllmReplicas));
+        for (let i = 0; i < numVllm; i++) {
+            lanes.push({
+                name: numVllm === 1 ? 'vLLM' : `vLLM ${i}`,
+                filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === i
+            });
+        }
+
+        // Fixed lanes
+        lanes.push({ name: 'Reference', filter: e => e.type === 'span' && e.name === 'ref_logprobs' });
+        lanes.push({ name: 'Trainer', filter: e => e.type === 'span' && e.name === 'forward_backward' });
+        lanes.push({ name: 'Sync', filter: e => e.type === 'span' && e.name.startsWith('sync.') });
+
+        // Verifier lanes (workers × max_concurrent slots) - only if not collapsed
+        if (!this.verifiersCollapsed) {
+            const numVerifierWorkers = this.numVerifierWorkers;
+            const maxConcurrent = Math.max(1, this.verifierMaxConcurrent);
+            for (let w = 0; w < numVerifierWorkers; w++) {
+                for (let s = 0; s < maxConcurrent; s++) {
+                    lanes.push({
+                        name: `V${w}-${s}`,  // Compact: "V0-0", "V0-1", etc.
+                        filter: e => e.type === 'span' && e.name === 'verify' && e.worker === w && (e.slot === s || (e.slot === undefined && s === 0))
+                    });
+                }
+            }
+        }
 
         const laneHeight = plotHeight / lanes.length;
 
@@ -966,7 +1156,8 @@ class HeartbeatViz {
             'sync.trainer_to_reference': '#f0883e',
             'sync.waiting_for_vllm_pause': '#f8514966',
             'sync.titan_to_vllm': '#f85149',
-            'sync.titan_to_titan': '#f0883e'
+            'sync.titan_to_titan': '#f0883e',
+            'verify': '#39d4e0'  // Cyan for verifier
         };
 
         // Clear span geometries for hit testing
@@ -990,8 +1181,19 @@ class HeartbeatViz {
             const y = padding.top + laneIdx * laneHeight + 4;
             const h = laneHeight - 8;
 
-            ctx.fillStyle = colors[event.name] || '#8b949e';
-            ctx.fillRect(x, y, w, h);
+            const color = colors[event.name] || '#8b949e';
+
+            // For verify spans: solid fill if passed, outline only if failed
+            if (event.name === 'verify' && event.passed === 0) {
+                // Draw outline only for failed verifications
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+            } else {
+                // Solid fill for passed verifications and other events
+                ctx.fillStyle = color;
+                ctx.fillRect(x, y, w, h);
+            }
 
             // Store geometry for hit testing
             this.timelineSpans.push({ event, x, y, w, h });

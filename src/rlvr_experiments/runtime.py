@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict
 
 import ray
@@ -70,6 +71,15 @@ class Runtime:
         # Migrate old .json extension to .jsonl
         if trace_path.endswith(".json"):
             trace_path = trace_path[:-5] + ".jsonl"
+
+        # Add timestamp suffix to avoid overwriting previous traces
+        # e.g., traces/trace.jsonl -> traces/trace_20260106_143052.jsonl
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if trace_path.endswith(".jsonl"):
+            trace_path = trace_path[:-6] + f"_{timestamp}.jsonl"
+        else:
+            trace_path = f"{trace_path}_{timestamp}"
+
         trace_dir = os.path.dirname(trace_path) or "."
         os.makedirs(trace_dir, exist_ok=True)
 
@@ -78,6 +88,41 @@ class Runtime:
         init_sample_logger(sample_path)
         print(f"[runtime] tracing to {trace_path}")
         print(f"[runtime] sample logging to {sample_path}")
+
+        # Emit run configuration metadata for visualization
+        tracer = get_tracer()
+        if tracer:
+            # Extract key config values for the overview panel
+            run_name = plan.run.get("name", "unnamed") if hasattr(plan, "run") else "unnamed"
+            model_path = plan.model.get("path", "") if hasattr(plan, "model") else ""
+            dataset = plan.data.get("dataset", "") if hasattr(plan, "data") else ""
+            batch_size = plan.data_iter.get("batch_size", 0) if hasattr(plan, "data_iter") else 0
+            prompts_per_batch = plan.training.get("prompts_per_batch", 0) if hasattr(plan, "training") else 0
+            n_completions = plan.sampling.get("n", 1) if hasattr(plan, "sampling") else 1
+            config_file = os.path.basename(plan_path)
+
+            # Extract parallelism info for each Titan role
+            titan_parallelism = {}
+            for role_name, role_plan in plan.roles.items():
+                if role_plan.kind == "titan":
+                    p = role_plan.config.get("parallelism", {})
+                    titan_parallelism[role_name] = {
+                        "dp_replicate": p.get("data_parallel_replicate_degree", 1),
+                        "dp_shard": p.get("data_parallel_shard_degree", 1),
+                        "tp": p.get("tensor_parallel_degree", 1),
+                    }
+
+            tracer.meta(
+                config_file=config_file,
+                run_name=run_name,
+                model_path=model_path,
+                dataset=dataset,
+                vllm_batch_size=batch_size,
+                prompts_per_batch=prompts_per_batch,
+                n_completions=n_completions,
+                titan_parallelism=titan_parallelism,
+                start_time=datetime.now().isoformat(timespec='seconds'),
+            )
 
         if not ray.is_initialized():
             ray.init(address="auto")
