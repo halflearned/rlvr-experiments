@@ -87,7 +87,7 @@ class CodeVerifier(ABC):
         ]
         return scores, durations, timing_spans
 
-    async def verify_completions(self, problem: dict, completions: list[str]) -> tuple[list[float], list[float]]:
+    async def verify_completions(self, problem: dict, completions: list[str], **kwargs) -> tuple[list[float], list[float]]:
         """Verify N completions for one problem. Returns (scores, durations_ms)."""
         return await self.verify_batch([problem] * len(completions), completions)
 

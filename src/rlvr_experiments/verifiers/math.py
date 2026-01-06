@@ -65,7 +65,7 @@ class MathVerifier:
 
         return 1.0 if abs(target_num - parsed) < self.tolerance else 0.0
 
-    async def verify_completions(self, problem: dict, completions: list[str]) -> list[float]:
+    async def verify_completions(self, problem: dict, completions: list[str], **kwargs) -> list[float]:
         """Verify N completions for one problem. Returns list of scores."""
         target = problem["answer"]
         return [self.verify(c, target) for c in completions]

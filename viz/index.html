@@ -423,6 +423,163 @@
             border: 1px solid rgba(88, 166, 255, 0.2);
             color: #8b949e;
         }
+
+        /* Rollout Modal */
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        .modal-content {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            max-width: 800px;
+            max-height: 80vh;
+            width: 90%;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding: 16px 20px;
+            border-bottom: 1px solid #30363d;
+            background: #0d1117;
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .modal-subtitle {
+            font-size: 12px;
+            color: #8b949e;
+            margin-top: 2px;
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0 8px;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #f0f6fc;
+        }
+
+        .modal-section {
+            padding: 16px 20px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .modal-section:last-child {
+            border-bottom: none;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .modal-section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .modal-prompt {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 12px;
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #c9d1d9;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .modal-completions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .modal-completion {
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .modal-completion.passed {
+            border: 1px solid rgba(63, 185, 80, 0.4);
+            background: rgba(63, 185, 80, 0.05);
+        }
+
+        .modal-completion.failed {
+            border: 1px solid rgba(248, 81, 73, 0.4);
+            background: rgba(248, 81, 73, 0.05);
+        }
+
+        .completion-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .modal-completion.passed .completion-header {
+            background: rgba(63, 185, 80, 0.1);
+            color: #3fb950;
+        }
+
+        .modal-completion.failed .completion-header {
+            background: rgba(248, 81, 73, 0.1);
+            color: #f85149;
+        }
+
+        .completion-status {
+            font-weight: 600;
+        }
+
+        .completion-reward {
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .completion-text {
+            padding: 10px 12px;
+            font-size: 11px;
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #c9d1d9;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            margin: 0;
+        }
     </style>
 </head>
 <body>
@@ -839,6 +996,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=31"></script>
+    <script src="heartbeat.js?v=32"></script>
 </body>
 </html>

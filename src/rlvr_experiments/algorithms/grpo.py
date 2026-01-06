@@ -250,7 +250,7 @@ async def grpo_samples(
             """Generate completions, compute rewards, push to buffer."""
             async def process_one(response, problem, prompt, version):
                 completions = [out.text for out in response.outputs]
-                rewards = await verifier_fn(problem, completions)
+                rewards = await verifier_fn(problem, completions, version=version)
                 sample = RolloutSample.from_vllm(response, pad_token_id, rewards, version)
                 await buffer.put(sample, version)
 

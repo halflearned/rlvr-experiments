@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 24');
+console.log('[heartbeat.js] Script loaded, version 25');
 
 class HeartbeatViz {
     constructor() {
@@ -217,6 +217,18 @@ class HeartbeatViz {
         timelineCanvas.addEventListener('mouseleave', () => {
             this.hoveredSpan = null;
             this.updateTimelineTooltip();
+        });
+
+        // Timeline click handling for rollout inspection
+        timelineCanvas.addEventListener('click', (e) => {
+            if (this.hoveredSpan && this.hoveredSpan.event.name === 'verify') {
+                const event = this.hoveredSpan.event;
+                const promptId = event.prompt_id;
+                const version = event.version;
+                if (promptId && promptId !== 'unknown') {
+                    this.showRolloutModal(promptId, version);
+                }
+            }
         });
 
         // Setup metric mini-charts with hover handling
@@ -2325,6 +2337,124 @@ class HeartbeatViz {
         ctx.textAlign = 'right';
         ctx.textBaseline = 'top';
         ctx.fillText(`n=${data.length.toLocaleString()}`, width - padding.right, padding.top);
+    }
+
+    async showRolloutModal(promptId, version) {
+        // Fetch rollout data from server
+        const url = `/rollout?prompt_id=${encodeURIComponent(promptId)}${version !== undefined && version !== null ? `&version=${version}` : ''}`;
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                console.error(`Failed to fetch rollout: ${response.status}`);
+                return;
+            }
+            const rollout = await response.json();
+            this.renderRolloutModal(rollout);
+        } catch (err) {
+            console.error('Error fetching rollout:', err);
+        }
+    }
+
+    renderRolloutModal(rollout) {
+        // Remove existing modal if any
+        const existingModal = document.getElementById('rollout-modal');
+        if (existingModal) existingModal.remove();
+
+        // Create modal backdrop
+        const backdrop = document.createElement('div');
+        backdrop.id = 'rollout-modal';
+        backdrop.className = 'modal-backdrop';
+
+        // Create modal content
+        const modal = document.createElement('div');
+        modal.className = 'modal-content';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'modal-header';
+        header.innerHTML = `
+            <div>
+                <div class="modal-title">Rollout Inspection</div>
+                <div class="modal-subtitle">${rollout.prompt_id} · v${rollout.version}</div>
+            </div>
+            <button class="modal-close">&times;</button>
+        `;
+        modal.appendChild(header);
+
+        // Prompt section
+        const promptSection = document.createElement('div');
+        promptSection.className = 'modal-section';
+        promptSection.innerHTML = `
+            <div class="modal-section-title">Prompt</div>
+            <pre class="modal-prompt">${this.escapeHtml(rollout.prompt)}</pre>
+        `;
+        modal.appendChild(promptSection);
+
+        // Completions section
+        const completionsSection = document.createElement('div');
+        completionsSection.className = 'modal-section';
+
+        const numPassed = rollout.rewards.filter(r => r > 0).length;
+        const numTotal = rollout.rewards.length;
+
+        completionsSection.innerHTML = `
+            <div class="modal-section-title">Completions (${numPassed}/${numTotal} passed)</div>
+        `;
+
+        const completionsList = document.createElement('div');
+        completionsList.className = 'modal-completions';
+
+        for (let i = 0; i < rollout.completions.length; i++) {
+            const completion = rollout.completions[i];
+            const reward = rollout.rewards[i];
+            const passed = reward > 0;
+
+            const item = document.createElement('div');
+            item.className = `modal-completion ${passed ? 'passed' : 'failed'}`;
+
+            item.innerHTML = `
+                <div class="completion-header">
+                    <span class="completion-status">${passed ? '✓' : '✗'}</span>
+                    <span class="completion-reward">${reward.toFixed(2)}</span>
+                </div>
+                <pre class="completion-text">${this.escapeHtml(this.truncateText(completion, 1000))}</pre>
+            `;
+
+            completionsList.appendChild(item);
+        }
+
+        completionsSection.appendChild(completionsList);
+        modal.appendChild(completionsSection);
+
+        backdrop.appendChild(modal);
+        document.body.appendChild(backdrop);
+
+        // Close on backdrop click or close button
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) backdrop.remove();
+        });
+        modal.querySelector('.modal-close').addEventListener('click', () => backdrop.remove());
+
+        // Close on Escape
+        const escHandler = (e) => {
+            if (e.key === 'Escape') {
+                backdrop.remove();
+                document.removeEventListener('keydown', escHandler);
+            }
+        };
+        document.addEventListener('keydown', escHandler);
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    truncateText(text, maxLen) {
+        if (text.length <= maxLen) return text;
+        return text.slice(0, maxLen) + '\n... [truncated]';
     }
 }
 

@@ -70,7 +70,7 @@ class VerifierPool:
         max_concurrent = self.verifier_kwargs.get('max_concurrent', 2)
         tracer.meta(verifier_workers=self.num_workers, verifier_max_concurrent=max_concurrent)
 
-    async def verify_completions(self, problem: dict, completions: list[str], worker_id: int | None = None) -> list[float]:
+    async def verify_completions(self, problem: dict, completions: list[str], worker_id: int | None = None, version: int | None = None) -> list[float]:
         """Verify N completions for one problem. Returns list of scores (0.0 or 1.0)."""
         from rlvr_experiments.tracer import get_tracer
 
@@ -115,6 +115,8 @@ class VerifierPool:
                     "worker": wid,
                     "slot": slot,
                     "passed": 1 if scores[idx] > 0 else 0,
+                    "prompt_id": problem.get("prompt_id", "unknown"),
+                    "version": version,
                 })
 
         return scores
