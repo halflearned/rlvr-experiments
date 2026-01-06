@@ -72,10 +72,10 @@ roles:
       optimizer:
         name: "AdamW"
         lr: 0.00001
-        eps: 0.00000001
+        eps: 0.0001  
 
       lr_scheduler:
-        warmup_steps: 2
+        warmup_steps: 50  
 
       training:
         seq_len: 768  # max_tokens (512) + prompt (~256)

@@ -12,7 +12,7 @@ training:
   num_epochs: 2
   iterations_per_epoch: null  # null = run full epoch until data exhausted
   sync_reference_every: 5
-  train_batch_size: 3  # number of prompts (will be multiplied by n completions)
+  train_batch_size: 2  # number of prompts (will be multiplied by n completions)
 
 verifier:
   num_workers: 2
@@ -37,7 +37,7 @@ sampling:
   top_p: 0.95
   top_k: 20
   max_tokens: 512
-  n: 16
+  n: 8
   logprobs: 0
 
 trace_path: traces/trace.jsonl
@@ -72,10 +72,10 @@ roles:
       optimizer:
         name: "AdamW"
         lr: 0.00001
-        eps: 0.00000001
+        eps: 0.0001  # Increased from 1e-8 to prevent m/sqrt(v) explosion with small GRPO gradients
 
       lr_scheduler:
-        warmup_steps: 2
+        warmup_steps: 50  # Conservative warmup to avoid KL spikes during early training
 
       training:
         seq_len: 2048
@@ -83,8 +83,8 @@ roles:
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
 
-      parallelism: 
-        data_parallel_replicate_degree: 3
+      parallelism:
+        data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
         tensor_parallel_degree: 1
@@ -104,11 +104,11 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: selective
+        mode: full
         selective_ac_option: "op"
 
       compile:
-        enable: true
+        enable: false
         components:
           - "model"
 
@@ -150,7 +150,7 @@ roles:
         selective_ac_option: op
 
       compile:
-        enable: true
+        enable: false
         components:
           - "model"
 
