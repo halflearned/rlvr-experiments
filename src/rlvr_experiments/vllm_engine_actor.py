@@ -42,10 +42,10 @@ class VLLMEngineRank:
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         self._active_requests: set[str] = set()
         # Accumulated metrics for periodic collection
-        # Note: We track wall-clock time via start/end timestamps, not summed durations
         self._metrics_accum = {"output_tokens": 0, "prompt_tokens": 0, "calls": 0}
-        self._metrics_window_start: float | None = None  # When first call in window started
-        self._metrics_window_end: float = 0.0  # When last call in window ended
+        # Rolling window for tok/s calculation (last 30s)
+        self._token_history: list[tuple[float, int]] = []  # (timestamp, output_tokens)
+        self._rolling_window_s = 30.0
 
     def ready(self) -> bool:
         return True
@@ -68,9 +68,6 @@ class VLLMEngineRank:
 
     async def generate(self, prompts: Sequence[str], **sampling_params):
         t0 = time.perf_counter()
-        # Track window start (first call since last metrics collection)
-        if self._metrics_window_start is None:
-            self._metrics_window_start = t0
 
         sp = SamplingParams(**sampling_params)
         if sp.output_kind is None:
@@ -114,11 +111,12 @@ class VLLMEngineRank:
                 flush=True
             )
 
-            # Accumulate for periodic collection (wall-clock via timestamps)
+            # Accumulate for periodic collection
             self._metrics_accum["output_tokens"] += total_output_tokens
             self._metrics_accum["prompt_tokens"] += total_prompt_tokens
             self._metrics_accum["calls"] += 1
-            self._metrics_window_end = t1  # Update end of window
+            # Add to rolling window
+            self._token_history.append((t1, total_output_tokens))
 
         return results
 
@@ -134,22 +132,26 @@ class VLLMEngineRank:
 
     def get_metrics(self) -> dict:
         """Get accumulated metrics and reset counters."""
+        now = time.perf_counter()
+        cutoff = now - self._rolling_window_s
+
+        # Prune old entries and compute rolling average
+        self._token_history = [(ts, toks) for ts, toks in self._token_history if ts > cutoff]
+
+        if self._token_history:
+            total_tokens = sum(toks for _, toks in self._token_history)
+            oldest_ts = self._token_history[0][0]
+            window_duration = now - oldest_ts
+            gen_tps = total_tokens / window_duration if window_duration > 0 else 0
+        else:
+            gen_tps = 0
+
         metrics = dict(self._metrics_accum)
-        # Calculate wall-clock elapsed time from window timestamps
-        if self._metrics_window_start is not None and self._metrics_window_end > self._metrics_window_start:
-            elapsed_s = self._metrics_window_end - self._metrics_window_start
-        else:
-            elapsed_s = 0.0
-        metrics["elapsed_s"] = elapsed_s
-        # Reset for next window
+        metrics["gen_tps"] = gen_tps
+
+        # Reset accumulators (but keep rolling window)
         self._metrics_accum = {"output_tokens": 0, "prompt_tokens": 0, "calls": 0}
-        self._metrics_window_start = None
-        self._metrics_window_end = 0.0
-        # Compute gen_tps from wall-clock time
-        if elapsed_s > 0:
-            metrics["gen_tps"] = metrics["output_tokens"] / elapsed_s
-        else:
-            metrics["gen_tps"] = 0
+
         return metrics
 
 
@@ -293,17 +295,14 @@ class VLLMHandle:
         """Get aggregated metrics from all replicas and reset their counters."""
         results = await asyncio.gather(*[a.get_metrics.remote() for a in self._actors])
         # Aggregate across replicas
-        total = {"output_tokens": 0, "prompt_tokens": 0, "elapsed_s": 0.0, "calls": 0, "gen_tps": 0}
+        total = {"output_tokens": 0, "prompt_tokens": 0, "calls": 0, "gen_tps": 0}
         for m in results:
             total["output_tokens"] += m["output_tokens"]
             total["prompt_tokens"] += m["prompt_tokens"]
-            total["elapsed_s"] += m["elapsed_s"]
             total["calls"] += m["calls"]
             total["gen_tps"] += m["gen_tps"]
-        # Average gen_tps across replicas that had activity
-        active_replicas = sum(1 for m in results if m["calls"] > 0)
-        if active_replicas > 0:
-            total["gen_tps"] = total["gen_tps"] / active_replicas
+        # Sum gen_tps across replicas (each replica's rolling window average)
+        # No averaging needed - total throughput is the sum
         return total
 
 

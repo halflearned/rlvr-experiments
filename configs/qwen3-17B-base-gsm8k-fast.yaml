@@ -1,30 +1,31 @@
 run:
-  name: qwen3_0_6b_grpo_dev
+  name: qwen3_1_7b_grpo_fast
 
 model:
-  path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
 
 tokenizer:
-  pretrained_model_name_or_path: "Qwen/Qwen3-0.6B"
+  pretrained_model_name_or_path: "Qwen/Qwen3-1.7B-Base"
   use_fast: false
 
 training:
-  max_steps: 50
-  iterations_per_epoch: null  # null = run full epoch until data exhausted
-  sync_reference_every: 5
-  prompts_per_batch: 3  # number of prompts (will be multiplied by n completions)
-  max_staleness: 1
+  num_epochs: 1  # Full epoch over GSM8K
+  # Match working 0.6B/1.7B dummy config settings
+  prompts_per_batch: 3    # 3 prompts * 16 completions = 48 sequences
+  sync_reference_every: 5 # Use old naming like 0.6B dummy
+  max_staleness: 1        # Match 0.6B dummy (was 4, caused slowdown)
 
 verifier:
-  num_workers: 2
+  num_workers: 4  # More workers for parallel verification
+  # max_concurrent: 4
+  # timeout: 5
 
 loss:
   beta: 0.01
   eps: 0.2
 
 data:
-  dataset: dummy
-  num_samples: 2048
+  dataset: gsm8k
 
 data_iter:
   system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
@@ -34,24 +35,22 @@ sampling:
   temperature: 0.6
   top_p: 0.95
   top_k: 20
-  max_tokens: 512
-  n: 16
+  max_tokens: 512  # Match 0.6B dummy
+  n: 16  # 16 completions per prompt (match 0.6B dummy)
   logprobs: 0
 
-
 buffer:
-  max_reads: 1
+  max_reads: 1  # Match 0.6B dummy
 
 roles:
+  # TRAINER: 1 GPU, no parallelism (baseline test)
   - name: trainer
     kind: titan
     config:
-      # our titan model takes this additional keyword.
-      # if false then it doesn't create optimizers etc
       trainable: true
 
       profiling:
-        enable_profiling: true
+        enable_profiling: false
         save_traces_folder: "profile_trace"
         profile_freq: 100
 
@@ -60,11 +59,10 @@ roles:
         enable_tensorboard: false
         save_tb_folder: "tb"
 
-      # TODO: we should extract this from model local_path
       model:
         name: "qwen3"
-        flavor: "0.6B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+        flavor: "1.7B"
+        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
 
       optimizer:
         name: "AdamW"
@@ -72,27 +70,24 @@ roles:
         eps: 0.0001
 
       lr_scheduler:
-        warmup_steps: 30
+        warmup_steps: 50
 
       training:
-        seq_len: 2048
+        seq_len: 2048  # Match 0.6B dummy
         dtype: "bfloat16"
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
 
-      parallelism: 
+      parallelism:
         data_parallel_replicate_degree: 1
-        data_parallel_shard_degree: 1
+        data_parallel_shard_degree: 1      # No FSDP
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 1
+        tensor_parallel_degree: 1          # No TP
         context_parallel_degree: 1
-        # IMPORTANT: disable_loss_parallel must be true when computing custom losses
-        # with TP>1, otherwise logits are sharded on vocab and cross_entropy is wrong
-        # this is also what torchtitan does, I think.
         disable_loss_parallel: true
 
       checkpoint:
-        enable: true
+        enable: false  # Disable for speed
         folder: "checkpoint"
         initial_load_in_hf: true
         interval: 500
@@ -110,6 +105,8 @@ roles:
           - "model"
 
 
+  # REFERENCE: 1 GPU (no FSDP - avoids collective overhead for many small forward passes)
+  # 1.7B fits easily on a single A100 80GB
   - name: reference
     kind: titan
     config:
@@ -117,24 +114,24 @@ roles:
 
       model:
         name: "qwen3"
-        flavor: "0.6B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+        flavor: "1.7B"
+        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
 
       parallelism:
         data_parallel_replicate_degree: 1
-        data_parallel_shard_degree: 1
+        data_parallel_shard_degree: 1   # Single GPU - no FSDP overhead!
         fsdp_reshard_after_forward: "default"
         tensor_parallel_degree: 1
         context_parallel_degree: 1
 
       training:
-        seq_len: 2048
+        seq_len: 2048  # Match 0.6B dummy
         dtype: "bfloat16"
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
 
       checkpoint:
-        enable: true
+        enable: true  # Match 0.6B dummy
         folder: "checkpoint"
         initial_load_in_hf: true
         interval: 500
@@ -147,29 +144,30 @@ roles:
         selective_ac_option: op
 
       compile:
-        enable: true
+        enable: false  # Disable compile for reference - variable seq lens cause recompiles
         components:
           - "model"
 
 
+  # VLLM ROLLOUT: 1 GPU (match 0.6B dummy)
   - name: rollout
     kind: vllm
 
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
-      max_concurrent_per_replica: 4
-      max_num_seqs: 100
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 1024 
+      max_model_len: 1024     # Match 0.6B dummy
+      max_concurrent_per_replica: 8
+      max_num_seqs: 100       # Match 0.6B dummy
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 32768
-      enable_prefix_caching: true  
+      enable_prefix_caching: true
       enable_chunked_prefill: true
 
-      
+
 
 sync:
   chunk_mb: 100
@@ -179,4 +177,3 @@ sync:
       dst: reference
     - src: trainer
       dst: rollout
-    
