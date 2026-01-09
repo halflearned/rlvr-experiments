@@ -13,10 +13,11 @@ class TestDataBufferBasic:
         assert buffer.size() == 0
 
     def test_entry_dataclass(self):
-        entry = Entry(item="test", version=1, reads_remaining=2)
+        entry = Entry(item="test", version=1, reads_remaining=2, item_id="test_id")
         assert entry.item == "test"
         assert entry.version == 1
         assert entry.reads_remaining == 2
+        assert entry.item_id == "test_id"
 
 
 class TestDataBufferPutPop:
@@ -24,16 +25,16 @@ class TestDataBufferPutPop:
     async def test_put_increments_size(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("item1", version=0)
+        await buffer.put("item1", version=0, item_id="id1")
         assert buffer.size() == 1
 
-        await buffer.put("item2", version=0)
+        await buffer.put("item2", version=0, item_id="id2")
         assert buffer.size() == 2
 
     @pytest.mark.asyncio
     async def test_pop_decrements_size(self, ray_context):
         buffer = DataBuffer()
-        await buffer.put("item", version=0)
+        await buffer.put("item", version=0, item_id="id1")
 
         await buffer.pop()
         assert buffer.size() == 0
@@ -42,19 +43,35 @@ class TestDataBufferPutPop:
     async def test_fifo_order(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("first", version=0)
-        await buffer.put("second", version=0)
-        await buffer.put("third", version=0)
+        await buffer.put("first", version=0, item_id="id1")
+        await buffer.put("second", version=0, item_id="id2")
+        await buffer.put("third", version=0, item_id="id3")
 
-        assert await buffer.pop() == "first"
-        assert await buffer.pop() == "second"
-        assert await buffer.pop() == "third"
+        result1 = await buffer.pop()
+        assert result1[0] == "first"
+        assert result1[1] == "id1"
+        assert result1[2] == 0
+
+        result2 = await buffer.pop()
+        assert result2[0] == "second"
+
+        result3 = await buffer.pop()
+        assert result3[0] == "third"
+
+    @pytest.mark.asyncio
+    async def test_pop_returns_tuple(self, ray_context):
+        """pop() returns (item, item_id, version) tuple."""
+        buffer = DataBuffer()
+        await buffer.put("item", version=5, item_id="prompt_123")
+
+        result = await buffer.pop()
+        assert result == ("item", "prompt_123", 5)
 
     @pytest.mark.asyncio
     async def test_stats_tracking(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("item", version=0)
+        await buffer.put("item", version=0, item_id="id1")
         await buffer.pop()
 
         stats = buffer.get_stats()
@@ -62,53 +79,39 @@ class TestDataBufferPutPop:
         assert stats["popped"] == 1
 
 
-class TestDataBufferVersioning:
-    @pytest.mark.asyncio
-    async def test_discards_stale_entries(self, ray_context):
-        buffer = DataBuffer()
-
-        await buffer.put("old", version=0)
-        await buffer.put("new", version=1)
-
-        # Pop with min_version=1 should skip the old entry
-        result = await buffer.pop(min_version=1)
-        assert result == "new"
-
-        stats = buffer.get_stats()
-        assert stats["evicted_stale"] == 1
+class TestDataBufferVersionTracking:
+    """Buffer tracks versions but doesn't filter - consumer handles staleness."""
 
     @pytest.mark.asyncio
-    async def test_accepts_matching_version(self, ray_context):
+    async def test_returns_version_with_item(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("item", version=5)
+        await buffer.put("old", version=0, item_id="id1")
+        await buffer.put("new", version=5, item_id="id2")
 
-        result = await buffer.pop(min_version=5)
-        assert result == "item"
+        # Buffer returns all items with their version - consumer decides staleness
+        result1 = await buffer.pop()
+        assert result1 == ("old", "id1", 0)
+
+        result2 = await buffer.pop()
+        assert result2 == ("new", "id2", 5)
 
     @pytest.mark.asyncio
-    async def test_accepts_higher_version(self, ray_context):
+    async def test_by_version_stats(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("item", version=10)
+        await buffer.put("item1", version=0, item_id="id1")
+        await buffer.put("item2", version=0, item_id="id2")
+        await buffer.put("item3", version=1, item_id="id3")
 
-        result = await buffer.pop(min_version=5)
-        assert result == "item"
+        by_version = buffer.stats.get_by_version()
+        assert by_version[0] == 2
+        assert by_version[1] == 1
 
-    @pytest.mark.asyncio
-    async def test_multiple_stale_entries(self, ray_context):
-        buffer = DataBuffer()
-
-        await buffer.put("old1", version=0)
-        await buffer.put("old2", version=1)
-        await buffer.put("old3", version=2)
-        await buffer.put("new", version=5)
-
-        result = await buffer.pop(min_version=5)
-        assert result == "new"
-
-        stats = buffer.get_stats()
-        assert stats["evicted_stale"] == 3
+        # Pop one version-0 item
+        await buffer.pop()
+        by_version = buffer.stats.get_by_version()
+        assert by_version[0] == 1  # Decremented
 
 
 class TestDataBufferMaxReads:
@@ -116,79 +119,41 @@ class TestDataBufferMaxReads:
     async def test_single_read_removes_entry(self, ray_context):
         buffer = DataBuffer(max_reads=1)
 
-        await buffer.put("item", version=0)
+        await buffer.put("item", version=0, item_id="id1")
         await buffer.pop()
 
         assert buffer.size() == 0
-        stats = buffer.get_stats()
-        assert stats["evicted_exhausted"] == 1
 
     @pytest.mark.asyncio
     async def test_multi_read_keeps_entry(self, ray_context):
         buffer = DataBuffer(max_reads=3)
 
-        await buffer.put("item", version=0)
+        await buffer.put("item", version=0, item_id="id1")
 
         # First two reads should keep the entry
         result1 = await buffer.pop()
-        assert result1 == "item"
+        assert result1[0] == "item"
         assert buffer.size() == 1
 
         result2 = await buffer.pop()
-        assert result2 == "item"
+        assert result2[0] == "item"
         assert buffer.size() == 1
 
         # Third read should remove it
         result3 = await buffer.pop()
-        assert result3 == "item"
+        assert result3[0] == "item"
         assert buffer.size() == 0
 
     @pytest.mark.asyncio
     async def test_multi_read_same_item_returned(self, ray_context):
         buffer = DataBuffer(max_reads=2)
 
-        await buffer.put("item", version=0)
+        await buffer.put("item", version=0, item_id="id1")
 
         result1 = await buffer.pop()
         result2 = await buffer.pop()
 
-        assert result1 == result2 == "item"
-
-
-class TestDataBufferPopBatch:
-    @pytest.mark.asyncio
-    async def test_pop_batch_full(self, ray_context):
-        buffer = DataBuffer()
-
-        for i in range(5):
-            await buffer.put(f"item{i}", version=0)
-
-        batch = await buffer.pop_batch(3)
-        assert len(batch) == 3
-        assert batch == ["item0", "item1", "item2"]
-
-    @pytest.mark.asyncio
-    async def test_pop_batch_partial_with_timeout(self, ray_context):
-        buffer = DataBuffer()
-
-        await buffer.put("item1", version=0)
-        await buffer.put("item2", version=0)
-
-        # Request 5 items but only 2 available
-        batch = await buffer.pop_batch(5, timeout=0.1)
-        assert len(batch) == 2
-        assert batch == ["item1", "item2"]
-
-    @pytest.mark.asyncio
-    async def test_pop_batch_with_version(self, ray_context):
-        buffer = DataBuffer()
-
-        await buffer.put("old", version=0)
-        await buffer.put("new1", version=1)
-        await buffer.put("new2", version=1)
-
-        batch = await buffer.pop_batch(3, min_version=1, timeout=0.1)
-        assert batch == ["new1", "new2"]
+        assert result1[0] == result2[0] == "item"
 
 
 class TestDataBufferConcurrency:
@@ -198,7 +163,7 @@ class TestDataBufferConcurrency:
 
         async def put_items(start, count):
             for i in range(count):
-                await buffer.put(f"item{start + i}", version=0)
+                await buffer.put(f"item{start + i}", version=0, item_id=f"id{start + i}")
 
         await asyncio.gather(
             put_items(0, 10),
@@ -215,13 +180,13 @@ class TestDataBufferConcurrency:
 
         async def producer():
             for i in range(10):
-                await buffer.put(i, version=0)
+                await buffer.put(i, version=0, item_id=f"id{i}")
                 await asyncio.sleep(0.001)
 
         async def consumer():
             for _ in range(10):
-                item = await buffer.pop()
-                results.append(item)
+                result = await buffer.pop()
+                results.append(result[0])  # Extract item from tuple
 
         await asyncio.gather(producer(), consumer())
 
@@ -234,18 +199,19 @@ class TestDataBufferEpochHandling:
     async def test_mark_done_returns_none(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("item", version=0)
+        await buffer.put("item", version=0, item_id="id1")
         await buffer.mark_done()
 
-        assert await buffer.pop() == "item"
+        result = await buffer.pop()
+        assert result[0] == "item"
         assert await buffer.pop() is None  # Done signal
 
     @pytest.mark.asyncio
     async def test_reset_clears_buffer(self, ray_context):
         buffer = DataBuffer()
 
-        await buffer.put("item1", version=0)
-        await buffer.put("item2", version=0)
+        await buffer.put("item1", version=0, item_id="id1")
+        await buffer.put("item2", version=0, item_id="id2")
         await buffer.mark_done()
 
         buffer.reset()
@@ -256,16 +222,18 @@ class TestDataBufferEpochHandling:
         buffer = DataBuffer()
 
         # First epoch
-        await buffer.put("epoch1_item", version=0)
+        await buffer.put("epoch1_item", version=0, item_id="id1")
         await buffer.mark_done()
-        assert await buffer.pop() == "epoch1_item"
+        result = await buffer.pop()
+        assert result[0] == "epoch1_item"
         assert await buffer.pop() is None  # Done
 
         # Reset for next epoch
         buffer.reset()
 
         # Second epoch - should work normally
-        await buffer.put("epoch2_item", version=0)
+        await buffer.put("epoch2_item", version=1, item_id="id2")
         await buffer.mark_done()
-        assert await buffer.pop() == "epoch2_item"
+        result = await buffer.pop()
+        assert result[0] == "epoch2_item"
         assert await buffer.pop() is None  # Done

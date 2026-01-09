@@ -1,8 +1,7 @@
 """Versioned buffer for producer/consumer coordination."""
 
-import asyncio
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from ray.util.queue import Queue
@@ -13,14 +12,10 @@ T = TypeVar("T")
 
 
 class BufferStats:
-    """Lightweight stats tracking for buffer visualization.
+    """Lightweight stats tracking for buffer.
 
-    Tracks three item fates:
-    - used: Items fully consumed (all reads exhausted) - good
-    - wasted: Items evicted with all reads remaining (never used) - bad
-    - partial: Items evicted with some reads used - in between
-
-    Emits buffer events to tracer on every state change.
+    Buffer is now a simple FIFO - consumer handles staleness.
+    We just track put/pop counts and per-version distribution.
     """
 
     def __init__(self, get_size: callable):
@@ -28,11 +23,6 @@ class BufferStats:
         self.put = 0
         self.popped = 0
         self.by_version: dict[int, int] = defaultdict(int)
-        # Per-version fate tracking (cumulative)
-        self.used_by_version: dict[int, int] = defaultdict(int)
-        self.wasted_by_version: dict[int, int] = defaultdict(int)
-        self.partial_by_version: dict[int, int] = defaultdict(int)
-        self.filtered_by_version: dict[int, int] = defaultdict(int)
 
     def _emit(self) -> None:
         """Emit current state to tracer."""
@@ -41,7 +31,6 @@ class BufferStats:
             tracer.buffer(
                 size=self._get_size(),
                 by_version=self.get_by_version(),
-                fates=self.get_fates_by_version(),
             )
 
     def record_put(self, version: int) -> None:
@@ -52,61 +41,19 @@ class BufferStats:
 
     def record_pop(self, version: int, exhausted: bool) -> None:
         self.popped += 1
-        if exhausted:
-            # Item fully consumed - good!
-            if version >= 0:
-                self.used_by_version[version] += 1
-                self.by_version[version] = max(0, self.by_version[version] - 1)
-            self._emit()
-
-    def record_evict_stale(self, version: int, reads_remaining: int, max_reads: int) -> None:
-        """Record a stale eviction with fate categorization."""
-        if version >= 0:
-            if reads_remaining == max_reads:
-                # Never used at all - wasted
-                self.wasted_by_version[version] += 1
-            else:
-                # Partially used
-                self.partial_by_version[version] += 1
+        if exhausted and version >= 0:
             self.by_version[version] = max(0, self.by_version[version] - 1)
-        self._emit()
-
-    def record_filtered(self, version: int) -> None:
-        """Record a sample filtered due to zero-variance rewards."""
-        if version >= 0:
-            self.filtered_by_version[version] += 1
         self._emit()
 
     def get_by_version(self) -> dict[int, int]:
         """Return per-version counts (excludes zeros)."""
         return {k: v for k, v in self.by_version.items() if v > 0}
 
-    def get_fates_by_version(self) -> dict[str, dict[int, int]]:
-        """Return cumulative fate counts per version."""
-        return {
-            "used": {k: v for k, v in self.used_by_version.items() if v > 0},
-            "wasted": {k: v for k, v in self.wasted_by_version.items() if v > 0},
-            "partial": {k: v for k, v in self.partial_by_version.items() if v > 0},
-            "filtered": {k: v for k, v in self.filtered_by_version.items() if v > 0},
-        }
-
     def to_dict(self, current_size: int) -> dict:
-        fates = self.get_fates_by_version()
-        used = sum(fates["used"].values())
-        wasted = sum(fates["wasted"].values())
-        partial = sum(fates["partial"].values())
-        filtered = sum(fates["filtered"].values())
         return {
             "put": self.put,
             "popped": self.popped,
-            "used": used,
-            "wasted": wasted,
-            "partial": partial,
-            "filtered": filtered,
             "current_size": current_size,
-            # Legacy keys for backwards compatibility with tests
-            "evicted_exhausted": used,
-            "evicted_stale": wasted + partial,
         }
 
 
@@ -115,6 +62,7 @@ class Entry(Generic[T]):
     item: T
     version: int
     reads_remaining: int
+    item_id: str  # For tracking wasted items
 
 
 class _Done:
@@ -130,56 +78,38 @@ class DataBuffer(Generic[T]):
         self._max_reads = max_reads
         self.stats = BufferStats(get_size=self.size)
 
-    async def put(self, item: T, version: int) -> None:
-        entry = Entry(item=item, version=version, reads_remaining=self._max_reads)
+    async def put(self, item: T, version: int, item_id: str) -> None:
+        entry = Entry(item=item, version=version, reads_remaining=self._max_reads, item_id=item_id)
         await self._queue.put_async(entry)
         self.stats.record_put(version)
 
     async def mark_done(self) -> None:
         """Signal that no more items will be added."""
-        entry = Entry(item=_Done(), version=-1, reads_remaining=1)
+        entry = Entry(item=_Done(), version=-1, reads_remaining=1, item_id="__done__")
         await self._queue.put_async(entry)
 
-    async def pop(self, min_version: int | None = None) -> T | None:
-        """Pop one item. Returns None when done signal received.
+    async def pop(self) -> tuple[T, str, int] | None:
+        """Pop one item. Returns (item, item_id, version) tuple, or None when done.
 
-        Args:
-            min_version: Discard entries with version < min_version.
+        Consumer is responsible for staleness checks.
+
+        Returns:
+            Tuple of (item, item_id, version) or None if done signal received.
         """
-        while True:
-            entry: Entry[T] = await self._queue.get_async()
+        entry: Entry[T] = await self._queue.get_async()
 
-            # Check for done signal
-            if isinstance(entry.item, _Done):
-                return None
+        # Check for done signal
+        if isinstance(entry.item, _Done):
+            return None
 
-            # Evict stale entries (version >= 0 only)
-            if entry.version >= 0 and min_version is not None and entry.version < min_version:
-                self.stats.record_evict_stale(entry.version, entry.reads_remaining, self._max_reads)
-                continue
+        entry.reads_remaining -= 1
+        exhausted = entry.reads_remaining == 0
 
-            entry.reads_remaining -= 1
-            exhausted = entry.reads_remaining == 0
+        if not exhausted:
+            await self._queue.put_async(entry)
 
-            if not exhausted:
-                await self._queue.put_async(entry)
-
-            self.stats.record_pop(entry.version, exhausted)
-            return entry.item
-
-    async def pop_batch(self, batch_size: int, min_version: int | None = None, timeout: float | None = None) -> list[T]:
-        """Pop up to batch_size items. If timeout specified, returns partial batch on timeout."""
-        items = []
-        for _ in range(batch_size):
-            try:
-                if timeout is not None:
-                    item = await asyncio.wait_for(self.pop(min_version), timeout=timeout)
-                else:
-                    item = await self.pop(min_version)
-                items.append(item)
-            except asyncio.TimeoutError:
-                break
-        return items
+        self.stats.record_pop(entry.version, exhausted)
+        return (entry.item, entry.item_id, entry.version)
 
     def size(self) -> int:
         return self._queue.qsize()

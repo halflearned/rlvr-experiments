@@ -71,49 +71,80 @@ async def main():
     sp = {**plan.sampling, "logprobs": 0}
 
     # --- Producer: generate -> {verify, ref_logprobs} concurrently -> buffer ---
-    # Backpressure is handled by VLLMHandle via max_concurrent_per_replica config
     async def produce_epoch():
-        async def process_one(item):
-            with trace_span("generate"):
-                response = await rollout.generate_single(item["template"], **sp)
-            # Capture version AFTER generation - this reflects which weights were used
-            version = rollout.model_version
+        async def process_one(item) -> str:
+            """Process one item. Returns prompt_id for tracking."""
+            prompt_id = item["problem"].get("prompt_id", "unknown")
+            try:
+                with trace_span("generate"):
+                    response = await rollout.generate_single(item["template"], **sp)
+                # Capture version AFTER generation - this reflects which weights were used
+                version = rollout.model_version
 
-            completions = [out.text for out in response.outputs]
-            rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
+                completions = [out.text for out in response.outputs]
+                rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
 
-            # Run verify and ref_logprobs concurrently (with tracing)
-            async def traced_verify():
-                with trace_span("verify", args={"version": version}):
-                    return await verifier.verify_completions(item["problem"], completions, version=version)
+                # Run verify and ref_logprobs concurrently (with tracing)
+                async def traced_verify():
+                    with trace_span("verify", args={"version": version}):
+                        return await verifier.verify_completions(item["problem"], completions, version=version)
 
-            async def traced_ref_logprobs():
-                with trace_span("ref_logprobs", args={"version": version}):
-                    return await reference.compute_logprobs(
-                        rollout_sample.input_ids, rollout_sample.completion_ids,
-                        torch.tensor([rollout_sample.prompt_len] * rollout_sample.input_ids.size(0)))
+                async def traced_ref_logprobs():
+                    with trace_span("ref_logprobs", args={"version": version}):
+                        return await reference.compute_logprobs(
+                            rollout_sample.input_ids, rollout_sample.completion_ids,
+                            torch.tensor([rollout_sample.prompt_len] * rollout_sample.input_ids.size(0)))
 
-            rewards, ref_logprobs = await asyncio.gather(traced_verify(), traced_ref_logprobs())
+                rewards, ref_logprobs = await asyncio.gather(traced_verify(), traced_ref_logprobs())
 
-            # Filter
-            if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
-                tracer.counter("skipped", {"zero_variance_samples": 1})
-                return
-            if rollout_sample.input_ids.shape[1] > max_seq_len:
-                tracer.counter("skipped", {"seq_too_long": 1})
-                return
-            if rollout_sample.completion_ids.shape[1] > max_completion_len:
-                tracer.counter("skipped", {"completion_too_long": 1})
-                return
+                # Filter - mark consumed even if filtered (don't retry)
+                if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
+                    tracer.counter("skipped", {"zero_variance_samples": 1})
+                    data_iter.mark_consumed(prompt_id)
+                    return prompt_id
+                if rollout_sample.input_ids.shape[1] > max_seq_len:
+                    tracer.counter("skipped", {"seq_too_long": 1})
+                    data_iter.mark_consumed(prompt_id)
+                    return prompt_id
+                if rollout_sample.completion_ids.shape[1] > max_completion_len:
+                    tracer.counter("skipped", {"completion_too_long": 1})
+                    data_iter.mark_consumed(prompt_id)
+                    return prompt_id
 
-            sample = TrainSample(rollout_sample, rewards, ref_logprobs)
-            await buffer.put(sample, version)
-            log_rollout(prompt_id=item["problem"].get("prompt_id", "unknown"), prompt=item["prompt"],
-                        completions=completions, rewards=rewards, version=version)
+                sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id)
+                await buffer.put(sample, version, item_id=prompt_id)
+                log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
+                            completions=completions, rewards=rewards, version=version)
+                return prompt_id
+            except Exception as e:
+                # On error, mark pending for retry
+                data_iter.mark_pending(prompt_id)
+                raise
 
-        async with asyncio.TaskGroup() as tg:
-            for item in data_iter:
-                tg.create_task(process_one(item))
+        # Spawn all tasks - vLLM's LoadAwareRouter handles backpressure
+        tasks: set[asyncio.Task] = set()
+        for item in data_iter:
+            tasks.add(asyncio.create_task(process_one(item)))
+
+        # Wait for all to complete, spawning retries as needed
+        # (consumer may mark items pending due to staleness)
+        while not data_iter.all_consumed():
+            # Spawn any newly pending items (from consumer staleness check or errors)
+            while True:
+                item = data_iter.next_pending()
+                if item is None:
+                    break
+                tasks.add(asyncio.create_task(process_one(item)))
+
+            if not tasks:
+                # All tasks done but not all consumed - items in buffer waiting
+                await asyncio.sleep(0.01)
+                continue
+
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.exception():
+                    print(f"[producer] task failed: {task.exception()}")
 
         await buffer.mark_done()
 
@@ -125,13 +156,26 @@ async def main():
             if producer_task.done() and producer_task.exception():
                 raise producer_task.exception()
 
-            min_version = max(0, rollout.model_version - max_staleness)
-            item = await buffer.pop(min_version)
-            if item is None:
+            result = await buffer.pop()
+            if result is None:
                 return
-            samples.append(item)
+            sample, item_id, version = result
+
+            # Consumer handles staleness check
+            min_version = rollout.model_version - max_staleness
+            if version < min_version:
+                # Too stale - mark for retry
+                data_iter.mark_pending(item_id)
+                tracer.counter("retry", {"stale_evicted": 1})
+                continue
+
+            samples.append(sample)
+
             if len(samples) >= prompts_per_batch:
                 batch, stats = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
+                # Mark all samples in this batch as consumed
+                for s in samples:
+                    data_iter.mark_consumed(s.item_id)
                 yield batch, stats
                 samples = []
 
@@ -151,45 +195,6 @@ async def main():
             tracer.counter("vllm.metrics", vllm_metrics)
             cumulative_output_tokens += vllm_metrics.get("output_tokens", 0)
         print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
-
-    # --- Warmup phase ---
-    # Run a few forward/backward passes to trigger torch.compile compilation
-    # before starting the actual training loop. This prevents the first real
-    # steps from being abnormally slow.
-    warmup_steps = plan.training.get("warmup_steps", 3)
-    if warmup_steps > 0:
-        print(f"\n=== Warmup phase ({warmup_steps} steps) ===")
-        data_iter.new_epoch(seed=999)  # Use fixed seed for warmup
-        warmup_producer = asyncio.create_task(produce_epoch())
-
-        warmup_count = 0
-        async for batch, stats in batches(warmup_producer):
-            warmup_count += 1
-            print(f"[warmup] step {warmup_count}/{warmup_steps}")
-
-            # Forward/backward (triggers compilation)
-            with trace_span("warmup_forward_backward"):
-                loss, _ = await trainer.forward_backward(
-                    loss_fn, batch.input_ids,
-                    loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, batch.rewards),
-                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens})
-
-            # Optimizer step (triggers optimizer compilation if any)
-            with trace_span("warmup_optim_step"):
-                await trainer.optim_step()
-
-            if warmup_count >= warmup_steps:
-                break
-
-        # Cancel warmup producer and clean up
-        warmup_producer.cancel()
-        await asyncio.gather(warmup_producer, return_exceptions=True)
-        buffer.reset()
-
-        # Clear metrics accumulated during warmup
-        await rollout.get_metrics()  # Drain vLLM metrics
-        tracer.counter("warmup_complete", {"warmup_steps": warmup_count})
-        print(f"=== Warmup complete, starting training ===\n")
 
     # --- Main loop ---
     step = 0
@@ -239,6 +244,7 @@ async def main():
 
         producer.cancel()
         await asyncio.gather(producer, return_exceptions=True)
+
         buffer.reset()  # Clear buffer for next epoch
         tracer.counter("epoch_complete", {"epoch": epoch, "steps_in_epoch": step})
 

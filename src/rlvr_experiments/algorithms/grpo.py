@@ -1,21 +1,9 @@
-"""Rollout types and epoch runner."""
+"""Rollout types and batch utilities."""
 
-import asyncio
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 import torch.nn.functional as F
-
-from ..rollout_logger import log_rollout
-from ..tracer import get_tracer, trace_span
-
-
-# Sentinel to signal producer completion
-class _Done:
-    pass
-
-DONE = _Done()
 
 
 @dataclass
@@ -76,6 +64,7 @@ class TrainSample:
     rollout: RolloutSample
     rewards: list[float]
     ref_logprobs: torch.Tensor
+    item_id: str  # prompt_id for status tracking
 
 
 @dataclass
@@ -194,123 +183,3 @@ def make_batch(
     return batch, stats
 
 
-async def grpo_samples(
-    rollout,
-    data_iter,
-    buffer,
-    *,
-    verifier_fn: Callable,
-    pad_token_id: int,
-    prompts_per_batch: int,
-    sampling_params: dict | None = None,
-    num_epochs: int | None = None,
-    max_steps: int | None = None,
-    max_seq_len: int | None = None,
-    max_completion_len: int | None = None,
-    max_staleness: int = 0,
-):
-    """Run generation/verification and yield training batches. """
-    if num_epochs is None and max_steps is None:
-        raise ValueError("Must specify either num_epochs or max_steps")
-    if num_epochs is not None and max_steps is not None:
-        raise ValueError("Cannot specify both num_epochs and max_steps")
-
-    tracer = get_tracer()
-    sp = {**(sampling_params or {}), "logprobs": 0}
-    num_producers = rollout.num_replicas
-
-    global_step = 0
-    epoch = 0
-
-    while True:
-        # Check termination conditions
-        if num_epochs is not None and epoch >= num_epochs:
-            break
-        if max_steps is not None and global_step >= max_steps:
-            break
-
-        # Start new epoch
-        data_iter.new_epoch(seed=epoch)
-        tracer.counter("epoch", {"epoch": epoch})
-
-        done_count = 0
-
-        async def produce():
-            """Generate completions, compute rewards, push to buffer."""
-            async def verify_and_push(response, problem, prompt, version):
-                completions = [out.text for out in response.outputs]
-                rewards = await verifier_fn(problem, completions, version=version)
-                sample = RolloutSample.from_vllm(response, pad_token_id, rewards, version)
-                await buffer.put(sample, version)
-                log_rollout(
-                    prompt_id=problem.get("prompt_id", "unknown"),
-                    prompt=prompt,
-                    completions=completions,
-                    rewards=rewards,
-                    version=version,
-                )
-
-            async with asyncio.TaskGroup() as tg:
-                for item in data_iter:
-                    version = rollout.model_version
-                    response = await rollout.generate_single(item["template"], **sp)
-                    tg.create_task(verify_and_push(response, item["problem"], item["prompt"], version))
-
-            await buffer.put(DONE, -1)  # version=-1 means never evict
-
-        producers = [asyncio.create_task(produce()) for _ in range(num_producers)]
-
-        samples = []
-        try:
-            while done_count < num_producers:
-                # Check if any producer crashed
-                for p in producers:
-                    if p.done() and p.exception():
-                        raise p.exception()
-
-                min_version = max(0, rollout.model_version - max_staleness)
-                item = await buffer.pop(min_version)
-
-                if isinstance(item, _Done):
-                    done_count += 1
-                    continue
-
-                # Skip zero-variance samples (all completions have same reward)
-                # This ensures batch_size means "valid prompts", not "total prompts"
-                if torch.tensor(item.rewards, dtype=torch.float32).std() < 1e-6:
-                    tracer.counter("skipped", {"zero_variance_samples": 1})
-                    buffer.stats.record_filtered(item.version)
-                    continue
-
-                # Skip samples that exceed fixed lengths
-                seq_len = item.input_ids.shape[1]
-                comp_len = item.completion_ids.shape[1]
-                if max_seq_len is not None and seq_len > max_seq_len:
-                    print(f"[run] WARNING: dropping sample with seq_len={seq_len} > max_seq_len={max_seq_len}")
-                    tracer.counter("skipped", {"seq_too_long": 1})
-                    continue
-                if max_completion_len is not None and comp_len > max_completion_len:
-                    print(f"[run] WARNING: dropping sample with completion_len={comp_len} > max_completion_len={max_completion_len}")
-                    tracer.counter("skipped", {"completion_too_long": 1})
-                    continue
-
-                samples.append(item)
-
-                if len(samples) >= prompts_per_batch:
-                    batch, batch_stats = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
-                    batch_stats.trace(tracer)
-
-                    samples = []
-                    global_step += 1
-                    yield global_step, epoch, batch
-
-                    if max_steps is not None and global_step >= max_steps:
-                        return
-
-        finally:
-            for t in producers:
-                t.cancel()
-            await asyncio.gather(*producers, return_exceptions=True)
-
-        tracer.counter("epoch_complete", {"epoch": epoch, "steps_in_epoch": global_step})
-        epoch += 1

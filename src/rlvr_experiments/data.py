@@ -136,11 +136,16 @@ def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
 
 class DataIterator:
     """
-    Iterator over a Ray Dataset with epoch support.
+    Iterator over a Ray Dataset with status tracking for each prompt.
     Applies chat template to prompts for direct use with vLLM.
 
     All datasets should have columns "prompt" and "problem", where
     "problem" is a dict containing whatever the verifier needs.
+
+    Tracks status per prompt_id: "pending" | "in_flight" | "consumed"
+    - pending: not yet processed or needs retry
+    - in_flight: currently being processed
+    - consumed: successfully trained on
 
     Usage:
         data_iter = DataIterator(ds, tokenizer=tokenizer)
@@ -148,9 +153,14 @@ class DataIterator:
         for epoch in range(num_epochs):
             data_iter.new_epoch(seed=epoch)
 
-            for item in data_iter:
-                template = item["template"]  # ready for vLLM
-                problem = item["problem"]    # dict for verifier
+            while not data_iter.all_consumed():
+                item = data_iter.next_pending()
+                if item is None:
+                    # No pending items, wait for in-flight to complete
+                    continue
+                # process item...
+                # on success: data_iter.mark_consumed(prompt_id)
+                # on waste: data_iter.mark_pending(prompt_id)
     """
 
     def __init__(
@@ -164,9 +174,23 @@ class DataIterator:
         self.tokenizer = tokenizer
         self.assistant_prefix = assistant_prefix
         self.system_prompt = system_prompt
-        self._iter: Iterator | None = None
-        self._buffer: list = []
-        self._buffer_idx: int = 0
+        # Build index: prompt_id -> row data
+        self._prompt_id_index: dict[str, dict] = {}
+        self._build_index()
+        # Status tracking: prompt_id -> "pending" | "in_flight" | "consumed"
+        self._status: dict[str, str] = {}
+        # Ordered list of prompt_ids for iteration
+        self._prompt_ids: list[str] = list(self._prompt_id_index.keys())
+
+    def _build_index(self) -> None:
+        """Build prompt_id -> row index."""
+        for batch in self.ds.iter_batches(batch_size=256):
+            prompts = list(batch["prompt"])
+            problems = list(batch["problem"])
+            for p, prob in zip(prompts, problems):
+                prompt_id = prob.get("prompt_id")
+                if prompt_id:
+                    self._prompt_id_index[prompt_id] = {"prompt": p, "problem": prob}
 
     def _apply_template(self, prompt: str) -> str:
         """Apply chat template to a single prompt."""
@@ -182,49 +206,67 @@ class DataIterator:
         ) + self.assistant_prefix
         return content
 
+    def _get_item(self, prompt_id: str) -> dict:
+        """Get formatted item for a prompt_id."""
+        row = self._prompt_id_index[prompt_id]
+        return {
+            "template": self._apply_template(row["prompt"]),
+            "prompt": row["prompt"],
+            "problem": row["problem"],
+        }
+
+    # --- Status management ---
+
     def new_epoch(self, seed: int | None = None) -> None:
-        """Shuffle and reset iterator for a new epoch."""
-        # shuffled = self.ds.random_shuffle(seed=seed)
-        shuffled = self.ds  # TEMPORARY
-        self._iter = iter(shuffled.iter_batches(batch_size=64))
-        self._buffer = []
-        self._buffer_idx = 0
+        """Reset all statuses to pending for a new epoch."""
+        # TODO: shuffle _prompt_ids with seed
+        for pid in self._prompt_ids:
+            self._status[pid] = "pending"
+
+    def mark_in_flight(self, prompt_id: str) -> None:
+        """Mark a prompt as currently being processed."""
+        self._status[prompt_id] = "in_flight"
+
+    def mark_consumed(self, prompt_id: str) -> None:
+        """Mark a prompt as successfully consumed (trained on)."""
+        self._status[prompt_id] = "consumed"
+
+    def mark_pending(self, prompt_id: str) -> None:
+        """Mark a prompt as pending (for retry)."""
+        self._status[prompt_id] = "pending"
+
+    def all_consumed(self) -> bool:
+        """Check if all prompts have been consumed."""
+        return all(s == "consumed" for s in self._status.values())
+
+    def pending_count(self) -> int:
+        """Count of pending prompts."""
+        return sum(1 for s in self._status.values() if s == "pending")
+
+    def in_flight_count(self) -> int:
+        """Count of in-flight prompts."""
+        return sum(1 for s in self._status.values() if s == "in_flight")
+
+    def consumed_count(self) -> int:
+        """Count of consumed prompts."""
+        return sum(1 for s in self._status.values() if s == "consumed")
+
+    def next_pending(self) -> dict | None:
+        """Get next pending item and mark it in_flight. Returns None if no pending."""
+        for pid in self._prompt_ids:
+            if self._status.get(pid) == "pending":
+                self._status[pid] = "in_flight"
+                return self._get_item(pid)
+        return None
+
+    # --- Legacy iteration interface (for compatibility) ---
 
     def __iter__(self):
         return self
 
     def __next__(self) -> dict:
-        """
-        Get next item, or raise StopIteration if epoch exhausted.
-
-        Returns dict with:
-            - "template": chat-formatted string ready for vLLM
-            - "prompt": original prompt string (for logging)
-            - "problem": problem dict for the verifier
-        """
-        if self._iter is None:
-            raise RuntimeError("Call new_epoch() before iterating")
-
-        # If buffer exhausted, fetch next batch
-        if self._buffer_idx >= len(self._buffer):
-            try:
-                batch = next(self._iter)
-            except StopIteration:
-                raise StopIteration
-
-            # Convert batch to list of items
-            prompts = list(batch["prompt"])
-            problems = list(batch["problem"])
-            self._buffer = [
-                {
-                    "template": self._apply_template(p),
-                    "prompt": p,
-                    "problem": prob,
-                }
-                for p, prob in zip(prompts, problems)
-            ]
-            self._buffer_idx = 0
-
-        item = self._buffer[self._buffer_idx]
-        self._buffer_idx += 1
+        """Legacy interface: get next pending item or raise StopIteration."""
+        item = self.next_pending()
+        if item is None:
+            raise StopIteration
         return item
