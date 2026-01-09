@@ -1,5 +1,5 @@
 run:
-  name: qwen3_1_7b_base_grpo_gsm8k
+  name: qwen3_1_7b_grpo_debug
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,12 +9,11 @@ tokenizer:
   use_fast: false
 
 training:
-  max_steps: 200
+  max_steps: 50
   iterations_per_epoch: null  # null = run full epoch until data exhausted
   sync_reference_every: 5
-  prompts_per_batch: 4  # number of prompts (will be multiplied by n completions)
+  prompts_per_batch: 3  # number of prompts (will be multiplied by n completions)
   max_staleness: 1
-  warmup_steps: 0  # torch.compile warmup steps (0 to disable)
 
 verifier:
   num_workers: 2
@@ -24,7 +23,8 @@ loss:
   eps: 0.2
 
 data:
-  dataset: gsm8k
+  dataset: dummy
+  num_samples: 2048
 
 data_iter:
   system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
@@ -46,6 +46,8 @@ roles:
   - name: trainer
     kind: titan
     config:
+      # our titan model takes this additional keyword.
+      # if false then it doesn't create optimizers etc
       trainable: true
 
       profiling:
@@ -58,6 +60,7 @@ roles:
         enable_tensorboard: false
         save_tb_folder: "tb"
 
+      # TODO: we should extract this from model local_path
       model:
         name: "qwen3"
         flavor: "1.7B"
@@ -81,8 +84,11 @@ roles:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 2  # TP=2 for larger batch with 1.7B
+        tensor_parallel_degree: 1
         context_parallel_degree: 1
+        # IMPORTANT: disable_loss_parallel must be true when computing custom losses
+        # with TP>1, otherwise logits are sharded on vocab and cross_entropy is wrong
+        # this is also what torchtitan does, I think.
         disable_loss_parallel: true
 
       checkpoint:
@@ -95,7 +101,7 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: full
+        mode: selective
         selective_ac_option: "op"
 
       compile:
@@ -151,10 +157,10 @@ roles:
 
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
-      max_concurrent_per_replica: 8
+      max_concurrent_per_replica: 100
       max_num_seqs: 100
       tensor_parallel_size: 1
-      data_parallel_size: 2
+      data_parallel_size: 1
       max_model_len: 1024
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"

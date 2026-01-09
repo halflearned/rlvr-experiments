@@ -242,10 +242,14 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         return logits
 
     def optim_step(self) -> float:
+        import time
+        import torch
         logger.debug("TitanModel.optim_step: starting...")
         if not self.trainable:
             raise RuntimeError("Model is non-trainable; cannot call optim_step().")
 
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
         logger.debug("TitanModel.optim_step: clipping grads...")
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -254,19 +258,32 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
             pp_mesh=None,  # PP disabled
             ep_enabled=self.parallel_dims.ep_enabled,
         )
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
         logger.debug(f"TitanModel.optim_step: grad_norm={grad_norm.item():.4f}")
 
         # Ensure async checkpoint staging (if any) is done
         self.checkpointer.maybe_wait_for_staging()
+        t2 = time.perf_counter()
 
         logger.debug("TitanModel.optim_step: stepping optimizer...")
         self.optimizers.step()
+        torch.cuda.synchronize()
+        t3 = time.perf_counter()
         logger.debug("TitanModel.optim_step: stepping lr_scheduler...")
         self.lr_schedulers.step()
+        t4 = time.perf_counter()
         logger.debug("TitanModel.optim_step: zeroing grads...")
         self.optimizers.zero_grad()
+        torch.cuda.synchronize()
+        t5 = time.perf_counter()
 
         self.step += 1
+
+        print(f"[PROFILE optim_step] clip_grad={1000*(t1-t0):.0f}ms, wait_ckpt={1000*(t2-t1):.0f}ms, "
+              f"optim.step={1000*(t3-t2):.0f}ms, lr.step={1000*(t4-t3):.0f}ms, zero_grad={1000*(t5-t4):.0f}ms, "
+              f"TOTAL={1000*(t5-t0):.0f}ms", flush=True)
+
         logger.debug(f"TitanModel.optim_step: done, step={self.step}")
         return grad_norm.item()
 

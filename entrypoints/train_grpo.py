@@ -2,6 +2,11 @@
 
 import asyncio
 import argparse
+import os
+
+# Enable expandable segments to reduce CUDA memory fragmentation
+# This helps prevent OOM errors that occur after a few training steps
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 from transformers import AutoTokenizer
@@ -66,6 +71,7 @@ async def main():
     sp = {**plan.sampling, "logprobs": 0}
 
     # --- Producer: generate -> {verify, ref_logprobs} concurrently -> buffer ---
+    # Backpressure is handled by VLLMHandle via max_concurrent_per_replica config
     async def produce_epoch():
         async def process_one(item):
             with trace_span("generate"):
@@ -146,6 +152,45 @@ async def main():
             cumulative_output_tokens += vllm_metrics.get("output_tokens", 0)
         print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
 
+    # --- Warmup phase ---
+    # Run a few forward/backward passes to trigger torch.compile compilation
+    # before starting the actual training loop. This prevents the first real
+    # steps from being abnormally slow.
+    warmup_steps = plan.training.get("warmup_steps", 3)
+    if warmup_steps > 0:
+        print(f"\n=== Warmup phase ({warmup_steps} steps) ===")
+        data_iter.new_epoch(seed=999)  # Use fixed seed for warmup
+        warmup_producer = asyncio.create_task(produce_epoch())
+
+        warmup_count = 0
+        async for batch, stats in batches(warmup_producer):
+            warmup_count += 1
+            print(f"[warmup] step {warmup_count}/{warmup_steps}")
+
+            # Forward/backward (triggers compilation)
+            with trace_span("warmup_forward_backward"):
+                loss, _ = await trainer.forward_backward(
+                    loss_fn, batch.input_ids,
+                    loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, batch.rewards),
+                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens})
+
+            # Optimizer step (triggers optimizer compilation if any)
+            with trace_span("warmup_optim_step"):
+                await trainer.optim_step()
+
+            if warmup_count >= warmup_steps:
+                break
+
+        # Cancel warmup producer and clean up
+        warmup_producer.cancel()
+        await asyncio.gather(warmup_producer, return_exceptions=True)
+        buffer.reset()
+
+        # Clear metrics accumulated during warmup
+        await rollout.get_metrics()  # Drain vLLM metrics
+        tracer.counter("warmup_complete", {"warmup_steps": warmup_count})
+        print(f"=== Warmup complete, starting training ===\n")
+
     # --- Main loop ---
     step = 0
     for epoch in range(num_epochs or 999999):
@@ -158,17 +203,24 @@ async def main():
 
         async for batch, stats in batches(producer):
             step += 1
+            t_step_start = time.perf_counter()
 
             # Forward/backward
+            t0 = time.perf_counter()
             with trace_span("forward_backward"):
                 loss, grpo_debug = await trainer.forward_backward(
                     loss_fn, batch.input_ids,
                     loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, batch.rewards),
                     loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens})
+            t1 = time.perf_counter()
 
             # Optimizer step
+            t2 = time.perf_counter()
             with trace_span("optim_step"):
                 grad_norm = await trainer.optim_step()
+            t3 = time.perf_counter()
+
+            print(f"[TIMING] forward_backward={1000*(t1-t0):.0f}ms, gap={1000*(t2-t1):.0f}ms, optim_step={1000*(t3-t2):.0f}ms")
 
             # Sync weights
             if step % sync_ref_every == 0:
