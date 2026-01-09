@@ -403,22 +403,41 @@ class DistributedModelHandle:
 
     Dispatches method calls to all actor ranks in parallel (required for collectives),
     returns rank 0's result.
+
+    Tracks in-flight calls for coordination with weight sync operations.
     """
 
     def __init__(self, actors: List, name: str = "model"):
         self.actors = actors
         self.name = name
+        self._in_flight = 0
+        self._in_flight_zero = asyncio.Event()
+        self._in_flight_zero.set()  # Initially no in-flight requests
 
     def __getattr__(self, attr):
         if attr.startswith("_"):
             raise AttributeError(attr)
 
         async def proxy(*args, **kwargs):
-            refs = [a.call_method.remote(attr, *args, **kwargs) for a in self.actors]
-            results = await asyncio.gather(*[self._resolve(r) for r in refs])
-            return results[0]
+            # Track in-flight calls
+            self._in_flight += 1
+            if self._in_flight == 1:
+                self._in_flight_zero.clear()
+
+            try:
+                refs = [a.call_method.remote(attr, *args, **kwargs) for a in self.actors]
+                results = await asyncio.gather(*[self._resolve(r) for r in refs])
+                return results[0]
+            finally:
+                self._in_flight -= 1
+                if self._in_flight == 0:
+                    self._in_flight_zero.set()
 
         return proxy
+
+    async def wait_idle(self) -> None:
+        """Wait until all in-flight calls complete."""
+        await self._in_flight_zero.wait()
 
     async def _resolve(self, ref):
         loop = asyncio.get_event_loop()

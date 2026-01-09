@@ -29,7 +29,6 @@ data:
   #num_samples: 64
 
 data_iter:
-  batch_size: 10
   system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
   assistant_prefix: "Let's think step by step."
 

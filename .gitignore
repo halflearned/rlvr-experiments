@@ -20,7 +20,7 @@ artifacts
 .unison.*
 debug.ipynb
 import_percepio_model.py
-test_*.py
+# test_*.py  # Removed - tests should be tracked
 config/sm_pipelines/examples/
 configs/jobs/
 data/

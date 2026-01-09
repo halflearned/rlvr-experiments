@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import threading
 from typing import Iterator
 import ray.data
 from datasets import load_dataset
@@ -138,41 +136,37 @@ def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
 
 class DataIterator:
     """
-    Iterator over a Ray Dataset with epoch and batch support.
+    Iterator over a Ray Dataset with epoch support.
     Applies chat template to prompts for direct use with vLLM.
 
     All datasets should have columns "prompt" and "problem", where
     "problem" is a dict containing whatever the verifier needs.
 
     Usage:
-        data_iter = DataIterator(ds, batch_size=16, tokenizer=tokenizer)
+        data_iter = DataIterator(ds, tokenizer=tokenizer)
 
         for epoch in range(num_epochs):
             data_iter.new_epoch(seed=epoch)
 
-            while True:
-                batch = await data_iter.next_batch()
-                if batch is None:
-                    break  # epoch exhausted
-                templates = batch["templates"]  # ready for vLLM
-                problems = batch["problems"]    # list of dicts for verifier
+            for item in data_iter:
+                template = item["template"]  # ready for vLLM
+                problem = item["problem"]    # dict for verifier
     """
 
     def __init__(
         self,
         ds: ray.data.Dataset,
-        batch_size: int,
         tokenizer,
         system_prompt: str = "",
         assistant_prefix: str = "",
     ):
         self.ds = ds
-        self.batch_size = batch_size
         self.tokenizer = tokenizer
         self.assistant_prefix = assistant_prefix
         self.system_prompt = system_prompt
         self._iter: Iterator | None = None
-        self._lock = threading.Lock()  # Protects _iter from concurrent access
+        self._buffer: list = []
+        self._buffer_idx: int = 0
 
     def _apply_template(self, prompt: str) -> str:
         """Apply chat template to a single prompt."""
@@ -191,38 +185,46 @@ class DataIterator:
     def new_epoch(self, seed: int | None = None) -> None:
         """Shuffle and reset iterator for a new epoch."""
         # shuffled = self.ds.random_shuffle(seed=seed)
-        shuffled = self.ds # TEMPORARY
-        self._iter = iter(shuffled.iter_batches(batch_size=self.batch_size))
+        shuffled = self.ds  # TEMPORARY
+        self._iter = iter(shuffled.iter_batches(batch_size=64))
+        self._buffer = []
+        self._buffer_idx = 0
 
-    async def next_batch(self) -> dict | None:
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> dict:
         """
-        Get next batch, or None if epoch exhausted.
+        Get next item, or raise StopIteration if epoch exhausted.
 
         Returns dict with:
-            - "templates": list of chat-formatted strings ready for vLLM
-            - "prompts": list of original prompt strings (for logging)
-            - "problems": list of problem dicts for the verifier
+            - "template": chat-formatted string ready for vLLM
+            - "prompt": original prompt string (for logging)
+            - "problem": problem dict for the verifier
         """
         if self._iter is None:
-            raise RuntimeError("Call new_epoch() before next_batch()")
+            raise RuntimeError("Call new_epoch() before iterating")
 
-        def fetch():
-            with self._lock:
-                try:
-                    return next(self._iter)  # type: ignore
-                except StopIteration:
-                    return None
+        # If buffer exhausted, fetch next batch
+        if self._buffer_idx >= len(self._buffer):
+            try:
+                batch = next(self._iter)
+            except StopIteration:
+                raise StopIteration
 
-        # Run blocking iterator in thread to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        batch = await loop.run_in_executor(None, fetch)
+            # Convert batch to list of items
+            prompts = list(batch["prompt"])
+            problems = list(batch["problem"])
+            self._buffer = [
+                {
+                    "template": self._apply_template(p),
+                    "prompt": p,
+                    "problem": prob,
+                }
+                for p, prob in zip(prompts, problems)
+            ]
+            self._buffer_idx = 0
 
-        if batch is None:
-            return None
-
-        prompts = list(batch["prompt"])
-        return {
-            "templates": [self._apply_template(p) for p in prompts],
-            "prompts": prompts,
-            "problems": list(batch["problem"]),
-        }
+        item = self._buffer[self._buffer_idx]
+        self._buffer_idx += 1
+        return item

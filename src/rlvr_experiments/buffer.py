@@ -117,6 +117,11 @@ class Entry(Generic[T]):
     reads_remaining: int
 
 
+class _Done:
+    """Sentinel to signal producer completion."""
+    pass
+
+
 class DataBuffer(Generic[T]):
     """Generic versioned queue with replay support and per-version tracking."""
 
@@ -130,21 +135,27 @@ class DataBuffer(Generic[T]):
         await self._queue.put_async(entry)
         self.stats.record_put(version)
 
-    async def pop(self, min_version: int | None = None) -> T:
-        """Pop one item. Discards stale entries, re-queues if reads remain.
+    async def mark_done(self) -> None:
+        """Signal that no more items will be added."""
+        entry = Entry(item=_Done(), version=-1, reads_remaining=1)
+        await self._queue.put_async(entry)
+
+    async def pop(self, min_version: int | None = None) -> T | None:
+        """Pop one item. Returns None when done signal received.
 
         Args:
             min_version: Discard entries with version < min_version.
-                         Entries with version < 0 are never evicted (control signals).
         """
-        evicted_this_call = 0
         while True:
             entry: Entry[T] = await self._queue.get_async()
 
-            # Negative version = never evict (control signals)
+            # Check for done signal
+            if isinstance(entry.item, _Done):
+                return None
+
+            # Evict stale entries (version >= 0 only)
             if entry.version >= 0 and min_version is not None and entry.version < min_version:
                 self.stats.record_evict_stale(entry.version, entry.reads_remaining, self._max_reads)
-                evicted_this_call += 1
                 continue
 
             entry.reads_remaining -= 1
@@ -172,6 +183,16 @@ class DataBuffer(Generic[T]):
 
     def size(self) -> int:
         return self._queue.qsize()
+
+    def reset(self) -> None:
+        """Reset buffer for a new epoch. Clears any remaining items."""
+        # Drain any remaining items (shouldn't be many if epoch ended cleanly)
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except Exception:
+                break
+        # Stats carry over between epochs (cumulative)
 
     def get_stats(self) -> dict:
         return self.stats.to_dict(self.size())

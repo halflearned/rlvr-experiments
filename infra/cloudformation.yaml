@@ -24,8 +24,8 @@ Parameters:
 
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
-    Description: Ubuntu 22.04 AMI (or use Deep Learning AMI ID directly)
+    Default: /aws/service/deeplearning/ami/x86_64/oss-nvidia-driver-gpu-pytorch-2.5-ubuntu-22.04/latest/ami-id
+    Description: AWS Deep Learning AMI with PyTorch (includes NVIDIA drivers, CUDA, EFA)
 
   ExistingVpcId:
     Type: String
@@ -56,6 +56,15 @@ Metadata:
 Conditions:
   CreateVpc: !Equals [!Ref ExistingVpcId, '']
   UseExistingVpc: !Not [!Equals [!Ref ExistingVpcId, '']]
+  # Instance count conditions
+  Launch1: !Not [!Equals [!Ref InstanceCount, 0]]
+  Launch2: !Or [!Equals [!Ref InstanceCount, 2], !Equals [!Ref InstanceCount, 3], !Equals [!Ref InstanceCount, 4], !Equals [!Ref InstanceCount, 5], !Equals [!Ref InstanceCount, 6], !Equals [!Ref InstanceCount, 7], !Equals [!Ref InstanceCount, 8]]
+  Launch3: !Or [!Equals [!Ref InstanceCount, 3], !Equals [!Ref InstanceCount, 4], !Equals [!Ref InstanceCount, 5], !Equals [!Ref InstanceCount, 6], !Equals [!Ref InstanceCount, 7], !Equals [!Ref InstanceCount, 8]]
+  Launch4: !Or [!Equals [!Ref InstanceCount, 4], !Equals [!Ref InstanceCount, 5], !Equals [!Ref InstanceCount, 6], !Equals [!Ref InstanceCount, 7], !Equals [!Ref InstanceCount, 8]]
+  Launch5: !Or [!Equals [!Ref InstanceCount, 5], !Equals [!Ref InstanceCount, 6], !Equals [!Ref InstanceCount, 7], !Equals [!Ref InstanceCount, 8]]
+  Launch6: !Or [!Equals [!Ref InstanceCount, 6], !Equals [!Ref InstanceCount, 7], !Equals [!Ref InstanceCount, 8]]
+  Launch7: !Or [!Equals [!Ref InstanceCount, 7], !Equals [!Ref InstanceCount, 8]]
+  Launch8: !Equals [!Ref InstanceCount, 8]
 
 Resources:
   # ============ NETWORKING (only created if no existing VPC) ============
@@ -291,23 +300,102 @@ Resources:
             echo "=== RLVR setup complete ==="
 
   # ============ INSTANCES ============
-  # Using AutoScaling Group to manage multiple instances
-  AutoScalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
+  # Direct EC2 instances (no auto-recovery - if they die, they die)
+  Instance1:
+    Type: AWS::EC2::Instance
+    Condition: Launch1
+    DependsOn: EFSMountTarget
     Properties:
-      AutoScalingGroupName: !Sub '${AWS::StackName}-asg'
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
-      MinSize: !Ref InstanceCount
-      MaxSize: !Ref InstanceCount
-      DesiredCapacity: !Ref InstanceCount
-      VPCZoneIdentifier:
-        - !If [CreateVpc, !Ref PublicSubnet, !Ref ExistingSubnetId]
       Tags:
         - Key: Name
-          Value: !Sub '${AWS::StackName}-node'
-          PropagateAtLaunch: true
+          Value: !Sub '${AWS::StackName}-node-1'
+
+  Instance2:
+    Type: AWS::EC2::Instance
+    Condition: Launch2
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-2'
+
+  Instance3:
+    Type: AWS::EC2::Instance
+    Condition: Launch3
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-3'
+
+  Instance4:
+    Type: AWS::EC2::Instance
+    Condition: Launch4
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-4'
+
+  Instance5:
+    Type: AWS::EC2::Instance
+    Condition: Launch5
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-5'
+
+  Instance6:
+    Type: AWS::EC2::Instance
+    Condition: Launch6
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-6'
+
+  Instance7:
+    Type: AWS::EC2::Instance
+    Condition: Launch7
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-7'
+
+  Instance8:
+    Type: AWS::EC2::Instance
+    Condition: Launch8
+    DependsOn: EFSMountTarget
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-node-8'
 
 Outputs:
   VPCID:

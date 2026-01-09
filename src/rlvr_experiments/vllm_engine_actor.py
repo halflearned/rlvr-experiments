@@ -17,25 +17,35 @@ from .tracer import trace_span, get_tracer
 
 logger = logging.getLogger(__name__)
 
+
+class AbortedError(Exception):
+    """Raised when a generation request was aborted due to weight sync."""
+    pass
+
+
 # Metrics tracking for vLLM generation
 _VLLM_METRICS_ENABLED = True
 
 WORKER_CLS = "rlvr_experiments.vllm_engine_actor.WeightSyncVLLMWorker"
 
 
-@ray.remote(num_gpus=0)
+@ray.remote(num_gpus=0, max_concurrency=100)
 class VLLMEngineRank:
     def __init__(self, engine_kwargs: dict[str, Any], replica_id: int = 0) -> None:
         self.replica_id = replica_id
         engine_kwargs = dict(engine_kwargs)
         engine_kwargs.pop("data_parallel_size", None)
+        engine_kwargs.pop("max_concurrent_per_replica", None)
         engine_args = AsyncEngineArgs(
             worker_cls=WORKER_CLS, distributed_executor_backend="ray", **engine_kwargs
         )
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         self._active_requests: set[str] = set()
         # Accumulated metrics for periodic collection
-        self._metrics_accum = {"output_tokens": 0, "prompt_tokens": 0, "elapsed_s": 0.0, "calls": 0}
+        # Note: We track wall-clock time via start/end timestamps, not summed durations
+        self._metrics_accum = {"output_tokens": 0, "prompt_tokens": 0, "calls": 0}
+        self._metrics_window_start: float | None = None  # When first call in window started
+        self._metrics_window_end: float = 0.0  # When last call in window ended
 
     def ready(self) -> bool:
         return True
@@ -58,6 +68,9 @@ class VLLMEngineRank:
 
     async def generate(self, prompts: Sequence[str], **sampling_params):
         t0 = time.perf_counter()
+        # Track window start (first call since last metrics collection)
+        if self._metrics_window_start is None:
+            self._metrics_window_start = t0
 
         sp = SamplingParams(**sampling_params)
         if sp.output_kind is None:
@@ -75,9 +88,10 @@ class VLLMEngineRank:
                 self._active_requests.discard(req_id)
 
         results = await asyncio.gather(*[gen_single(p) for p in prompts])
+        t1 = time.perf_counter()
 
         if _VLLM_METRICS_ENABLED:
-            elapsed = time.perf_counter() - t0
+            elapsed = t1 - t0
             # Count total output tokens across all completions
             total_output_tokens = sum(
                 len(out.token_ids)
@@ -100,11 +114,11 @@ class VLLMEngineRank:
                 flush=True
             )
 
-            # Accumulate for periodic collection
+            # Accumulate for periodic collection (wall-clock via timestamps)
             self._metrics_accum["output_tokens"] += total_output_tokens
             self._metrics_accum["prompt_tokens"] += total_prompt_tokens
-            self._metrics_accum["elapsed_s"] += elapsed
             self._metrics_accum["calls"] += 1
+            self._metrics_window_end = t1  # Update end of window
 
         return results
 
@@ -121,21 +135,61 @@ class VLLMEngineRank:
     def get_metrics(self) -> dict:
         """Get accumulated metrics and reset counters."""
         metrics = dict(self._metrics_accum)
-        self._metrics_accum = {"output_tokens": 0, "prompt_tokens": 0, "elapsed_s": 0.0, "calls": 0}
-        # Compute gen_tps from accumulated data
-        if metrics["elapsed_s"] > 0:
-            metrics["gen_tps"] = metrics["output_tokens"] / metrics["elapsed_s"]
+        # Calculate wall-clock elapsed time from window timestamps
+        if self._metrics_window_start is not None and self._metrics_window_end > self._metrics_window_start:
+            elapsed_s = self._metrics_window_end - self._metrics_window_start
+        else:
+            elapsed_s = 0.0
+        metrics["elapsed_s"] = elapsed_s
+        # Reset for next window
+        self._metrics_accum = {"output_tokens": 0, "prompt_tokens": 0, "calls": 0}
+        self._metrics_window_start = None
+        self._metrics_window_end = 0.0
+        # Compute gen_tps from wall-clock time
+        if elapsed_s > 0:
+            metrics["gen_tps"] = metrics["output_tokens"] / elapsed_s
         else:
             metrics["gen_tps"] = 0
         return metrics
 
 
+class LoadAwareRouter:
+    """Route prompts to replicas based on current load."""
+
+    def __init__(self, num_replicas: int, max_concurrent_per_replica: int = 64):
+        self._in_flight = [0] * num_replicas
+        self._capacity = max_concurrent_per_replica
+        self._not_full = asyncio.Condition()
+
+    async def acquire_slot(self) -> int:
+        """Get the index of the least-loaded replica and acquire a slot."""
+        async with self._not_full:
+            # Wait until at least one replica has capacity
+            while all(c >= self._capacity for c in self._in_flight):
+                await self._not_full.wait()
+
+            # Find replica with lowest in-flight count
+            best_idx = min(range(len(self._in_flight)), key=lambda i: self._in_flight[i])
+            self._in_flight[best_idx] += 1
+            return best_idx
+
+    async def release_slot(self, replica_idx: int) -> None:
+        """Release a slot on the given replica."""
+        async with self._not_full:
+            self._in_flight[replica_idx] -= 1
+            self._not_full.notify_all()
+
+    def get_load(self) -> list[int]:
+        """Get current in-flight counts (for metrics)."""
+        return list(self._in_flight)
+
+
 class VLLMHandle:
     """Handle for one or more vLLM instances (data parallel replicas)."""
 
-    def __init__(self, actors: list, name: str = "vllm"):
+    def __init__(self, actors: list, name: str = "vllm", max_concurrent_per_replica: int = 8):
         self._actors = actors
-        self._current_replica = 0
+        self._router = LoadAwareRouter(len(actors), max_concurrent_per_replica)
         self._in_flight = 0
         self._in_flight_zero = asyncio.Event()
         self._in_flight_zero.set()  # Initially no in-flight requests
@@ -178,27 +232,58 @@ class VLLMHandle:
         """Resume accepting generation requests after sync."""
         self._paused.set()  # Open the gate
 
-    async def generate(self, prompts, **sampling_params):
-        # Wait if paused (will block until resume() is called)
-        if not self._paused.is_set():
-            await self._paused.wait()
+    async def generate_single(self, prompt: str, **sampling_params):
+        """Generate for a single prompt with load-aware routing.
 
-        # Track in-flight requests
-        self._in_flight += 1
-        if self._in_flight == 1:
-            self._in_flight_zero.clear()
+        Routes the prompt to the replica with the fewest in-flight requests,
+        enabling better GPU utilization when completion times vary.
 
-        try:
-            replica_idx = self._current_replica % len(self._actors)
-            actor = self._actors[replica_idx]
-            self._current_replica += 1
+        If the request is aborted due to weight sync, automatically retries
+        after sync completes. Callers don't need to handle AbortedError.
+        """
+        while True:
+            # Wait if paused
+            if not self._paused.is_set():
+                await self._paused.wait()
 
-            with trace_span("vllm.generate", args={"num_prompts": len(prompts), "replica": replica_idx}):
-                return await actor.generate.remote(prompts, **sampling_params)
-        finally:
-            self._in_flight -= 1
-            if self._in_flight == 0:
-                self._in_flight_zero.set()
+            # Acquire slot first (this is where backpressure happens)
+            replica_idx = await self._router.acquire_slot()
+
+            # Now track in-flight (only after we have a slot)
+            self._in_flight += 1
+            if self._in_flight == 1:
+                self._in_flight_zero.clear()
+
+            try:
+                # Check if we got paused while waiting for slot
+                if not self._paused.is_set():
+                    # Release and wait for resume, then retry
+                    continue
+
+                actor = self._actors[replica_idx]
+                try:
+                    with trace_span("vllm.generate_single", args={"replica": replica_idx}):
+                        result = await actor.generate.remote([prompt], **sampling_params)
+                    # Check if result was aborted (empty outputs)
+                    if result and result[0].outputs and len(result[0].outputs) > 0:
+                        # Check if any output has tokens (not all aborted)
+                        if any(len(out.token_ids) > 0 for out in result[0].outputs):
+                            return result[0]
+                    # Result was aborted or empty - retry
+                    logger.info(f"[generate_single] got empty/aborted result, retrying")
+                    continue
+                except (asyncio.CancelledError, ray.exceptions.RayTaskError):
+                    # Request was aborted due to weight sync - will retry after finally block
+                    continue
+            finally:
+                await self._router.release_slot(replica_idx)
+                self._in_flight -= 1
+                if self._in_flight == 0:
+                    self._in_flight_zero.set()
+
+    def get_replica_loads(self) -> list[int]:
+        """Get current in-flight count per replica (for metrics/debugging)."""
+        return self._router.get_load()
 
     async def log_stats(self):
         """Trigger vLLM's built-in stats logging on all replicas."""

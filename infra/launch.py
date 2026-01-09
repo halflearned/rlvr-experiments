@@ -108,17 +108,6 @@ def cmd_set_head(args):
     set_head(args.ip)
     print(f"Head node set to {args.ip}")
 
-def cmd_scale(args):
-    asg_name = f"{args.stack_name}-asg"
-    print(f"Scaling to {args.instances} instances...")
-    run(f"aws autoscaling set-desired-capacity --auto-scaling-group-name {asg_name} --desired-capacity {args.instances}", capture=False)
-    print(f"Waiting for {args.instances} instances...")
-    for _ in range(30):
-        instances = get_instances(args.stack_name)
-        if len(instances) >= args.instances:
-            break
-        time.sleep(10)
-    cmd_status(args)
 
 def cmd_delete(args):
     print(f"Deleting stack '{args.stack_name}'...")
@@ -141,10 +130,7 @@ if __name__ == "__main__":
     h = sub.add_parser("set-head", help="Set head node IP")
     h.add_argument("ip", help="Private IP of head node")
 
-    s = sub.add_parser("scale", help="Scale cluster to N instances")
-    s.add_argument("-n", "--instances", type=int, required=True)
-
     sub.add_parser("delete", help="Delete cluster")
 
     args = p.parse_args()
-    {"create": cmd_create, "status": cmd_status, "set-head": cmd_set_head, "scale": cmd_scale, "delete": cmd_delete}[args.cmd](args)
+    {"create": cmd_create, "status": cmd_status, "set-head": cmd_set_head, "delete": cmd_delete}[args.cmd](args)

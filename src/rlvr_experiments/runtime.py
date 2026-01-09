@@ -265,7 +265,8 @@ class Runtime:
             await loop.run_in_executor(None, ray.get, ready_refs)
             print(f"[runtime] all {len(actors)} vllm replicas ready for role={name}")
 
-            self.roles[name] = VLLMHandle(actors, name=name)
+            max_concurrent = role.config.get("max_concurrent_per_replica", 8)
+            self.roles[name] = VLLMHandle(actors, name=name, max_concurrent_per_replica=max_concurrent)
             return
 
         raise ValueError(f"Unknown role kind: {role.kind}")

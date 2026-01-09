@@ -604,9 +604,10 @@ class HeartbeatViz {
                     currentVersion++;
                     this.syncEvents.push({ ts, version: currentVersion });
                 }
-                // Track vLLM generation spans
-                if (event.name === 'vllm.generate') {
-                    this.vllmSpans.push({ replica: event.replica, ts: event.ts, dur: event.dur || 0 });
+                // Track vLLM generation spans (prefer vllm.generate_single which has replica info)
+                if (event.name === 'vllm.generate_single' || event.name === 'vllm.generate' ||
+                    (event.name === 'generate' && event.replica !== undefined)) {
+                    this.vllmSpans.push({ replica: event.replica || 0, ts: event.ts, dur: event.dur || 0 });
                 }
                 // Track trainer spans
                 if (event.name === 'forward_backward') {
@@ -890,18 +891,45 @@ class HeartbeatViz {
         const duration = this.maxTs - startTs;
         if (duration <= 0) return { vllm: 0, trainer: 0, vllmPerReplica: {}, ddpDegree: 1, startTs };
 
-        // vLLM: sum of all generation time across replicas / (duration * num_replicas)
+        // Helper: compute "covered time" (union of potentially overlapping intervals)
+        const computeCoveredTime = (spans) => {
+            if (!spans.length) return 0;
+            // Sort by start time
+            const sorted = [...spans].sort((a, b) => a.ts - b.ts);
+            let covered = 0;
+            let currentEnd = -Infinity;
+            for (const s of sorted) {
+                const spanStart = s.ts;
+                const spanEnd = s.ts + s.dur;
+                if (spanStart >= currentEnd) {
+                    // No overlap, add the full span
+                    covered += s.dur;
+                    currentEnd = spanEnd;
+                } else if (spanEnd > currentEnd) {
+                    // Overlaps but extends past current end
+                    covered += spanEnd - currentEnd;
+                    currentEnd = spanEnd;
+                }
+                // else: fully contained in current interval, contributes nothing
+            }
+            return covered;
+        };
+
+        // vLLM: compute covered time per replica, then average
         const replicas = new Set(this.vllmSpans.map(s => s.replica));
         const numVllmReplicas = replicas.size || 1;
-        const vllmTotalTime = this.vllmSpans.reduce((sum, s) => sum + s.dur, 0);
-        const vllmUtil = (vllmTotalTime / (duration * numVllmReplicas)) * 100;
 
-        // Per-replica utilization
+        // Per-replica utilization (using covered time, not sum)
         const vllmPerReplica = {};
+        let totalCoveredTime = 0;
         for (const r of replicas) {
-            const replicaTime = this.vllmSpans.filter(s => s.replica === r).reduce((sum, s) => sum + s.dur, 0);
-            vllmPerReplica[r] = (replicaTime / duration) * 100;
+            const replicaSpans = this.vllmSpans.filter(s => s.replica === r);
+            const coveredTime = computeCoveredTime(replicaSpans);
+            vllmPerReplica[r] = (coveredTime / duration) * 100;
+            totalCoveredTime += coveredTime;
         }
+        // Average utilization across replicas
+        const vllmUtil = (totalCoveredTime / (duration * numVllmReplicas)) * 100;
 
         // Detect DDP degree by checking for overlapping trainer spans
         // If spans overlap, we have multiple replicas running in parallel
@@ -1114,11 +1142,19 @@ class HeartbeatViz {
         const lanes = [];
 
         // vLLM lanes (dynamic count, max 8)
+        // Use vllm.generate_single which has replica info, or vllm.generate/generate if they have replica
         const numVllm = Math.min(8, Math.max(1, this.numVllmReplicas));
+        const isVllmSpan = (e) => {
+            if (e.name === 'vllm.generate_single') return true;
+            if (e.name === 'vllm.generate') return true;
+            // Only include 'generate' if it has replica info (otherwise it's the outer wrapper)
+            if (e.name === 'generate' && e.replica !== undefined) return true;
+            return false;
+        };
         for (let i = 0; i < numVllm; i++) {
             lanes.push({
                 name: numVllm === 1 ? 'vLLM' : `vLLM ${i}`,
-                filter: e => e.type === 'span' && e.name === 'vllm.generate' && e.replica === i
+                filter: e => e.type === 'span' && isVllmSpan(e) && (e.replica || 0) === i
             });
         }
 
@@ -1163,11 +1199,14 @@ class HeartbeatViz {
         // Draw events
         const colors = {
             'vllm.generate': '#3fb950',
+            'vllm.generate_single': '#3fb950',
+            'generate': '#3fb950',
             'forward_backward': '#58a6ff',
             'ref_logprobs': '#a371f7',
             'sync.trainer_to_vllm': '#f85149',
             'sync.trainer_to_reference': '#f0883e',
             'sync.waiting_for_vllm_pause': '#f8514966',
+            'sync.waiting_for_dst_idle': '#f0883e66',
             'sync.titan_to_vllm': '#f85149',
             'sync.titan_to_titan': '#f0883e',
             'verify': '#39d4e0'  // Cyan for verifier

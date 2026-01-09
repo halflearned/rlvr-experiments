@@ -53,24 +53,28 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
         return await loop.run_in_executor(None, ray.get, ref)
 
     # Prepare source actors (cache HF state dict)
-    await asyncio.gather(*[resolve(a.prepare_sync_state.remote()) for a in src.actors])
+    with trace_span("sync.prepare_src"):
+        await asyncio.gather(*[resolve(a.prepare_sync_state.remote()) for a in src.actors])
 
     # Prepare destination actors if they support it (Titan only)
     if dst_is_titan:
-        await asyncio.gather(*[resolve(a.prepare_recv_state.remote()) for a in dst_actors])
+        with trace_span("sync.prepare_dst"):
+            await asyncio.gather(*[resolve(a.prepare_recv_state.remote()) for a in dst_actors])
 
     try:
         max_chunk_elems = _chunk_elems_from_mb(chunk_mb, dtype_str)
         chunks = await resolve(src.actors[0].build_chunk_plan.remote(max_chunk_elems=max_chunk_elems))
 
-        for chunk in chunks:
-            src_futs = [resolve(a.broadcast_chunk.remote(channel, chunk, dtype_str, src_rank)) for a in src.actors]
-            dst_futs = [resolve(a.recv_chunk.remote(channel, chunk, dtype_str, src_rank)) for a in dst_actors]
-            await asyncio.gather(*src_futs, *dst_futs)
+        with trace_span("sync.nccl_broadcast", args={"num_chunks": len(chunks)}):
+            for chunk in chunks:
+                src_futs = [resolve(a.broadcast_chunk.remote(channel, chunk, dtype_str, src_rank)) for a in src.actors]
+                dst_futs = [resolve(a.recv_chunk.remote(channel, chunk, dtype_str, src_rank)) for a in dst_actors]
+                await asyncio.gather(*src_futs, *dst_futs)
     finally:
-        await asyncio.gather(*[resolve(a.clear_sync_state.remote()) for a in src.actors])
-        if dst_is_titan:
-            await asyncio.gather(*[resolve(a.clear_recv_state.remote()) for a in dst_actors])
+        with trace_span("sync.cleanup"):
+            await asyncio.gather(*[resolve(a.clear_sync_state.remote()) for a in src.actors])
+            if dst_is_titan:
+                await asyncio.gather(*[resolve(a.clear_recv_state.remote()) for a in dst_actors])
 
     logger.info(label)
 
@@ -103,7 +107,14 @@ async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype
 
 @traced("sync.trainer_to_reference")
 async def sync_titan_to_titan(src, dst, chunk_mb=100, src_rank=0, wire_dtype="bfloat16"):
-    """Sync weights from src Titan model to dst Titan model."""
+    """Sync weights from src Titan model to dst Titan model.
+
+    Waits for any in-flight calls on dst to complete before syncing.
+    """
+    # Wait for in-flight calls on destination model to complete
+    with trace_span("sync.waiting_for_dst_idle"):
+        await dst.wait_idle()
+
     channel = f"{src.name}_to_{dst.name}"
     with trace_span("sync.titan_to_titan"):
         await _sync_chunks(src, dst.actors, channel, chunk_mb, wire_dtype, src_rank,

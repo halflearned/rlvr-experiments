@@ -27,7 +27,6 @@ data:
   num_samples: 2048
 
 data_iter:
-  batch_size: 10
   system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
   assistant_prefix: "Let's think step by step."
 
@@ -158,15 +157,15 @@ roles:
 
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-0.6B"
+      max_concurrent_per_replica: 100
+      max_num_seqs: 100
       tensor_parallel_size: 1
       data_parallel_size: 1
       max_model_len: 1024 
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
-      logprobs_mode: "raw_logprobs"  # TODO: is this the right thing?....
-      max_num_seqs: 100
+      logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 32768
-      # Speed optimizations
       enable_prefix_caching: true  
       enable_chunked_prefill: true
 
