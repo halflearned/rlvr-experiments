@@ -50,17 +50,25 @@ def compute_logprobs(
             )
 
         if prompt_lens is not None:
-            # Per-sample slicing based on prompt length
+            # Per-sample slicing based on prompt length using advanced indexing
             # logits[:, prompt_len-1 : prompt_len-1+target_len] predicts completion tokens
             batch_size = logits.size(0)
-            sliced_list = []
-            for i in range(batch_size):
-                plen = prompt_lens[i].item()
-                # logits[i, plen-1] predicts token at position plen (first completion token)
-                start = plen - 1
-                end = start + target_len
-                sliced_list.append(scaled_logits[i, start:end, :])
-            sliced_logits = torch.stack(sliced_list, dim=0)
+            seq_len = logits.size(1)
+            vocab_size = logits.size(2)
+
+            # Ensure prompt_lens is on same device as logits
+            prompt_lens = prompt_lens.to(logits.device)
+
+            # Build indices: for each sample i, we want positions [prompt_len[i]-1, ..., prompt_len[i]-1+target_len-1]
+            # Shape: [batch, target_len]
+            offsets = torch.arange(target_len, device=logits.device).unsqueeze(0)  # [1, T]
+            starts = (prompt_lens - 1).unsqueeze(1)  # [B, 1]
+            indices = starts + offsets  # [B, T]
+
+            # Use gather to extract the slices
+            # Expand indices to match logits shape [B, T, V]
+            indices_expanded = indices.unsqueeze(-1).expand(-1, -1, vocab_size)  # [B, T, V]
+            sliced_logits = scaled_logits.gather(1, indices_expanded)  # [B, T, V]
         else:
             # Legacy: assume completion is at the end (no trailing padding)
             sliced_logits = scaled_logits[:, -target_len - 1 : -1, :]

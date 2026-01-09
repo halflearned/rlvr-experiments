@@ -105,7 +105,7 @@ roles:
         selective_ac_option: "op"
 
       compile:
-        enable: false
+        enable: true
         components:
           - "model"
 
@@ -147,7 +147,7 @@ roles:
         selective_ac_option: op
 
       compile:
-        enable: false
+        enable: true
         components:
           - "model"
 
