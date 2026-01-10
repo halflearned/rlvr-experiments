@@ -65,7 +65,7 @@ class TrainSample:
     rewards: list[float]
     ref_logprobs: torch.Tensor
     item_id: str  # prompt_id for status tracking
-    version: int  # model version when generated
+    generated_at_step: int  # trainer step when weights were synced to vLLM
 
 
 @dataclass
@@ -144,6 +144,19 @@ class BatchStats:
         })
 
 
+def _bucket_size(size: int, buckets: list[int]) -> int:
+    """Round up size to nearest bucket for torch.compile cache efficiency."""
+    for b in buckets:
+        if size <= b:
+            return b
+    return buckets[-1]  # Clamp to largest bucket
+
+
+# Default buckets for sequence and completion lengths
+SEQ_LEN_BUCKETS = [256, 384, 512, 640, 768, 896, 1024]
+COMPLETION_LEN_BUCKETS = [128, 256, 384, 512]
+
+
 def make_batch(
     samples: list[TrainSample],
     pad_token_id: int,
@@ -157,11 +170,39 @@ def make_batch(
 
     rollouts = [s.rollout for s in samples]
 
-    # Determine padded lengths
+    # Compute natural lengths from data
     natural_max_seq = max(r.input_ids.shape[1] for r in rollouts)
     natural_max_comp = max(r.completion_ids.shape[1] for r in rollouts)
-    padded_seq_len = max_seq_len or natural_max_seq
-    padded_completion_len = max_completion_len or natural_max_comp
+    max_prompt_len = max(r.prompt_len for r in rollouts)
+
+    # Bucket completion length for torch.compile cache efficiency
+    # Use a few fixed buckets to limit recompilations
+    COMPLETION_BUCKETS = [128, 256, 384, 512]
+    padded_completion_len = natural_max_comp
+    for bucket in COMPLETION_BUCKETS:
+        if natural_max_comp <= bucket:
+            padded_completion_len = bucket
+            break
+    # Clamp to config max if provided
+    if max_completion_len:
+        padded_completion_len = min(padded_completion_len, max_completion_len)
+
+    # Sequence length must be >= max_prompt_len + padded_completion_len for gather to work
+    # (compute_logprobs gathers positions [prompt_len-1, prompt_len+completion_len-2])
+    min_seq_len_needed = max_prompt_len + padded_completion_len
+
+    # Bucket sequence length
+    SEQ_BUCKETS = [256, 384, 512, 640, 768, 896, 1024]
+    padded_seq_len = min_seq_len_needed
+    for bucket in SEQ_BUCKETS:
+        if min_seq_len_needed <= bucket:
+            padded_seq_len = bucket
+            break
+    else:
+        padded_seq_len = SEQ_BUCKETS[-1]  # Use largest if needed
+    # Clamp to config max if provided
+    if max_seq_len:
+        padded_seq_len = min(padded_seq_len, max_seq_len)
 
     # Build prompt_lens
     prompt_lens_list = [r.prompt_len for r in rollouts for _ in range(r.input_ids.size(0))]
@@ -171,11 +212,11 @@ def make_batch(
     ref_logprobs = pad_cat([s.ref_logprobs for s in samples], fixed_len=padded_completion_len) if has_ref else None
 
     batch = Batch(
-        input_ids=pad_cat([r.input_ids for r in rollouts], pad_value=pad_token_id, fixed_len=max_seq_len),
-        completion_ids=pad_cat([r.completion_ids for r in rollouts], pad_value=pad_token_id, fixed_len=max_completion_len),
-        logprobs=pad_cat([r.logprobs for r in rollouts], fixed_len=max_completion_len),
+        input_ids=pad_cat([r.input_ids for r in rollouts], pad_value=pad_token_id, fixed_len=padded_seq_len),
+        completion_ids=pad_cat([r.completion_ids for r in rollouts], pad_value=pad_token_id, fixed_len=padded_completion_len),
+        logprobs=pad_cat([r.logprobs for r in rollouts], fixed_len=padded_completion_len),
         rewards=torch.cat([torch.tensor(s.rewards, dtype=torch.float32) for s in samples]),
-        mask=pad_cat([(r.completion_ids != pad_token_id).float() for r in rollouts], fixed_len=max_completion_len),
+        mask=pad_cat([(r.completion_ids != pad_token_id).float() for r in rollouts], fixed_len=padded_completion_len),
         prompt_lens=torch.tensor(prompt_lens_list, dtype=torch.long),
         ref_logprobs=ref_logprobs,
     )

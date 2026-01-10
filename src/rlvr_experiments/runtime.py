@@ -188,7 +188,7 @@ class Runtime:
     def _find_node_with_free_gpus(self, min_gpus: int) -> str | None:
         """
         Find a node with at least min_gpus available GPUs.
-        Prefers non-head nodes since Titan roles typically claim head node GPUs first.
+        Prefers head node to pack GPUs together and minimize cross-node communication.
         """
         head_ip = self.host  # Head node IP
         candidates = []
@@ -200,11 +200,11 @@ class Runtime:
             resources = node.get("Resources", {})
             total_gpu = resources.get("GPU", 0)
             if total_gpu >= min_gpus:
-                # Prefer non-head nodes
+                # Prefer head node to pack GPUs together
                 is_head = (node_ip == head_ip)
-                candidates.append((is_head, node_ip))
+                candidates.append((not is_head, node_ip))  # False sorts before True
 
-        # Sort so non-head nodes come first
+        # Sort so head node comes first
         candidates.sort(key=lambda x: x[0])
 
         if candidates:
