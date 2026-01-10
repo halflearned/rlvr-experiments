@@ -112,8 +112,10 @@ async def sync_titan_to_titan(src, dst, chunk_mb=100, src_rank=0, wire_dtype="bf
     Waits for any in-flight calls on dst to complete before syncing.
     """
     # Wait for in-flight calls on destination model to complete
+    print(f"[sync_titan_to_titan] Waiting for {dst.name} to be idle (in_flight={dst._in_flight})")
     with trace_span("sync.waiting_for_dst_idle"):
         await dst.wait_idle()
+    print(f"[sync_titan_to_titan] {dst.name} is idle, starting sync")
 
     channel = f"{src.name}_to_{dst.name}"
     with trace_span("sync.titan_to_titan"):

@@ -315,8 +315,14 @@ class TitanModelRank:
         input_ids: torch.Tensor,
         loss_args: tuple = (),
         loss_kwargs: dict | None = None,
+        scale_loss: float = 1.0,
     ) -> tuple[float, dict | None]:
-        """Forward pass, compute loss, and backward pass. Returns (loss, debug_metrics)."""
+        """Forward pass, compute loss, and backward pass. Returns (loss, debug_metrics).
+
+        Args:
+            scale_loss: Scale factor for loss before backward. Use 1/accumulation_steps
+                       for gradient accumulation so gradients average correctly.
+        """
         import time
 
         # Shard batch by DP replicate rank
@@ -365,7 +371,9 @@ class TitanModelRank:
                 torch.cuda.synchronize()
                 t3 = time.perf_counter()
 
-            loss.backward()
+            # Scale loss for gradient accumulation
+            scaled_loss = loss * scale_loss if scale_loss != 1.0 else loss
+            scaled_loss.backward()
 
         if _PROFILE_TITAN:
             torch.cuda.synchronize()
@@ -437,7 +445,10 @@ class DistributedModelHandle:
 
     async def wait_idle(self) -> None:
         """Wait until all in-flight calls complete."""
+        if self._in_flight > 0:
+            print(f"[{self.name}] wait_idle: {self._in_flight} calls in flight, waiting...")
         await self._in_flight_zero.wait()
+        print(f"[{self.name}] wait_idle: done")
 
     async def _resolve(self, ref):
         loop = asyncio.get_event_loop()

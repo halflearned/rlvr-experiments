@@ -61,10 +61,29 @@ async def main():
     # Training config
     num_epochs = plan.training.get("num_epochs")
     max_steps = plan.training.get("max_steps")
-    prompts_per_batch = plan.training.get("prompts_per_batch", 4)
-    sync_ref_every = plan.training.get("sync_ref_every", 10)
-    sync_model_every = plan.training.get("sync_model_every", 5)
     max_staleness = plan.training.get("max_staleness", 0)
+    abort_in_flight = plan.training.get("abort_in_flight", True)
+
+    # Batching config - new style (prompts_per_*) with fallback to old style
+    prompts_per_rollout_sync = plan.training.get("prompts_per_rollout_sync")
+    prompts_per_reference_sync = plan.training.get("prompts_per_reference_sync")
+    prompts_per_optim_step = plan.training.get("prompts_per_optim_step")
+    prompts_per_forward_backward = plan.training.get("prompts_per_forward_backward")
+
+    assert prompts_per_optim_step % prompts_per_forward_backward == 0, \
+        f"prompts_per_optim_step ({prompts_per_optim_step}) must be divisible by prompts_per_forward_backward ({prompts_per_forward_backward})"
+    assert prompts_per_rollout_sync % prompts_per_optim_step == 0, \
+        f"prompts_per_rollout_sync ({prompts_per_rollout_sync}) must be divisible by prompts_per_optim_step ({prompts_per_optim_step})"
+    assert prompts_per_reference_sync % prompts_per_optim_step == 0, \
+        f"prompts_per_reference_sync ({prompts_per_reference_sync}) must be divisible by prompts_per_optim_step ({prompts_per_optim_step})"
+
+    accumulation_steps = prompts_per_optim_step // prompts_per_forward_backward
+    sync_model_every = prompts_per_rollout_sync // prompts_per_optim_step
+    sync_ref_every = prompts_per_reference_sync // prompts_per_optim_step
+
+    print(f"[config] prompts_per_forward_backward={prompts_per_forward_backward}, "
+          f"accumulation_steps={accumulation_steps}, sync_model_every={sync_model_every}, "
+          f"sync_ref_every={sync_ref_every}")
 
     max_completion_len = plan.sampling.get("max_tokens", 512)
     max_seq_len = plan.training.get("max_seq_len") or (max_completion_len + 256)
@@ -100,18 +119,21 @@ async def main():
                 # Filter - mark consumed even if filtered (don't retry)
                 if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
                     tracer.counter("skipped", {"zero_variance_samples": 1})
+                    buffer.stats.record_filtered(version)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
                 if rollout_sample.input_ids.shape[1] > max_seq_len:
                     tracer.counter("skipped", {"seq_too_long": 1})
+                    buffer.stats.record_filtered(version)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
                 if rollout_sample.completion_ids.shape[1] > max_completion_len:
                     tracer.counter("skipped", {"completion_too_long": 1})
+                    buffer.stats.record_filtered(version)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
 
-                sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id)
+                sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, version=version)
                 await buffer.put(sample, version, item_id=prompt_id)
                 log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
                             completions=completions, rewards=rewards, version=version)
@@ -166,26 +188,28 @@ async def main():
             if version < min_version:
                 # Too stale - mark for retry
                 data_iter.mark_pending(item_id)
+                buffer.stats.record_wasted(version)
                 tracer.counter("retry", {"stale_evicted": 1})
                 continue
 
             samples.append(sample)
 
-            if len(samples) >= prompts_per_batch:
+            if len(samples) >= prompts_per_forward_backward:
                 batch, stats = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
                 # Mark all samples in this batch as consumed
                 for s in samples:
                     data_iter.mark_consumed(s.item_id)
+                    buffer.stats.record_used(s.version)
                 yield batch, stats
                 samples = []
 
     # --- Logging helper ---
     cumulative_output_tokens = 0
 
-    async def log_step(step, epoch, loss, grad_norm, batch, stats):
+    async def log_step(step, epoch, loss, grad_norm, batch, stats, ntokens, grpo_debug=None):
         nonlocal cumulative_output_tokens
         stats.trace(tracer)
-        titan_metrics = await trainer.log_metrics(loss, grad_norm, ntokens=batch.input_ids.numel())
+        titan_metrics = await trainer.log_metrics(loss, grad_norm, ntokens=ntokens)
         if titan_metrics:
             tracer.counter("titan.metrics", titan_metrics)
         avg_reward = batch.rewards.mean().item()
@@ -194,10 +218,18 @@ async def main():
         if vllm_metrics["calls"] > 0:
             tracer.counter("vllm.metrics", vllm_metrics)
             cumulative_output_tokens += vllm_metrics.get("output_tokens", 0)
+        if grpo_debug:
+            tracer.counter("grpo.debug", grpo_debug)
         print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
 
     # --- Main loop ---
     step = 0
+    accum_count = 0
+    accum_loss = 0.0
+    accum_ntokens = 0  # Track tokens across accumulation for correct MFU
+    last_batch = None
+    last_stats = None
+
     for epoch in range(num_epochs or 999999):
         if max_steps and step >= max_steps:
             break
@@ -207,17 +239,28 @@ async def main():
         producer = asyncio.create_task(produce_epoch())
 
         async for batch, stats in batches(producer):
-            step += 1
-            t_step_start = time.perf_counter()
+            accum_count += 1
+            accum_ntokens += batch.input_ids.numel()  # Accumulate tokens for MFU
+            last_batch = batch
+            last_stats = stats
 
-            # Forward/backward
+            # Forward/backward (gradients accumulate)
             t0 = time.perf_counter()
             with trace_span("forward_backward"):
                 loss, grpo_debug = await trainer.forward_backward(
                     loss_fn, batch.input_ids,
                     loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, batch.rewards),
-                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens})
+                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
+                    scale_loss=1.0 / accumulation_steps)
             t1 = time.perf_counter()
+            accum_loss += loss
+
+            # Only step optimizer after accumulation_steps
+            if accum_count < accumulation_steps:
+                print(f"[accum {accum_count}/{accumulation_steps}] loss={loss:.4f} fwd_bwd={1000*(t1-t0):.0f}ms")
+                continue
+
+            step += 1
 
             # Optimizer step
             t2 = time.perf_counter()
@@ -225,19 +268,27 @@ async def main():
                 grad_norm = await trainer.optim_step()
             t3 = time.perf_counter()
 
+            avg_loss = accum_loss / accumulation_steps
             print(f"[TIMING] forward_backward={1000*(t1-t0):.0f}ms, gap={1000*(t2-t1):.0f}ms, optim_step={1000*(t3-t2):.0f}ms")
 
             # Sync weights
             if step % sync_ref_every == 0:
+                print(f"[step {step}] Starting sync_titan_to_titan (trainer -> reference)")
                 await sync_titan_to_titan(trainer, reference)
+                print(f"[step {step}] Finished sync_titan_to_titan")
 
             if step % sync_model_every == 0:
-                await sync_titan_to_vllm(trainer, rollout, abort_in_flight=True)
+                print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> rollout, abort={abort_in_flight})")
+                await sync_titan_to_vllm(trainer, rollout, abort_in_flight=abort_in_flight)
+                print(f"[step {step}] Finished sync_titan_to_vllm")
 
             # Log
-            await log_step(step, epoch, loss, grad_norm, batch, stats)
-            if grpo_debug:
-                tracer.counter("grpo.debug", grpo_debug)
+            await log_step(step, epoch, avg_loss, grad_norm, last_batch, last_stats, accum_ntokens, grpo_debug)
+
+            # Reset accumulation
+            accum_count = 0
+            accum_ntokens = 0
+            accum_loss = 0.0
 
             if max_steps and step >= max_steps:
                 break
@@ -257,14 +308,34 @@ async def main():
     # Get any remaining metrics not yet collected
     final_vllm_metrics = await rollout.get_metrics()
     cumulative_output_tokens += final_vllm_metrics.get("output_tokens", 0)
+
+    # Sample fate statistics
+    fates = buffer.stats.get_fates()
+    total_used = sum(fates["used"].values())
+    total_wasted = sum(fates["wasted"].values())
+    total_filtered = sum(fates["filtered"].values())
+    total_samples = total_used + total_wasted + total_filtered
+
     print(f"\n=== Run Summary ===")
     print(f"Total wall-clock time: {run_elapsed:.1f}s")
     print(f"Total output tokens: {cumulative_output_tokens}")
     print(f"Overall gen throughput: {cumulative_output_tokens / run_elapsed:.0f} tok/s")
+    print(f"\n=== Sample Fate Statistics ===")
+    print(f"Total samples: {total_samples}")
+    print(f"  Used for training: {total_used} ({100*total_used/max(total_samples,1):.1f}%)")
+    print(f"  Wasted (stale): {total_wasted} ({100*total_wasted/max(total_samples,1):.1f}%)")
+    print(f"  Filtered: {total_filtered} ({100*total_filtered/max(total_samples,1):.1f}%)")
+    if not abort_in_flight:
+        print(f"  (abort_in_flight=False - staleness allowed)")
+
     tracer.counter("run_summary", {
         "total_time_s": run_elapsed,
         "total_output_tokens": cumulative_output_tokens,
         "overall_gen_tps": cumulative_output_tokens / run_elapsed if run_elapsed > 0 else 0,
+        "samples_used": total_used,
+        "samples_wasted": total_wasted,
+        "samples_filtered": total_filtered,
+        "abort_in_flight": abort_in_flight,
     })
 
     # --- Save checkpoint ---

@@ -65,6 +65,7 @@ class TrainSample:
     rewards: list[float]
     ref_logprobs: torch.Tensor
     item_id: str  # prompt_id for status tracking
+    version: int  # model version when generated
 
 
 @dataclass
