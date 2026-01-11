@@ -97,19 +97,19 @@ async def main():
             try:
                 with trace_span("generate"):
                     response = await rollout.generate_single(item["template"], **sp)
-                # Capture version AFTER generation - this reflects which weights were used
-                version = rollout.model_version
+                # Capture generation_step AFTER generation - this reflects which trainer step's weights were used
+                generated_at_step = rollout.generation_step
 
                 completions = [out.text for out in response.outputs]
                 rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
 
                 # Run verify and ref_logprobs concurrently (with tracing)
                 async def traced_verify():
-                    with trace_span("verify", args={"version": version}):
-                        return await verifier.verify_completions(item["problem"], completions, version=version)
+                    with trace_span("verify", args={"generated_at_step": generated_at_step}):
+                        return await verifier.verify_completions(item["problem"], completions, version=generated_at_step)
 
                 async def traced_ref_logprobs():
-                    with trace_span("ref_logprobs", args={"version": version}):
+                    with trace_span("ref_logprobs", args={"generated_at_step": generated_at_step}):
                         return await reference.compute_logprobs(
                             rollout_sample.input_ids, rollout_sample.completion_ids,
                             torch.tensor([rollout_sample.prompt_len] * rollout_sample.input_ids.size(0)))
@@ -119,24 +119,24 @@ async def main():
                 # Filter - mark consumed even if filtered (don't retry)
                 if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
                     tracer.counter("skipped", {"zero_variance_samples": 1})
-                    buffer.stats.record_filtered(version)
+                    buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
                 if rollout_sample.input_ids.shape[1] > max_seq_len:
                     tracer.counter("skipped", {"seq_too_long": 1})
-                    buffer.stats.record_filtered(version)
+                    buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
                 if rollout_sample.completion_ids.shape[1] > max_completion_len:
                     tracer.counter("skipped", {"completion_too_long": 1})
-                    buffer.stats.record_filtered(version)
+                    buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
 
-                sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, version=version)
-                await buffer.put(sample, version, item_id=prompt_id)
+                sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, generated_at_step=generated_at_step)
+                await buffer.put(sample, generated_at_step, item_id=prompt_id)
                 log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
-                            completions=completions, rewards=rewards, version=version)
+                            completions=completions, rewards=rewards, generated_at_step=generated_at_step)
                 return prompt_id
             except Exception as e:
                 # On error, mark pending for retry
@@ -171,6 +171,13 @@ async def main():
         await buffer.mark_done()
 
     # --- Batch iterator: drain buffer and yield batches ---
+    # Track current step for staleness and lag calculation
+    current_step = 0
+
+    def set_current_step(s):
+        nonlocal current_step
+        current_step = s
+
     async def batches(producer_task):
         samples = []
         while True:
@@ -181,25 +188,35 @@ async def main():
             result = await buffer.pop()
             if result is None:
                 return
-            sample, item_id, version = result
+            sample, item_id, generated_at_step = result
 
-            # Consumer handles staleness check
-            min_version = rollout.model_version - max_staleness
-            if version < min_version:
+            # Consumer handles staleness check based on trainer steps
+            min_step = current_step - max_staleness
+            if generated_at_step < min_step:
                 # Too stale - mark for retry
                 data_iter.mark_pending(item_id)
-                buffer.stats.record_wasted(version)
-                tracer.counter("retry", {"stale_evicted": 1})
+                buffer.stats.record_wasted(generated_at_step)
+                tracer.counter("retry", {"stale_evicted": 1, "generated_at_step": generated_at_step, "current_step": current_step})
                 continue
 
             samples.append(sample)
 
             if len(samples) >= prompts_per_forward_backward:
                 batch, stats = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
-                # Mark all samples in this batch as consumed
+                # Mark all samples in this batch as consumed and log lag
+                lags = []
                 for s in samples:
                     data_iter.mark_consumed(s.item_id)
-                    buffer.stats.record_used(s.version)
+                    buffer.stats.record_used(s.generated_at_step)
+                    lag = current_step - s.generated_at_step
+                    lags.append(lag)
+                # Log lag distribution for this batch
+                tracer.counter("batch.lag", {
+                    "lags": lags,
+                    "mean_lag": sum(lags) / len(lags) if lags else 0,
+                    "max_lag": max(lags) if lags else 0,
+                    "consumed_at_step": current_step,
+                })
                 yield batch, stats
                 samples = []
 
@@ -261,6 +278,7 @@ async def main():
                 continue
 
             step += 1
+            set_current_step(step)  # Update for staleness checks and lag calculation
 
             # Optimizer step
             t2 = time.perf_counter()
@@ -279,7 +297,7 @@ async def main():
 
             if step % sync_model_every == 0:
                 print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> rollout, abort={abort_in_flight})")
-                await sync_titan_to_vllm(trainer, rollout, abort_in_flight=abort_in_flight)
+                await sync_titan_to_vllm(trainer, rollout, abort_in_flight=abort_in_flight, step=step)
                 print(f"[step {step}] Finished sync_titan_to_vllm")
 
             # Log

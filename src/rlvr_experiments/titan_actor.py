@@ -248,6 +248,7 @@ class TitanModelRank:
         """
         import time
         import torch.distributed as dist
+        from torch.distributed.tensor.parallel import loss_parallel
 
         # Shard batch by DP replicate rank
         input_ids = self._get_dp_shard(input_ids)
@@ -265,19 +266,22 @@ class TitanModelRank:
             torch.cuda.synchronize()
             t1 = time.perf_counter()
 
-        if isinstance(logits, DTensor):
-            logits = logits.full_tensor()
+        # Use loss_parallel to keep logits sharded on vocab dimension
+        # This saves ~75% memory by avoiding the full_tensor() all-gather
+        completion_ids = completion_ids.to(self.model.device)
+        if isinstance(logits, DTensor) and prompt_lens is not None:
+            # DTensor path: compute logprobs with vocab-sharded logits
+            with loss_parallel():
+                logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
+        else:
+            # Regular path: gather logits first if DTensor
+            if isinstance(logits, DTensor):
+                logits = logits.full_tensor()
+            logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
 
         if _PROFILE_TITAN:
             torch.cuda.synchronize()
             t2 = time.perf_counter()
-
-        completion_ids = completion_ids.to(self.model.device)
-        logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
-
-        if _PROFILE_TITAN:
-            torch.cuda.synchronize()
-            t3 = time.perf_counter()
 
         # Gather logprobs from all DP replicate ranks to reconstruct full batch
         dp_degree = self.model.parallel_dims.dp_replicate
@@ -293,16 +297,15 @@ class TitanModelRank:
 
         if _PROFILE_TITAN:
             torch.cuda.synchronize()
-            t4 = time.perf_counter()
+            t3 = time.perf_counter()
 
             if self.rank == 0:
                 print(
                     f"[PROFILE compute_logprobs] "
                     f"forward={1000*(t1-t0):.0f}ms, "
-                    f"full_tensor={1000*(t2-t1):.0f}ms, "
-                    f"logprobs={1000*(t3-t2):.0f}ms, "
-                    f"gather={1000*(t4-t3):.0f}ms, "
-                    f"TOTAL={1000*(t4-t0):.0f}ms | "
+                    f"logprobs={1000*(t2-t1):.0f}ms, "
+                    f"gather={1000*(t3-t2):.0f}ms, "
+                    f"TOTAL={1000*(t3-t0):.0f}ms | "
                     f"shape={list(input_ids.shape)}",
                     flush=True
                 )
@@ -362,6 +365,9 @@ class TitanModelRank:
             t2 = time.perf_counter()
 
         with self.model.train_context_mgr(None):
+            # Note: loss_parallel is handled by train_context_mgr when
+            # config has disable_loss_parallel=false. This enables
+            # vocab-sharded cross_entropy without all-gathering logits.
             loss = loss_fn(logits, *args_local, **kwargs_local)
 
             if not torch.is_tensor(loss) or loss.ndim != 0:

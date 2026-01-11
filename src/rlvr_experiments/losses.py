@@ -8,6 +8,19 @@ def _rewards_to_advantages(rewards: torch.Tensor) -> torch.Tensor:
     return (rewards - rewards.mean()) / rewards.std().clamp(min=1e-6)
 
 
+def precompute_advantages(rewards: torch.Tensor) -> torch.Tensor:
+    """Pre-compute advantages for chunked loss computation.
+
+    When processing large batches in chunks to avoid OOM, call this once on
+    the full batch rewards BEFORE chunking. Then pass the sliced advantages
+    to each chunk's loss computation with advantages_precomputed=True.
+
+    This is critical for correctness: advantages must be normalized across
+    the full batch, not per-chunk.
+    """
+    return _rewards_to_advantages(rewards)
+
+
 class GRPOLoss(torch.nn.Module):
     """
     GRPO Loss following the DeepSeekMath paper.
@@ -33,9 +46,10 @@ class GRPOLoss(torch.nn.Module):
         response: torch.Tensor,         # [B, T] – completion token ids
         ref_logprobs: torch.Tensor,     # [B, T] – pre-computed reference log π_ref
         rollout_logprobs: torch.Tensor, # [B, T] – pre-computed rollout log π_{θ_old}
-        rewards: torch.Tensor,          # [B] – rewards
+        rewards: torch.Tensor,          # [B] – rewards OR pre-computed advantages
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
         prompt_lens: torch.Tensor | None = None,  # [B] – prompt lengths for proper slicing
+        advantages_precomputed: bool = False,  # If True, rewards param contains pre-computed advantages
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
         trainer_logprobs = compute_logprobs(logits, response, prompt_lens=prompt_lens)
@@ -50,8 +64,11 @@ class GRPOLoss(torch.nn.Module):
         ref_logprobs = ref_logprobs * padding_mask
         rollout_logprobs = rollout_logprobs * padding_mask
 
-        # Compute advantages from rewards and broadcast over tokens
-        adv = _rewards_to_advantages(rewards).to(trainer_logprobs.device).float()
+        # Compute advantages from rewards (or use pre-computed) and broadcast over tokens
+        if advantages_precomputed:
+            adv = rewards.to(trainer_logprobs.device).float()
+        else:
+            adv = _rewards_to_advantages(rewards).to(trainer_logprobs.device).float()
         while adv.ndim < trainer_logprobs_masked.ndim:
             adv = adv.unsqueeze(-1)
 

@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, DeviceMesh
 
 import logging
 import time
@@ -10,6 +10,76 @@ logger = logging.getLogger(__name__)
 
 # Enable profiling via environment variable
 _PROFILE_OPS = os.environ.get("RLVR_PROFILE_OPS", "0") == "1"
+
+
+def _get_prompt_groups(prompt_lens: torch.Tensor) -> list[tuple[int, int, int]]:
+    """Find contiguous groups with same prompt length.
+
+    Returns list of (start_idx, end_idx, prompt_len) tuples.
+    Used for DTensor-compatible slicing when samples from the same prompt
+    are contiguous in the batch.
+    """
+    groups = []
+    start = 0
+    current_len = prompt_lens[0].item()
+    for i in range(1, len(prompt_lens)):
+        if prompt_lens[i].item() != current_len:
+            groups.append((start, i, current_len))
+            start = i
+            current_len = prompt_lens[i].item()
+    groups.append((start, len(prompt_lens), current_len))
+    return groups
+
+
+def _compute_logprobs_dtensor(
+    logits: DTensor,
+    input_ids: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    target_len: int,
+) -> torch.Tensor:
+    """DTensor-compatible compute_logprobs using group-based slicing.
+
+    Instead of using gather (which doesn't work with vocab-sharded DTensor),
+    we process each prompt group separately using simple slicing. This works
+    because samples from the same prompt have the same prompt_len and are
+    contiguous in the batch.
+
+    Must be called inside a loss_parallel() context.
+    """
+    vocab_size = logits.shape[-1]
+    mesh = logits.device_mesh
+
+    # Get groups of samples with same prompt length
+    groups = _get_prompt_groups(prompt_lens)
+
+    # Process each group
+    results = []
+    for start, end, prompt_len in groups:
+        # Simple slice - works with DTensor because we're slicing on batch and seq dims
+        # which are replicated, not the vocab dim which is sharded
+        group_logits = logits[start:end, prompt_len - 1 : prompt_len - 1 + target_len, :]
+        group_ids = input_ids[start:end]
+
+        # Wrap ids as replicated DTensor for cross_entropy compatibility
+        group_ids_dt = DTensor.from_local(group_ids, mesh, [Replicate()])
+
+        # Compute logprobs via cross_entropy
+        group_logprobs = -F.cross_entropy(
+            group_logits.reshape(-1, vocab_size),
+            group_ids_dt.reshape(-1).long(),
+            reduction="none",
+        )
+        group_logprobs = group_logprobs.reshape(end - start, target_len)
+        results.append(group_logprobs)
+
+    # Concatenate results
+    logprobs = torch.cat(results, dim=0)
+
+    # Convert back to regular tensor if it's a DTensor
+    if isinstance(logprobs, DTensor):
+        logprobs = logprobs.to_local()
+
+    return logprobs
 
 
 def compute_logprobs(
@@ -31,8 +101,9 @@ def compute_logprobs(
     sample based on where the completion starts. Otherwise, assumes completion is at the
     end of the sequence (which only works if there's no trailing padding).
 
-    Supports DTensor inputs - when loss_parallel is enabled (disable_loss_parallel=false),
-    the cross_entropy will handle vocab-sharded logits natively without all-gathers.
+    Supports DTensor inputs - when logits is a vocab-sharded DTensor (from TP), this
+    function uses group-based slicing to avoid gather operations that don't work with
+    sharded tensors. Must be called inside a loss_parallel() context when using DTensor.
     """
     if _PROFILE_OPS:
         torch.cuda.synchronize()
@@ -49,6 +120,23 @@ def compute_logprobs(
                 dtype=torch.float32,
             )
 
+        # DTensor path: use group-based slicing instead of gather
+        if isinstance(scaled_logits, DTensor) and prompt_lens is not None:
+            prompt_lens = prompt_lens.to(input_ids.device)
+            logprobs = _compute_logprobs_dtensor(scaled_logits, input_ids, prompt_lens, target_len)
+
+            if _PROFILE_OPS:
+                torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                logger.info(
+                    f"[PROFILE compute_logprobs DTensor] "
+                    f"TOTAL={1000*(t1-t0):.1f}ms | "
+                    f"shape=[{logits.size(0)}, {target_len}, {logits.size(2)}]"
+                )
+
+            return logprobs
+
+        # Regular tensor path
         if prompt_lens is not None:
             # Per-sample slicing based on prompt length using advanced indexing
             # logits[:, prompt_len-1 : prompt_len-1+target_len] predicts completion tokens
