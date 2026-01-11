@@ -1,5 +1,5 @@
 run:
-  name: qwen3_1_7b_gsm8k_optimized
+  name: qwen3_1_7b_gsm8k_staleness1
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -11,7 +11,7 @@ tokenizer:
 training:
   num_epochs: 1
   iterations_per_epoch: null  # null = run full epoch until data exhausted
-  max_staleness: 0  # Samples older than (current_version - max_staleness) are evicted and retried
+  max_staleness: 1  # Allow samples from previous version for better pipeline overlap
   abort_in_flight: true  # If true, abort in-flight generations on sync (wastes GPU work). If false, wait for completion.
 
   # Fixed bucket sizes to avoid torch.compile recompilations
