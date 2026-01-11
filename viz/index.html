@@ -132,6 +132,44 @@
             min-height: 0;  /* Allow flex item to shrink below content size */
         }
 
+        .panel-toggle {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #8b949e;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            font-family: 'SF Mono', Monaco, monospace;
+            margin-left: 12px;
+            transition: all 0.15s ease;
+        }
+        .panel-toggle:hover {
+            background: #30363d;
+            color: #c9d1d9;
+        }
+        .panel-toggle.active {
+            background: #238636;
+            border-color: #238636;
+            color: #ffffff;
+        }
+        .panel-disabled .panel-content {
+            opacity: 0.3;
+            pointer-events: none;
+        }
+        .panel-disabled .panel-content::after {
+            content: 'Rendering paused for performance';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #8b949e;
+            font-size: 14px;
+            background: #0d1117cc;
+            padding: 8px 16px;
+            border-radius: 4px;
+        }
+
         /* Timeline Panel */
         #timeline-canvas {
             width: 100%;
@@ -663,12 +701,13 @@
         </div>
 
         <!-- Panel 1: Pipeline Timeline -->
-        <div class="panel">
+        <div class="panel" id="timeline-panel">
             <div class="panel-header">
                 <div>
                     <div class="panel-title">Pipeline Timeline</div>
                     <div class="panel-subtitle">vLLM generation, training steps, sync events</div>
                 </div>
+                <button class="panel-toggle" id="timeline-toggle" title="Toggle rendering (improves performance)">▶ Enable</button>
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-dot" style="background: #3fb950;"></div>
@@ -695,7 +734,7 @@
         </div>
 
         <!-- Panel 2: Buffer Dynamics + Sample Fates -->
-        <div class="panel" style="display: grid; grid-template-columns: 5fr 2fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
+        <div class="panel" id="buffer-panel" style="display: grid; grid-template-columns: 5fr 2fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
             <!-- Buffer Dynamics -->
             <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
@@ -703,6 +742,7 @@
                         <div class="panel-title">Buffer Dynamics</div>
                         <div class="panel-subtitle">Sample versions over time</div>
                     </div>
+                    <button class="panel-toggle" id="buffer-toggle" title="Toggle rendering (improves performance)">▶ Enable</button>
                 </div>
                 <div class="panel-content">
                     <canvas id="buffer-canvas"></canvas>
@@ -1053,6 +1093,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=34"></script>
+    <script src="heartbeat.js?v=35"></script>
 </body>
 </html>

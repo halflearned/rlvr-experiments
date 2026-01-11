@@ -120,6 +120,42 @@ class HeartbeatViz {
             });
         }
 
+        // Setup panel toggles (disabled by default for performance)
+        this.timelineEnabled = false;
+        this.bufferEnabled = false;
+
+        const timelineToggle = document.getElementById('timeline-toggle');
+        const bufferToggle = document.getElementById('buffer-toggle');
+        const timelinePanel = document.getElementById('timeline-panel');
+        const bufferPanel = document.getElementById('buffer-panel');
+
+        // Start with panels disabled
+        if (timelinePanel) timelinePanel.classList.add('panel-disabled');
+        if (bufferPanel) bufferPanel.classList.add('panel-disabled');
+
+        if (timelineToggle) {
+            timelineToggle.addEventListener('click', () => {
+                this.timelineEnabled = !this.timelineEnabled;
+                timelineToggle.textContent = this.timelineEnabled ? '⏸ Pause' : '▶ Enable';
+                timelineToggle.classList.toggle('active', this.timelineEnabled);
+                if (timelinePanel) timelinePanel.classList.toggle('panel-disabled', !this.timelineEnabled);
+                if (this.timelineEnabled) this.renderTimeline();
+            });
+        }
+
+        if (bufferToggle) {
+            bufferToggle.addEventListener('click', () => {
+                this.bufferEnabled = !this.bufferEnabled;
+                bufferToggle.textContent = this.bufferEnabled ? '⏸ Pause' : '▶ Enable';
+                bufferToggle.classList.toggle('active', this.bufferEnabled);
+                if (bufferPanel) bufferPanel.classList.toggle('panel-disabled', !this.bufferEnabled);
+                if (this.bufferEnabled) {
+                    this.renderBuffer();
+                    this.renderFates();
+                }
+            });
+        }
+
         // Try to load default trace
         this.loadDefaultTrace();
     }
@@ -181,8 +217,8 @@ class HeartbeatViz {
 
         timelineCanvas.addEventListener('dblclick', () => {
             this.timeZoom = { xMin: 0, xMax: 1 };
-            this.renderTimeline();
-            this.renderBuffer();
+            if (this.timelineEnabled) this.renderTimeline();
+            if (this.bufferEnabled) this.renderBuffer();
         });
 
         // Buffer zoom/pan handling (synced with timeline)
@@ -193,8 +229,8 @@ class HeartbeatViz {
 
         bufferCanvas.addEventListener('dblclick', () => {
             this.timeZoom = { xMin: 0, xMax: 1 };
-            this.renderTimeline();
-            this.renderBuffer();
+            if (this.timelineEnabled) this.renderTimeline();
+            if (this.bufferEnabled) this.renderBuffer();
         });
 
         // Timeline hover handling for span tooltips
@@ -775,9 +811,11 @@ class HeartbeatViz {
 
     render() {
         this.renderRunConfig();
-        this.renderTimeline();
-        this.renderBuffer();
-        this.renderFates();
+        if (this.timelineEnabled) this.renderTimeline();
+        if (this.bufferEnabled) {
+            this.renderBuffer();
+            this.renderFates();
+        }
         this.renderMetrics();
         this.renderEfficiencyQuantiles();
         this.renderRecommendations();
@@ -903,8 +941,8 @@ class HeartbeatViz {
         }
 
         // Render both timeline and buffer (they share time axis)
-        this.renderTimeline();
-        this.renderBuffer();
+        if (this.timelineEnabled) this.renderTimeline();
+        if (this.bufferEnabled) this.renderBuffer();
     }
 
     computeUtilization() {
