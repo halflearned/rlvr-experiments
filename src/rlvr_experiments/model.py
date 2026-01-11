@@ -274,7 +274,7 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         self.lr_schedulers.step()
         t4 = time.perf_counter()
         logger.debug("TitanModel.optim_step: zeroing grads...")
-        self.optimizers.zero_grad()
+        self.optimizers.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
         t5 = time.perf_counter()
 

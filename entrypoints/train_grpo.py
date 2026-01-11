@@ -11,7 +11,7 @@ os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 import torch
 from transformers import AutoTokenizer
 
-from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch
+from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
 from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_dummy
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
@@ -39,6 +39,7 @@ async def main():
     # --- Setup ---
     runtime = await Runtime.from_plan(args.config)
     plan = runtime.plan
+    run_name = plan.run.get("name", "grpo_run")
     await runtime.start()
 
     trainer = runtime.roles["trainer"]
@@ -63,12 +64,15 @@ async def main():
     max_steps = plan.training.get("max_steps")
     max_staleness = plan.training.get("max_staleness", 0)
     abort_in_flight = plan.training.get("abort_in_flight", True)
+    checkpoint_interval = plan.training.get("checkpoint_interval", 50)  # Save HF checkpoint every N steps
+    checkpoint_dir = os.environ.get("SM_MODEL_DIR", "/efs/rlvr-experiments/checkpoints")
 
     # Batching config - new style (prompts_per_*) with fallback to old style
     prompts_per_rollout_sync = plan.training.get("prompts_per_rollout_sync")
     prompts_per_reference_sync = plan.training.get("prompts_per_reference_sync")
     prompts_per_optim_step = plan.training.get("prompts_per_optim_step")
     prompts_per_forward_backward = plan.training.get("prompts_per_forward_backward")
+    completions_per_micro_batch = plan.training.get("completions_per_micro_batch")  # For micro-batching within forward_backward
 
     assert prompts_per_optim_step % prompts_per_forward_backward == 0, \
         f"prompts_per_optim_step ({prompts_per_optim_step}) must be divisible by prompts_per_forward_backward ({prompts_per_forward_backward})"
@@ -86,8 +90,16 @@ async def main():
           f"sync_ref_every={sync_ref_every}")
 
     max_completion_len = plan.sampling.get("max_tokens", 512)
-    max_seq_len = plan.training.get("max_seq_len") or (max_completion_len + 256)
+    completions_per_prompt = plan.sampling.get("n", 64)  # For grouped advantage normalization
+    # Buckets for torch.compile cache efficiency. Use [max] for fixed size (no recompiles).
+    # The last bucket is the max allowed length - samples exceeding it are filtered.
+    seq_len_buckets = plan.training.get("seq_len_buckets") or [768]
+    completion_len_buckets = plan.training.get("completion_len_buckets") or [max_completion_len]
+    max_seq_len = seq_len_buckets[-1]
     sp = {**plan.sampling, "logprobs": 0}
+
+    # Reward stats accumulator (tracks ALL samples including filtered)
+    reward_stats = RewardStats()
 
     # --- Producer: generate -> {verify, ref_logprobs} concurrently -> buffer ---
     async def produce_epoch():
@@ -118,21 +130,26 @@ async def main():
 
                 # Filter - mark consumed even if filtered (don't retry)
                 if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
+                    reward_stats.record(rewards, used=False)
                     tracer.counter("skipped", {"zero_variance_samples": 1})
                     buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
                 if rollout_sample.input_ids.shape[1] > max_seq_len:
+                    reward_stats.record(rewards, used=False)
                     tracer.counter("skipped", {"seq_too_long": 1})
                     buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
                 if rollout_sample.completion_ids.shape[1] > max_completion_len:
+                    reward_stats.record(rewards, used=False)
                     tracer.counter("skipped", {"completion_too_long": 1})
                     buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
                     return prompt_id
 
+                # Record stats for used sample
+                reward_stats.record(rewards, used=True)
                 sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, generated_at_step=generated_at_step)
                 await buffer.put(sample, generated_at_step, item_id=prompt_id)
                 log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
@@ -202,7 +219,11 @@ async def main():
             samples.append(sample)
 
             if len(samples) >= prompts_per_forward_backward:
-                batch, stats = make_batch(samples, pad_token_id, max_seq_len, max_completion_len)
+                batch, stats = make_batch(
+                    samples, pad_token_id,
+                    seq_len_buckets=seq_len_buckets,
+                    completion_len_buckets=completion_len_buckets,
+                )
                 # Mark all samples in this batch as consumed and log lag
                 lags = []
                 for s in samples:
@@ -231,13 +252,26 @@ async def main():
             tracer.counter("titan.metrics", titan_metrics)
         avg_reward = batch.rewards.mean().item()
         tracer.counter("metrics", {"loss": loss, "grad_norm": grad_norm, "avg_reward": avg_reward})
+
+        # Log comprehensive reward stats (includes filtered samples)
+        rw_metrics = reward_stats.get_metrics()
+        if rw_metrics:
+            tracer.counter("reward_stats", rw_metrics)
+
         vllm_metrics = await rollout.get_metrics()
         if vllm_metrics["calls"] > 0:
             tracer.counter("vllm.metrics", vllm_metrics)
             cumulative_output_tokens += vllm_metrics.get("output_tokens", 0)
         if grpo_debug:
             tracer.counter("grpo.debug", grpo_debug)
-        print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f}")
+
+        # Enhanced print with overall stats
+        rw_overall = rw_metrics.get("reward_overall", avg_reward)
+        frac_correct = rw_metrics.get("frac_all_correct", 0)
+        frac_wrong = rw_metrics.get("frac_all_wrong", 0)
+        print(f"[epoch {epoch}] step={step} loss={loss:.4f} grad_norm={grad_norm:.4f} "
+              f"reward={avg_reward:.2f} reward_all={rw_overall:.2f} "
+              f"all_correct={frac_correct:.1%} all_wrong={frac_wrong:.1%}")
 
     # --- Main loop ---
     step = 0
@@ -263,7 +297,8 @@ async def main():
 
             # Compute advantages before forward/backward
             # This must be done on the full batch before any DDP sharding
-            advantages = compute_advantages(batch.rewards)
+            # Use group_size to normalize within each prompt's completions
+            advantages = compute_advantages(batch.rewards, group_size=completions_per_prompt)
 
             # Forward/backward (gradients accumulate)
             t0 = time.perf_counter()
@@ -272,9 +307,11 @@ async def main():
                     loss_fn, batch.input_ids,
                     loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages),
                     loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
-                    scale_loss=1.0 / accumulation_steps)
+                    scale_loss=1.0 / accumulation_steps,
+                    micro_batch_size=completions_per_micro_batch)
             t1 = time.perf_counter()
             accum_loss += loss
+            del advantages  # Free memory immediately
 
             # Only step optimizer after accumulation_steps
             if accum_count < accumulation_steps:
@@ -306,6 +343,13 @@ async def main():
 
             # Log
             await log_step(step, epoch, avg_loss, grad_norm, last_batch, last_stats, accum_ntokens, grpo_debug)
+
+            # Save checkpoint every N steps
+            if checkpoint_interval and step % checkpoint_interval == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"{run_name}_step{step}")
+                print(f"[step {step}] Saving checkpoint to {ckpt_path}")
+                await trainer.export_to_hf(ckpt_path)
+                print(f"[step {step}] Checkpoint saved")
 
             # Reset accumulation
             accum_count = 0
@@ -360,9 +404,10 @@ async def main():
         "abort_in_flight": abort_in_flight,
     })
 
-    # --- Save checkpoint ---
-    print("=== Saving checkpoint ===")
-    await trainer.export_to_hf("/efs/rlvr-experiments/checkpoints/grpo_final")
+    # --- Save final checkpoint ---
+    final_ckpt_path = os.path.join(checkpoint_dir, f"{run_name}_final")
+    print(f"=== Saving final checkpoint to {final_ckpt_path} ===")
+    await trainer.export_to_hf(final_ckpt_path)
 
 
 if __name__ == "__main__":

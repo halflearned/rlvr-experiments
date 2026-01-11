@@ -47,7 +47,12 @@ class HeartbeatViz {
             completion_padding_pct: [],
             completion_len_mean: [],
             finish_stop_pct: [],
-            finish_length_pct: []
+            finish_length_pct: [],
+            // Reward statistics (includes filtered samples)
+            reward_overall: [],
+            reward_used: [],
+            frac_all_correct: [],
+            frac_all_wrong: []
         };
 
         // Metrics that use log scale
@@ -454,7 +459,9 @@ class HeartbeatViz {
             kl_max: [], ratio_max: [], diff_ref: [], diff_rollout: [],
             // Efficiency (padding/truncation)
             seq_padding_pct: [], completion_padding_pct: [], completion_len_mean: [],
-            finish_stop_pct: [], finish_length_pct: []
+            finish_stop_pct: [], finish_length_pct: [],
+            // Reward statistics (includes filtered samples)
+            reward_overall: [], reward_used: [], frac_all_correct: [], frac_all_wrong: []
         };
         this.bufferEvents = [];
         this.syncEvents = [];
@@ -593,6 +600,21 @@ class HeartbeatViz {
                     if (total > 0) {
                         this.metrics.finish_stop_pct.push({ ts, value: 100 * stop / total });
                         this.metrics.finish_length_pct.push({ ts, value: 100 * length / total });
+                    }
+                }
+                // Reward statistics
+                if (event.name === 'reward_stats') {
+                    if (event.reward_overall !== undefined) {
+                        this.metrics.reward_overall.push({ ts, value: event.reward_overall });
+                    }
+                    if (event.reward_used !== undefined) {
+                        this.metrics.reward_used.push({ ts, value: event.reward_used });
+                    }
+                    if (event.frac_all_correct !== undefined) {
+                        this.metrics.frac_all_correct.push({ ts, value: event.frac_all_correct });
+                    }
+                    if (event.frac_all_wrong !== undefined) {
+                        this.metrics.frac_all_wrong.push({ ts, value: event.frac_all_wrong });
                     }
                 }
             }
@@ -1914,7 +1936,12 @@ class HeartbeatViz {
             seq_padding_pct: '#f0883e',      // orange - padding is waste
             completion_padding_pct: '#d29922', // yellow
             finish_stop_pct: '#3fb950',       // green - good (natural stop)
-            finish_length_pct: '#f85149'      // red - truncated
+            finish_length_pct: '#f85149',     // red - truncated
+            // Reward statistics
+            reward_overall: '#58a6ff',        // blue
+            reward_used: '#3fb950',           // green
+            frac_all_correct: '#a371f7',      // purple
+            frac_all_wrong: '#f85149'         // red
         };
 
         const data = this.metrics[metric];
@@ -1994,10 +2021,17 @@ class HeartbeatViz {
         let minVal = Math.min(...values);
         let maxVal = Math.max(...values);
 
-        // Add some padding to the range
-        const rangePadding = (maxVal - minVal) * 0.1 || 0.1;
-        minVal -= rangePadding;
-        maxVal += rangePadding;
+        // Fixed 0-1 range for reward statistics (they're already 0-1 values)
+        const fixedRangeMetrics = new Set(['reward_overall', 'reward_used', 'frac_all_correct', 'frac_all_wrong']);
+        if (fixedRangeMetrics.has(metric)) {
+            minVal = 0;
+            maxVal = 1;
+        } else {
+            // Add some padding to the range
+            const rangePadding = (maxVal - minVal) * 0.1 || 0.1;
+            minVal -= rangePadding;
+            maxVal += rangePadding;
+        }
         const range = maxVal - minVal || 1;
 
         // Helper to convert value to y coordinate
@@ -2139,6 +2173,11 @@ class HeartbeatViz {
             case 'diff_ref':
             case 'diff_rollout':
                 return value.toFixed(4);
+            case 'reward_overall':
+            case 'reward_used':
+            case 'frac_all_correct':
+            case 'frac_all_wrong':
+                return (value * 100).toFixed(1) + '%';
             default:
                 return value.toFixed(2);
         }

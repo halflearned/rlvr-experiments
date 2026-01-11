@@ -1,30 +1,36 @@
 run:
-  name: qwen3_1_7b_base_grpo_gsm8k
+  name: qwen3_1_7b_gsm8k_lr1e6_kl05
 
 model:
-  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  path: "/opt/ml/input/data/model"
 
 tokenizer:
-  pretrained_model_name_or_path: "Qwen/Qwen3-1.7B-Base"
+  pretrained_model_name_or_path: "/opt/ml/input/data/model"
   use_fast: false
 
 training:
-  max_steps: 200
+  num_epochs: 1
   iterations_per_epoch: null  # null = run full epoch until data exhausted
-  max_staleness: 1  # Samples older than (current_version - max_staleness) are evicted and retried
+  max_staleness: 0  # Samples older than (current_version - max_staleness) are evicted and retried
   abort_in_flight: true  # If true, abort in-flight generations on sync (wastes GPU work). If false, wait for completion.
+  checkpoint_interval: 50  # Save HF checkpoint every N steps
+
+  # Fixed bucket sizes to avoid torch.compile recompilations
+  seq_len_buckets: [768]       # Fixed sequence length
+  completion_len_buckets: [512] # Fixed completion length
 
   # Batching config (all counts are prompts, not completions)
   prompts_per_rollout_sync: 16    # sync vLLM weights after training on this many prompts
   prompts_per_reference_sync: 64  # sync reference model after training on this many prompts
   prompts_per_optim_step: 16      # effective batch size for optimizer (16 prompts * 64 completions = 1024)
-  prompts_per_forward_backward: 1 # micro-batch size per forward/backward (memory constraint) - reduced for n=64
+  prompts_per_forward_backward: 2  # 2 prompts * 64 completions = 128 samples per micro-batch
+  completions_per_micro_batch: 128  # micro-batch size for forward_backward
 
 verifier:
-  num_workers: 2
+  num_workers: 4
 
 loss:
-  beta: 0.01
+  beta: 0.05
   eps: 0.2
 
 data:
@@ -66,15 +72,16 @@ roles:
       model:
         name: "qwen3"
         flavor: "1.7B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+        hf_assets_path: "/opt/ml/input/data/model"
 
       optimizer:
         name: "AdamW"
-        lr: 0.00001
+        lr: 0.000001
         eps: 0.0001
 
       lr_scheduler:
-        warmup_steps: 30
+        warmup_steps: 0
+        decay_ratio: 0.0  # constant LR (no warmup, no decay)
 
       training:
         seq_len: 2048
@@ -86,9 +93,9 @@ roles:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 2  # TP=2 needed to fit n=64 in backward pass
+        tensor_parallel_degree: 4  # TP=4 for 8xA100 80GB
         context_parallel_degree: 1
-        disable_loss_parallel: true
+        disable_loss_parallel: false  # Enable loss_parallel for 75% logits memory reduction
 
       checkpoint:
         enable: true
@@ -100,7 +107,7 @@ roles:
         async_mode: "disabled"
 
       activation_checkpoint:
-        mode: full
+        mode: selective
         selective_ac_option: "op"
 
       compile:
@@ -117,13 +124,13 @@ roles:
       model:
         name: "qwen3"
         flavor: "1.7B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+        hf_assets_path: "/opt/ml/input/data/model"
 
       parallelism:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 1
+        tensor_parallel_degree: 1  # TP=2 for reference
         context_parallel_degree: 1
 
       training:
@@ -155,10 +162,10 @@ roles:
     kind: vllm
 
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "/opt/ml/input/data/model"
       max_concurrent_per_replica: 8   # 8 prompts * 64 completions = 512 seqs
       max_num_seqs: 512
-      tensor_parallel_size: 1
+      tensor_parallel_size: 1  # TP=2 for vLLM
       data_parallel_size: 1
       max_model_len: 1024
       gpu_memory_utilization: 0.90

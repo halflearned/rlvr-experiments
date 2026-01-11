@@ -57,7 +57,7 @@
 
         .container {
             display: grid;
-            grid-template-rows: 100px 325px 200px 180px 180px 180px 180px 180px 200px;
+            grid-template-rows: 100px 325px 180px 180px 180px 180px 180px 180px 180px 200px;
             min-height: calc(100vh - 60px);
             gap: 1px;
             background: #30363d;
@@ -723,7 +723,65 @@
             </div>
         </div>
 
-        <!-- Panel 3: Training Dynamics -->
+        <!-- Panel 3: Reward Statistics -->
+        <div class="panel">
+            <div class="panel-header">
+                <div>
+                    <div class="panel-title">Reward Statistics</div>
+                    <div class="panel-subtitle">Overall rewards including filtered samples</div>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr); height: 100%;">
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Reward Overall</div>
+                                    <div class="metric-value color-green" id="metric-reward_overall">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-reward_overall"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">Reward Used</div>
+                                    <div class="metric-value color-blue" id="metric-reward_used">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-reward_used"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">All Correct</div>
+                                    <div class="metric-value color-purple" id="metric-frac_all_correct">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-frac_all_correct"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">All Wrong</div>
+                                    <div class="metric-value color-red" id="metric-frac_all_wrong">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-frac_all_wrong"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel 4: Training Dynamics -->
         <div class="panel">
             <div class="panel-header">
                 <div>

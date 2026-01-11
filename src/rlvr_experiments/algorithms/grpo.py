@@ -6,6 +6,54 @@ import torch
 import torch.nn.functional as F
 
 
+class RewardStats:
+    """Accumulates reward statistics across all samples (including filtered ones)."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.total_prompts = 0
+        self.total_completions = 0
+        self.total_reward_sum = 0.0
+        self.all_correct = 0  # prompts where all completions correct
+        self.all_wrong = 0    # prompts where all completions wrong
+        self.used_prompts = 0  # prompts with variance (used for training)
+        self.used_reward_sum = 0.0
+        self.used_completions = 0
+
+    def record(self, rewards: list[float], used: bool):
+        """Record stats for one prompt's completions."""
+        self.total_prompts += 1
+        self.total_completions += len(rewards)
+        self.total_reward_sum += sum(rewards)
+
+        all_same = all(r == rewards[0] for r in rewards)
+        if all_same:
+            if rewards[0] > 0.5:
+                self.all_correct += 1
+            else:
+                self.all_wrong += 1
+
+        if used:
+            self.used_prompts += 1
+            self.used_reward_sum += sum(rewards)
+            self.used_completions += len(rewards)
+
+    def get_metrics(self) -> dict:
+        """Return metrics dict, then reset."""
+        if self.total_prompts == 0:
+            return {}
+        metrics = {
+            "reward_used": self.used_reward_sum / self.used_completions if self.used_completions > 0 else 0.0,
+            "reward_overall": self.total_reward_sum / self.total_completions if self.total_completions > 0 else 0.0,
+            "frac_all_correct": self.all_correct / self.total_prompts,
+            "frac_all_wrong": self.all_wrong / self.total_prompts,
+        }
+        self.reset()
+        return metrics
+
+
 @dataclass
 class Batch:
     """A training batch - generic container for rollout data."""
@@ -160,8 +208,8 @@ COMPLETION_LEN_BUCKETS = [128, 256, 384, 512]
 def make_batch(
     samples: list[TrainSample],
     pad_token_id: int,
-    max_seq_len: int | None = None,
-    max_completion_len: int | None = None,
+    seq_len_buckets: list[int] | None = None,
+    completion_len_buckets: list[int] | None = None,
 ) -> tuple[Batch, BatchStats]:
     """Combine training samples into a batch."""
     def pad_cat(tensors, pad_value=0, fixed_len=None):
@@ -176,33 +224,28 @@ def make_batch(
     max_prompt_len = max(r.prompt_len for r in rollouts)
 
     # Bucket completion length for torch.compile cache efficiency
-    # Use a few fixed buckets to limit recompilations
-    COMPLETION_BUCKETS = [128, 256, 384, 512]
+    comp_buckets = completion_len_buckets or COMPLETION_LEN_BUCKETS
     padded_completion_len = natural_max_comp
-    for bucket in COMPLETION_BUCKETS:
+    for bucket in comp_buckets:
         if natural_max_comp <= bucket:
             padded_completion_len = bucket
             break
-    # Clamp to config max if provided
-    if max_completion_len:
-        padded_completion_len = min(padded_completion_len, max_completion_len)
+    else:
+        padded_completion_len = comp_buckets[-1]
 
     # Sequence length must be >= max_prompt_len + padded_completion_len for gather to work
     # (compute_logprobs gathers positions [prompt_len-1, prompt_len+completion_len-2])
     min_seq_len_needed = max_prompt_len + padded_completion_len
 
     # Bucket sequence length
-    SEQ_BUCKETS = [256, 384, 512, 640, 768, 896, 1024]
+    seq_buckets = seq_len_buckets or SEQ_LEN_BUCKETS
     padded_seq_len = min_seq_len_needed
-    for bucket in SEQ_BUCKETS:
+    for bucket in seq_buckets:
         if min_seq_len_needed <= bucket:
             padded_seq_len = bucket
             break
     else:
-        padded_seq_len = SEQ_BUCKETS[-1]  # Use largest if needed
-    # Clamp to config max if provided
-    if max_seq_len:
-        padded_seq_len = min(padded_seq_len, max_seq_len)
+        padded_seq_len = seq_buckets[-1]
 
     # Build prompt_lens
     prompt_lens_list = [r.prompt_len for r in rollouts for _ in range(r.input_ids.size(0))]
@@ -222,6 +265,7 @@ def make_batch(
     )
 
     stats = BatchStats.from_samples(samples, padded_seq_len, padded_completion_len)
+    print(f"[make_batch] B={batch.input_ids.shape[0]}, seq_len={padded_seq_len}, comp_len={padded_completion_len}")
     return batch, stats
 
 

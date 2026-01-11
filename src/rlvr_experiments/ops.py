@@ -138,7 +138,7 @@ def compute_logprobs(
 
         # Regular tensor path
         if prompt_lens is not None:
-            # Per-sample slicing based on prompt length using advanced indexing
+            # Per-sample slicing based on prompt length using index_select on flattened tensor
             # logits[:, prompt_len-1 : prompt_len-1+target_len] predicts completion tokens
             batch_size = logits.size(0)
             seq_len = logits.size(1)
@@ -147,16 +147,18 @@ def compute_logprobs(
             # Ensure prompt_lens is on same device as logits
             prompt_lens = prompt_lens.to(logits.device)
 
-            # Build indices: for each sample i, we want positions [prompt_len[i]-1, ..., prompt_len[i]-1+target_len-1]
-            # Shape: [batch, target_len]
-            offsets = torch.arange(target_len, device=logits.device).unsqueeze(0)  # [1, T]
-            starts = (prompt_lens - 1).unsqueeze(1)  # [B, 1]
-            indices = starts + offsets  # [B, T]
+            # Build flat indices into [B*seq_len, V] tensor
+            # For sample i, we want positions [i*seq_len + prompt_len[i]-1, ..., i*seq_len + prompt_len[i]-1+target_len-1]
+            offsets = torch.arange(target_len, device=logits.device)  # [T]
+            batch_offsets = torch.arange(batch_size, device=logits.device) * seq_len  # [B]
+            starts = batch_offsets + (prompt_lens - 1)  # [B]
+            # Broadcast: [B, 1] + [1, T] -> [B, T]
+            flat_indices = starts.unsqueeze(1) + offsets.unsqueeze(0)  # [B, T]
 
-            # Use gather to extract the slices
-            # Expand indices to match logits shape [B, T, V]
-            indices_expanded = indices.unsqueeze(-1).expand(-1, -1, vocab_size)  # [B, T, V]
-            sliced_logits = scaled_logits.gather(1, indices_expanded)  # [B, T, V]
+            # Flatten logits to [B*seq_len, V] and index select
+            flat_logits = scaled_logits.reshape(-1, vocab_size)  # [B*seq_len, V]
+            sliced_logits = flat_logits[flat_indices.reshape(-1)]  # [B*T, V]
+            sliced_logits = sliced_logits.reshape(batch_size, target_len, vocab_size)  # [B, T, V]
         else:
             # Legacy: assume completion is at the end (no trailing padding)
             sliced_logits = scaled_logits[:, -target_len - 1 : -1, :]

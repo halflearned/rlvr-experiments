@@ -319,12 +319,16 @@ class TitanModelRank:
         loss_args: tuple = (),
         loss_kwargs: dict | None = None,
         scale_loss: float = 1.0,
+        micro_batch_size: int | None = None,
     ) -> tuple[float, dict | None]:
         """Forward pass, compute loss, and backward pass. Returns (loss, debug_metrics).
 
         Args:
             scale_loss: Scale factor for loss before backward. Use 1/accumulation_steps
                        for gradient accumulation so gradients average correctly.
+            micro_batch_size: If provided, split the batch into micro-batches of this size
+                             and accumulate gradients. Must evenly divide batch size.
+                             This allows processing larger batches than GPU memory permits.
         """
         import time
 
@@ -340,15 +344,23 @@ class TitanModelRank:
                 for k, v in loss_kwargs.items()
             }
 
+        batch_size = input_ids.shape[0]
+
+        # Determine micro-batching
+        if micro_batch_size is None or micro_batch_size >= batch_size:
+            # No micro-batching, process entire batch at once
+            num_micro_batches = 1
+            micro_batch_size = batch_size
+        else:
+            if batch_size % micro_batch_size != 0:
+                raise ValueError(
+                    f"Batch size {batch_size} must be divisible by micro_batch_size {micro_batch_size}"
+                )
+            num_micro_batches = batch_size // micro_batch_size
+
         if _PROFILE_TITAN:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-
-        logits = self.model.forward(input_ids)
-
-        if _PROFILE_TITAN:
-            torch.cuda.synchronize()
-            t1 = time.perf_counter()
 
         device = self.model.device
 
@@ -357,52 +369,76 @@ class TitanModelRank:
                 return v.to(device, non_blocking=True)
             return v
 
-        args_local = tuple(to_device(a) for a in loss_args)
-        kwargs_local = {k: to_device(v) for k, v in (loss_kwargs or {}).items()}
+        # Combined scale factor: outer accumulation * inner micro-batch accumulation
+        combined_scale = scale_loss / num_micro_batches
+
+        total_loss = 0.0
+        debug_metrics = None
+
+        for mb_idx in range(num_micro_batches):
+            start = mb_idx * micro_batch_size
+            end = start + micro_batch_size
+
+            # Slice input_ids
+            mb_input_ids = input_ids[start:end]
+
+            # Slice loss_args (tensors only)
+            mb_loss_args = tuple(
+                a[start:end] if torch.is_tensor(a) else a
+                for a in loss_args
+            )
+
+            # Slice loss_kwargs (tensors only)
+            mb_loss_kwargs = {
+                k: v[start:end] if torch.is_tensor(v) else v
+                for k, v in (loss_kwargs or {}).items()
+            }
+
+            # Forward pass
+            logits = self.model.forward(mb_input_ids)
+
+            # Move args to device
+            args_local = tuple(to_device(a) for a in mb_loss_args)
+            kwargs_local = {k: to_device(v) for k, v in mb_loss_kwargs.items()}
+
+            with self.model.train_context_mgr(None):
+                # Note: loss_parallel is handled by train_context_mgr when
+                # config has disable_loss_parallel=false. This enables
+                # vocab-sharded cross_entropy without all-gathering logits.
+                loss = loss_fn(logits, *args_local, **kwargs_local)
+
+                if not torch.is_tensor(loss) or loss.ndim != 0:
+                    raise RuntimeError("loss_fn must return a scalar torch.Tensor")
+
+                # Scale loss for gradient accumulation (both outer and inner)
+                scaled_loss = loss * combined_scale
+                scaled_loss.backward()
+
+            total_loss += float(loss.detach().item())
+
+            # Collect debug metrics from last micro-batch
+            if mb_idx == num_micro_batches - 1 and hasattr(loss_fn, 'get_debug_metrics'):
+                debug_metrics = loss_fn.get_debug_metrics()
+
+            # Free memory between micro-batches
+            del logits, loss, scaled_loss, args_local, kwargs_local
 
         if _PROFILE_TITAN:
             torch.cuda.synchronize()
-            t2 = time.perf_counter()
-
-        with self.model.train_context_mgr(None):
-            # Note: loss_parallel is handled by train_context_mgr when
-            # config has disable_loss_parallel=false. This enables
-            # vocab-sharded cross_entropy without all-gathering logits.
-            loss = loss_fn(logits, *args_local, **kwargs_local)
-
-            if not torch.is_tensor(loss) or loss.ndim != 0:
-                raise RuntimeError("loss_fn must return a scalar torch.Tensor")
-
-            if _PROFILE_TITAN:
-                torch.cuda.synchronize()
-                t3 = time.perf_counter()
-
-            # Scale loss for gradient accumulation
-            scaled_loss = loss * scale_loss if scale_loss != 1.0 else loss
-            scaled_loss.backward()
-
-        if _PROFILE_TITAN:
-            torch.cuda.synchronize()
-            t4 = time.perf_counter()
+            t1 = time.perf_counter()
 
             if self.rank == 0:
                 print(
                     f"[PROFILE forward_backward] "
-                    f"forward={1000*(t1-t0):.0f}ms, "
-                    f"to_device={1000*(t2-t1):.0f}ms, "
-                    f"loss_fn={1000*(t3-t2):.0f}ms, "
-                    f"backward={1000*(t4-t3):.0f}ms, "
-                    f"TOTAL={1000*(t4-t0):.0f}ms | "
-                    f"shape={list(input_ids.shape)}",
+                    f"TOTAL={1000*(t1-t0):.0f}ms | "
+                    f"shape={list(input_ids.shape)}, "
+                    f"micro_batches={num_micro_batches}x{micro_batch_size}",
                     flush=True
                 )
 
-        # Get debug metrics if available (e.g. from GRPOLoss)
-        debug_metrics = None
-        if hasattr(loss_fn, 'get_debug_metrics'):
-            debug_metrics = loss_fn.get_debug_metrics()
-
-        return float(loss.detach().item()), debug_metrics
+        # Return average loss across micro-batches
+        avg_loss = total_loss / num_micro_batches
+        return avg_loss, debug_metrics
 
     def log_metrics(self, loss: float, grad_norm: float, ntokens: int) -> dict | None:
         """Log metrics using torchtitan's MetricsProcessor (only rank 0 logs)."""
@@ -467,6 +503,15 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
 
     cfg = dict(config)
     cfg.pop("trainable", None)
+
+    # On SageMaker, use SM_MODEL_DIR for checkpoints so they get uploaded to S3
+    model_dir = os.environ.get("SM_MODEL_DIR")
+    if model_dir:
+        # Set job.dump_folder to MODEL_DIR - checkpoints are saved relative to this
+        if "job" not in cfg:
+            cfg["job"] = {}
+        cfg["job"]["dump_folder"] = model_dir
+        logger.info(f"SageMaker detected: setting dump_folder to {model_dir}")
 
     # Ray actors may be on different nodes - use shared filesystem for config
     config_dir = os.environ.get("RLVR_TITAN_CONFIG_DIR", os.path.join(os.getcwd(), ".rlvr_titan_job_configs"))

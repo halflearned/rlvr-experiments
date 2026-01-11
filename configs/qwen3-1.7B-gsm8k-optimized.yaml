@@ -29,7 +29,7 @@ verifier:
   num_workers: 2
 
 loss:
-  beta: 0.01
+  beta: 0.05
   eps: 0.2
 
 data:
@@ -55,7 +55,7 @@ buffer:
 roles:
   - name: trainer
     kind: titan
-    config:
+    config: 
       trainable: true
 
       profiling:
@@ -75,11 +75,12 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00001
+        lr: 0.000001
         eps: 0.0001
 
       lr_scheduler:
-        warmup_steps: 30
+        warmup_steps: 0
+        decay_ratio: 0.0  # constant LR (no warmup, no decay)
 
       training:
         seq_len: 2048

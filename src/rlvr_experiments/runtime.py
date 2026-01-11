@@ -67,8 +67,14 @@ class Runtime:
 
         plan = load_plan(plan_path)
 
-        # Initialize tracing - use trace_path from config or default to ./traces/
-        trace_path = getattr(plan, "trace_path", None) or "traces/trace.jsonl"
+        # Initialize tracing - use SM_MODEL_DIR for SageMaker, otherwise config or default
+        # On SageMaker, SM_MODEL_DIR is /opt/ml/model which gets uploaded to S3 after training
+        model_dir = os.environ.get("SM_MODEL_DIR")
+        if model_dir:
+            default_trace_path = os.path.join(model_dir, "traces", "trace.jsonl")
+        else:
+            default_trace_path = "traces/trace.jsonl"
+        trace_path = getattr(plan, "trace_path", None) or default_trace_path
         # Migrate old .json extension to .jsonl
         if trace_path.endswith(".json"):
             trace_path = trace_path[:-5] + ".jsonl"
