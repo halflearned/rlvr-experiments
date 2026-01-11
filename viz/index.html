@@ -57,8 +57,7 @@
 
         .container {
             display: grid;
-            grid-template-rows: 100px 325px 180px 180px 180px 180px 180px 180px 180px 200px;
-            min-height: calc(100vh - 60px);
+            grid-template-rows: 100px 325px 180px 180px 180px 180px 180px 180px 180px 180px;
             gap: 1px;
             background: #30363d;
         }
@@ -786,7 +785,7 @@
             <div class="panel-header">
                 <div>
                     <div class="panel-title">Training Dynamics</div>
-                    <div class="panel-subtitle">Reward, loss, gradient norms</div>
+                    <div class="panel-subtitle">KL divergence, loss, gradient norms</div>
                 </div>
             </div>
             <div class="panel-content">
@@ -795,10 +794,10 @@
                         <div class="section-cards" style="grid-template-rows: 1fr;">
                             <div class="metric-card">
                                 <div class="metric-info">
-                                    <div class="metric-label">Reward</div>
-                                    <div class="metric-value color-green" id="metric-reward">-</div>
+                                    <div class="metric-label">KL Mean</div>
+                                    <div class="metric-value color-green" id="metric-kl_mean">-</div>
                                 </div>
-                                <div class="metric-chart"><canvas id="chart-reward"></canvas></div>
+                                <div class="metric-chart"><canvas id="chart-kl_mean"></canvas></div>
                             </div>
                         </div>
                     </div>
@@ -1054,6 +1053,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=33"></script>
+    <script src="heartbeat.js?v=34"></script>
 </body>
 </html>

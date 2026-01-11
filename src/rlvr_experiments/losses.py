@@ -111,6 +111,10 @@ class GRPOLoss(torch.nn.Module):
         with torch.no_grad():
             diff_trainer_ref = (trainer_logprobs_masked - ref_logprobs).abs()
             diff_trainer_rollout = (trainer_logprobs_masked - rollout_logprobs).abs()
+            # Compute mean KL over non-padded tokens
+            kl_sum = (kl_t * padding_mask).sum().item()
+            kl_count = padding_mask.sum().item()
+            kl_mean = kl_sum / kl_count if kl_count > 0 else 0.0
             kl_max = kl_t.max().item()
             ratio_max = ratio.max().item()
             diff_ref_max = diff_trainer_ref.max().item()
@@ -122,12 +126,14 @@ class GRPOLoss(torch.nn.Module):
                 f"rollout_lp: [{rollout_logprobs.min().item():.2f}, {rollout_logprobs.max().item():.2f}]  "
                 f"|trainer-ref|_max: {diff_ref_max:.4f}  "
                 f"|trainer-rollout|_max: {diff_rollout_max:.4f}  "
+                f"kl_mean: {kl_mean:.4f}  "
                 f"kl_max: {kl_max:.4f}  "
                 f"ratio_max: {ratio_max:.4f}",
                 flush=True
             )
             # Store debug metrics for caller to emit to tracer
             self._last_debug = {
+                "kl_mean": kl_mean,
                 "kl_max": kl_max,
                 "ratio_max": ratio_max,
                 "diff_trainer_ref_max": diff_ref_max,

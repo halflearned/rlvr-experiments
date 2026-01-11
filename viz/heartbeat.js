@@ -25,8 +25,8 @@ class HeartbeatViz {
 
         // Metric history
         this.metrics = {
-            // Training
-            reward: [],
+            // Training dynamics
+            kl_mean: [],
             loss: [],
             grad_norm: [],
             // TorchTitan
@@ -453,7 +453,7 @@ class HeartbeatViz {
 
     extractMetrics() {
         this.metrics = {
-            reward: [], loss: [], grad_norm: [],
+            kl_mean: [], loss: [], grad_norm: [],
             mfu: [], train_tps: [], memory_pct: [],
             vllm_tps: [], vllm_output_tokens: [], vllm_prompt_tokens: [],
             kl_max: [], ratio_max: [], diff_ref: [], diff_rollout: [],
@@ -528,6 +528,9 @@ class HeartbeatViz {
                     }
                 }
                 if (event.name === 'grpo.debug') {
+                    if (event.kl_mean !== undefined) {
+                        this.metrics.kl_mean.push({ ts, value: event.kl_mean });
+                    }
                     if (event.kl_max !== undefined) {
                         this.metrics.kl_max.push({ ts, value: event.kl_max });
                     }
@@ -1919,7 +1922,7 @@ class HeartbeatViz {
         if (metric === 'completion_len_mean' || metric === 'seq_padding_pct' || metric === 'completion_padding_pct') return;
 
         const colors = {
-            reward: '#3fb950',
+            kl_mean: '#3fb950',               // green - main training metric
             loss: '#58a6ff',
             grad_norm: '#f85149',
             mfu: '#a371f7',
@@ -2168,6 +2171,7 @@ class HeartbeatViz {
             case 'vllm_output_tokens':
             case 'vllm_prompt_tokens':
                 return Math.round(value).toLocaleString();
+            case 'kl_mean':
             case 'kl_max':
             case 'ratio_max':
             case 'diff_ref':
