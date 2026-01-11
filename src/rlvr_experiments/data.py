@@ -116,6 +116,60 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
     return ds.map(preprocess)
 
 
+def load_math(
+    split: str = "train",
+    level: list[int] | None = None,
+) -> ray.data.Dataset:
+    """
+    Load MATH dataset (Hendrycks et al.) as a Ray Dataset.
+
+    The MATH dataset contains 12,500 challenging competition mathematics problems
+    with step-by-step solutions. Problems span 7 subjects and 5 difficulty levels.
+
+    Args:
+        split: Dataset split ("train" or "test")
+        level: Filter by difficulty level(s). Can be:
+            - None: Include all levels (1-5)
+            - list[int]: Specific levels (e.g., [1, 2, 3] for Levels 1-3)
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
+    """
+    # Load all subjects and concatenate
+    subjects = [
+        "algebra",
+        "counting_and_probability",
+        "geometry",
+        "intermediate_algebra",
+        "number_theory",
+        "prealgebra",
+        "precalculus",
+    ]
+
+    all_rows = []
+    for subject in subjects:
+        hf_dataset = load_dataset("EleutherAI/hendrycks_math", subject, split=split)
+        all_rows.extend(list(hf_dataset))
+
+    # Filter by level if specified
+    if level is not None:
+        level_strs = {f"Level {l}" for l in level}
+        all_rows = [row for row in all_rows if row["level"] in level_strs]
+
+    ds = ray.data.from_items(all_rows)
+
+    def preprocess(row):
+        question = f"\n\nProblem:{row['problem'].strip()}"
+        # Store full solution - math_verify extracts from \boxed{} automatically
+        prompt_id = f"math_{row['type']}_{_hash_prompt(question)}"
+        return {
+            "prompt": question,
+            "problem": {"answer": row["solution"], "prompt_id": prompt_id},
+        }
+
+    return ds.map(preprocess)
+
+
 def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
     """
     Load a dummy dataset with a single question repeated 64 times.
@@ -218,8 +272,12 @@ class DataIterator:
     # --- Status management ---
 
     def new_epoch(self, seed: int | None = None) -> None:
-        """Reset all statuses to pending for a new epoch."""
-        # TODO: shuffle _prompt_ids with seed
+        """Reset all statuses to pending for a new epoch and shuffle order."""
+        import random
+
+        if seed is not None:
+            rng = random.Random(seed)
+            rng.shuffle(self._prompt_ids)
         for pid in self._prompt_ids:
             self._status[pid] = "pending"
 
