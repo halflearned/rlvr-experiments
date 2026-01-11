@@ -3,22 +3,43 @@ import torch
 from .ops import compute_logprobs
 
 
-def _rewards_to_advantages(rewards: torch.Tensor) -> torch.Tensor:
-    """GRPO: normalize rewards to zero mean, unit variance."""
-    return (rewards - rewards.mean()) / rewards.std().clamp(min=1e-6)
+def compute_advantages(rewards: torch.Tensor, group_size: int | None = None) -> torch.Tensor:
+    """Compute GRPO advantages from rewards.
 
+    Normalizes rewards to zero mean, unit variance. When group_size is provided,
+    normalization is done per-group (for multi-prompt batches where each prompt's
+    completions should be normalized separately).
 
-def precompute_advantages(rewards: torch.Tensor) -> torch.Tensor:
-    """Pre-compute advantages for chunked loss computation.
+    Args:
+        rewards: [B] tensor of rewards
+        group_size: If provided, normalize within groups of this size.
+                    B must be divisible by group_size.
 
-    When processing large batches in chunks to avoid OOM, call this once on
-    the full batch rewards BEFORE chunking. Then pass the sliced advantages
-    to each chunk's loss computation with advantages_precomputed=True.
+    Returns:
+        [B] tensor of normalized advantages
 
-    This is critical for correctness: advantages must be normalized across
-    the full batch, not per-chunk.
+    This MUST be called before passing to GRPOLoss. The loss function expects
+    pre-computed advantages, not raw rewards. This is required for:
+    - Chunked loss computation (advantages must be normalized across full batch)
+    - DDP training (each rank sees only a shard, but advantages need global stats)
+    - Multi-prompt batches (each prompt's completions normalized separately)
     """
-    return _rewards_to_advantages(rewards)
+    if group_size is None:
+        # Single group: normalize across entire batch
+        mean = rewards.mean()
+        std = rewards.std().clamp(min=1e-6)
+        return (rewards - mean) / std
+    else:
+        # Multi-group: normalize within each group
+        B = rewards.shape[0]
+        if B % group_size != 0:
+            raise ValueError(f"Batch size {B} not divisible by group_size {group_size}")
+
+        grouped = rewards.view(-1, group_size)
+        mean = grouped.mean(dim=1, keepdim=True)
+        std = grouped.std(dim=1, keepdim=True).clamp(min=1e-6)
+        normalized = (grouped - mean) / std
+        return normalized.view(-1)
 
 
 class GRPOLoss(torch.nn.Module):
@@ -27,6 +48,10 @@ class GRPOLoss(torch.nn.Module):
 
     Takes logits directly (not logprobs) and computes logprobs internally,
     following the torchforge pattern for proper DTensor gradient handling.
+
+    IMPORTANT: This loss expects pre-computed advantages, not raw rewards.
+    Call compute_advantages(rewards) before passing to this loss function.
+    This is required for correctness with chunked computation and DDP.
     """
     def __init__(self, beta: float, eps: float = 0.0):
         super().__init__()
@@ -46,10 +71,9 @@ class GRPOLoss(torch.nn.Module):
         response: torch.Tensor,         # [B, T] – completion token ids
         ref_logprobs: torch.Tensor,     # [B, T] – pre-computed reference log π_ref
         rollout_logprobs: torch.Tensor, # [B, T] – pre-computed rollout log π_{θ_old}
-        rewards: torch.Tensor,          # [B] – rewards OR pre-computed advantages
+        advantages: torch.Tensor,       # [B] – pre-computed advantages (use compute_advantages())
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
         prompt_lens: torch.Tensor | None = None,  # [B] – prompt lengths for proper slicing
-        advantages_precomputed: bool = False,  # If True, rewards param contains pre-computed advantages
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
         trainer_logprobs = compute_logprobs(logits, response, prompt_lens=prompt_lens)
@@ -64,11 +88,8 @@ class GRPOLoss(torch.nn.Module):
         ref_logprobs = ref_logprobs * padding_mask
         rollout_logprobs = rollout_logprobs * padding_mask
 
-        # Compute advantages from rewards (or use pre-computed) and broadcast over tokens
-        if advantages_precomputed:
-            adv = rewards.to(trainer_logprobs.device).float()
-        else:
-            adv = _rewards_to_advantages(rewards).to(trainer_logprobs.device).float()
+        # Broadcast advantages over tokens
+        adv = advantages.to(trainer_logprobs.device).float()
         while adv.ndim < trainer_logprobs_masked.ndim:
             adv = adv.unsqueeze(-1)
 
@@ -133,6 +154,9 @@ class SimpleGRPOLoss(torch.nn.Module):
     Takes logits directly and computes logprobs internally for proper gradient handling.
     Inspired by the Hugging Face TRL implementation:
     https://github.com/huggingface/trl/blob/417915a3e4d3e3bc8d7b196594308b8eabf928be/trl/trainer/grpo_trainer.py#L1624
+
+    IMPORTANT: This loss expects pre-computed advantages, not raw rewards.
+    Call compute_advantages(rewards) before passing to this loss function.
     """
 
     def __init__(self, beta: float = 0.1, **kwargs):
@@ -144,7 +168,7 @@ class SimpleGRPOLoss(torch.nn.Module):
         logits: torch.Tensor,       # [B, seq_len, vocab] – model output logits
         response: torch.Tensor,     # [B, T] – completion token ids
         ref_logprobs: torch.Tensor, # [B, T] – pre-computed reference log π_ref
-        rewards: torch.Tensor,      # [B] – rewards
+        advantages: torch.Tensor,   # [B] – pre-computed advantages (use compute_advantages())
         padding_mask: torch.Tensor, # [B, T], 1 for tokens, 0 for pad
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
@@ -154,13 +178,13 @@ class SimpleGRPOLoss(torch.nn.Module):
         ref_logprobs = ref_logprobs.to(logprobs.device).float()
         padding_mask = padding_mask.to(logprobs.device).float()
 
-        # Compute advantages from rewards
-        advantages = _rewards_to_advantages(rewards).to(logprobs.device).float()
-        if advantages.ndim == 1:
-            advantages = advantages.unsqueeze(-1)
+        # Broadcast advantages over tokens
+        adv = advantages.to(logprobs.device).float()
+        if adv.ndim == 1:
+            adv = adv.unsqueeze(-1)
 
         kl = torch.exp(ref_logprobs - logprobs) - (ref_logprobs - logprobs) - 1
-        per_token_policy_loss = torch.exp(logprobs - logprobs.detach()) * advantages
+        per_token_policy_loss = torch.exp(logprobs - logprobs.detach()) * adv
         per_token_loss = -(per_token_policy_loss - self.beta * kl)
         loss = (
             ((per_token_loss * padding_mask).sum(dim=1))

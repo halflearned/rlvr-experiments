@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch
 from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_dummy
-from rlvr_experiments.losses import GRPOLoss
+from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
@@ -261,12 +261,16 @@ async def main():
             last_batch = batch
             last_stats = stats
 
+            # Compute advantages before forward/backward
+            # This must be done on the full batch before any DDP sharding
+            advantages = compute_advantages(batch.rewards)
+
             # Forward/backward (gradients accumulate)
             t0 = time.perf_counter()
             with trace_span("forward_backward"):
                 loss, grpo_debug = await trainer.forward_backward(
                     loss_fn, batch.input_ids,
-                    loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, batch.rewards),
+                    loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages),
                     loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
                     scale_loss=1.0 / accumulation_steps)
             t1 = time.perf_counter()
