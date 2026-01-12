@@ -5,6 +5,8 @@ from typing import Iterator
 import ray.data
 from datasets import load_dataset
 
+from .sample_logger import log_sample
+
 
 def _hash_prompt(prompt: str) -> str:
     """Generate a short hash for prompts without explicit IDs."""
@@ -292,6 +294,7 @@ class DataIterator:
     def mark_pending(self, prompt_id: str) -> None:
         """Mark a prompt as pending (for retry)."""
         self._status[prompt_id] = "pending"
+        log_sample("pending", prompt_id=prompt_id)
 
     def all_consumed(self) -> bool:
         """Check if all prompts have been consumed."""
@@ -319,6 +322,7 @@ class DataIterator:
         for pid in self._prompt_ids:
             if self._status.get(pid) == "pending":
                 self._status[pid] = "in_flight"
+                log_sample("in_flight", prompt_id=pid)
                 return self._get_item(pid)
         return None
 

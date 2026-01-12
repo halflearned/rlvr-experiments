@@ -16,6 +16,7 @@ from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
+from rlvr_experiments.sample_logger import init_sample_logger, log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
 from rlvr_experiments.vllm_engine_actor import VLLMHandle
 from rlvr_experiments.tracer import trace_span
@@ -111,11 +112,15 @@ async def main():
             prompt_id = item["problem"].get("prompt_id", "unknown")
             try:
                 t0 = time.perf_counter()
+                log_sample("generation_start", prompt_id=prompt_id)
                 with trace_span("generate"):
                     response = await rollout.generate_single(item["template"], **sp)
                 t_gen = time.perf_counter()
                 # Capture generation_step AFTER generation - this reflects which trainer step's weights were used
                 generated_at_step = rollout.generation_step
+                n_completions = len(response.outputs)
+                log_sample("generation_done", prompt_id=prompt_id, step=generated_at_step,
+                           n_completions=n_completions, duration=t_gen - t0)
 
                 completions = [out.text for out in response.outputs]
                 rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
@@ -153,24 +158,28 @@ async def main():
                     tracer.counter("skipped", {"zero_variance_samples": 1})
                     buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
+                    log_sample("filtered", prompt_id=prompt_id, step=generated_at_step, reason="zero_variance")
                     return prompt_id
                 if rollout_sample.input_ids.shape[1] > max_seq_len:
                     reward_stats.record(rewards, used=False)
                     tracer.counter("skipped", {"seq_too_long": 1})
                     buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
+                    log_sample("filtered", prompt_id=prompt_id, step=generated_at_step, reason="seq_too_long")
                     return prompt_id
                 if rollout_sample.completion_ids.shape[1] > max_completion_len:
                     reward_stats.record(rewards, used=False)
                     tracer.counter("skipped", {"completion_too_long": 1})
                     buffer.stats.record_filtered(generated_at_step)
                     data_iter.mark_consumed(prompt_id)
+                    log_sample("filtered", prompt_id=prompt_id, step=generated_at_step, reason="completion_too_long")
                     return prompt_id
 
                 # Record stats for used sample
                 reward_stats.record(rewards, used=True)
                 sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, generated_at_step=generated_at_step)
                 await buffer.put(sample, generated_at_step, item_id=prompt_id)
+                log_sample("buffered", prompt_id=prompt_id, step=generated_at_step)
                 return prompt_id
             except Exception as e:
                 # On error, mark pending for retry
@@ -239,6 +248,8 @@ async def main():
                 data_iter.mark_pending(item_id)
                 buffer.stats.record_wasted(generated_at_step)
                 tracer.counter("retry", {"stale_evicted": 1, "generated_at_step": generated_at_step, "current_step": current_step})
+                log_sample("evicted", prompt_id=item_id, step=current_step,
+                           generated_at_step=generated_at_step, reason="stale")
                 continue
 
             samples.append(sample)
@@ -256,6 +267,8 @@ async def main():
                     buffer.stats.record_used(s.generated_at_step)
                     lag = current_step - s.generated_at_step
                     lags.append(lag)
+                    log_sample("trained", prompt_id=s.item_id, step=current_step,
+                               generated_at_step=s.generated_at_step, lag=lag)
                 # Log lag distribution for this batch
                 tracer.counter("batch.lag", {
                     "lags": lags,
@@ -357,15 +370,10 @@ async def main():
 
             # Sync weights to reference model
             if step % sync_ref_every == 0:
-                if isinstance(reference, VLLMHandle):
-                    print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> reference)")
-                    await sync_titan_to_vllm(trainer, reference, abort_in_flight=abort_in_flight, step=step)
-                    print(f"[step {step}] Finished sync_titan_to_vllm (reference)")
-                else:
-                    print(f"[step {step}] Starting sync_titan_to_titan (trainer -> reference)")
-                    await sync_titan_to_titan(trainer, reference)
-                    print(f"[step {step}] Finished sync_titan_to_titan")
-
+                print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> reference)")
+                await sync_titan_to_vllm(trainer, reference, abort_in_flight=abort_in_flight, step=step)
+                print(f"[step {step}] Finished sync_titan_to_vllm (reference)")
+                
             if step % sync_model_every == 0:
                 print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> rollout, abort={abort_in_flight})")
                 await sync_titan_to_vllm(trainer, rollout, abort_in_flight=abort_in_flight, step=step)
