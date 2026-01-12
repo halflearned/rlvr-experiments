@@ -130,7 +130,7 @@ roles:
       max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 2  # 2 replicas × 1 GPU = 2 GPUs
-      max_model_len: 1280  # ~256 prompt + 1024 completion
+      max_model_len: 1281  # ~256 prompt + 1024 completion + 1 for max_tokens=1 in logprobs
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       max_num_batched_tokens: 65536

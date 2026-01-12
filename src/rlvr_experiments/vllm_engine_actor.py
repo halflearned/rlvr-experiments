@@ -404,11 +404,8 @@ class VLLMHandle:
         Returns:
             [B, completion_len] tensor of logprobs for completion tokens.
         """
-        import time as time_module
-        t0 = time_module.perf_counter()
         batch_size = input_ids.shape[0]
         completion_len = completion_ids.shape[1]
-        print(f"[VLLMHandle.compute_logprobs] START batch_size={batch_size} completion_len={completion_len}", flush=True)
 
         # Convert tensors to lists for vLLM
         # Strip padding from input_ids based on actual sequence lengths
@@ -439,8 +436,6 @@ class VLLMHandle:
             actual_len = min(len(lps), completion_len)
             result[i, :actual_len] = torch.tensor(lps[:actual_len], dtype=torch.float32)
 
-        t1 = time_module.perf_counter()
-        print(f"[VLLMHandle.compute_logprobs] DONE batch_size={batch_size} time={t1-t0:.3f}s", flush=True)
         return result
 
     async def get_logprobs_single(
@@ -483,9 +478,17 @@ class VLLMHandle:
                     with trace_span("vllm.get_logprobs", args={"replica": replica_idx, "slot": slot_idx, "n_seqs": len(token_ids_list)}):
                         result = await actor.get_logprobs.remote(token_ids_list, prompt_lens)
                     return result
-                except (asyncio.CancelledError, ray.exceptions.RayTaskError):
-                    # Request was aborted - retry
+                except asyncio.CancelledError:
+                    # Request was cancelled - retry
                     continue
+                except ray.exceptions.RayTaskError as e:
+                    # Check if it's a retriable error (AbortedError) vs a real bug
+                    if "AbortedError" in str(e):
+                        continue
+                    else:
+                        # Real error - log and raise
+                        logger.error(f"[get_logprobs_single] RayTaskError: {e}")
+                        raise
             finally:
                 await self._router.release_slot(replica_idx, slot_idx)
                 self._in_flight -= 1
