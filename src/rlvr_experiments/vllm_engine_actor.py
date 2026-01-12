@@ -245,9 +245,9 @@ class VLLMEngineRank:
 class LoadAwareRouter:
     """Route prompts to replicas based on current load."""
 
-    def __init__(self, num_replicas: int, max_concurrent_per_replica: int = 64):
+    def __init__(self, num_replicas: int, max_concurrent_per_replica: int | None = None):
         self._in_flight = [0] * num_replicas
-        self._capacity = max_concurrent_per_replica
+        self._capacity = max_concurrent_per_replica  # None = unlimited
         self._not_full = asyncio.Condition()
         # Track which slots are occupied per replica (for visualization)
         self._occupied_slots: list[set[int]] = [set() for _ in range(num_replicas)]
@@ -257,12 +257,13 @@ class LoadAwareRouter:
 
         Returns:
             Tuple of (replica_idx, slot_idx) where slot_idx is a stable index
-            for visualization (0 to max_concurrent_per_replica-1).
+            for visualization.
         """
         async with self._not_full:
-            # Wait until at least one replica has capacity
-            while all(c >= self._capacity for c in self._in_flight):
-                await self._not_full.wait()
+            # Wait until at least one replica has capacity (if capacity is limited)
+            if self._capacity is not None:
+                while all(c >= self._capacity for c in self._in_flight):
+                    await self._not_full.wait()
 
             # Find replica with lowest in-flight count
             best_idx = min(range(len(self._in_flight)), key=lambda i: self._in_flight[i])
