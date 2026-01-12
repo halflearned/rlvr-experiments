@@ -232,6 +232,7 @@ class TitanModelRank:
         """Get the current training step."""
         return self.model.step
 
+    @torch.no_grad()
     def compute_logprobs(
         self,
         input_ids: torch.Tensor,
@@ -260,7 +261,19 @@ class TitanModelRank:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
+        # DEBUG: Memory before forward
+        if self.rank == 0:
+            alloc_before = torch.cuda.memory_allocated() / 1e9
+            reserved_before = torch.cuda.memory_reserved() / 1e9
+            print(f"[MEM DEBUG {self.group_name}] BEFORE forward: allocated={alloc_before:.2f}GB, reserved={reserved_before:.2f}GB, input_shape={list(input_ids.shape)}", flush=True)
+
         logits = self.model.forward(input_ids)
+
+        # DEBUG: Memory after forward
+        if self.rank == 0:
+            alloc_after = torch.cuda.memory_allocated() / 1e9
+            reserved_after = torch.cuda.memory_reserved() / 1e9
+            print(f"[MEM DEBUG {self.group_name}] AFTER forward: allocated={alloc_after:.2f}GB, reserved={reserved_after:.2f}GB, logits_shape={list(logits.shape) if hasattr(logits, 'shape') else 'DTensor'}", flush=True)
 
         if _PROFILE_TITAN:
             torch.cuda.synchronize()
@@ -273,6 +286,11 @@ class TitanModelRank:
             # DTensor path: compute logprobs with vocab-sharded logits
             with loss_parallel():
                 logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
+                # DEBUG: Memory after logprobs
+                if self.rank == 0:
+                    alloc_lp = torch.cuda.memory_allocated() / 1e9
+                    reserved_lp = torch.cuda.memory_reserved() / 1e9
+                    print(f"[MEM DEBUG {self.group_name}] AFTER logprobs: allocated={alloc_lp:.2f}GB, reserved={reserved_lp:.2f}GB", flush=True)
         else:
             # Regular path: gather logits first if DTensor
             if isinstance(logits, DTensor):

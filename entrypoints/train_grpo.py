@@ -12,7 +12,7 @@ import torch
 from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
-from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_dummy
+from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
@@ -24,6 +24,7 @@ DATASETS = {
     "humaneval": (load_humaneval, HumanEvalVerifier),
     "mbpp": (load_mbpp, MBPPVerifier),
     "gsm8k": (load_gsm8k, MathVerifier),
+    "math": (load_math, MathVerifier),
     "dummy": (load_dummy, MathVerifier),
 }
 
@@ -73,6 +74,7 @@ async def main():
     prompts_per_optim_step = plan.training.get("prompts_per_optim_step")
     prompts_per_forward_backward = plan.training.get("prompts_per_forward_backward")
     completions_per_micro_batch = plan.training.get("completions_per_micro_batch")  # For micro-batching within forward_backward
+    completions_per_micro_batch_reference = plan.training.get("completions_per_micro_batch_reference")  # For reference logprobs
 
     assert prompts_per_optim_step % prompts_per_forward_backward == 0, \
         f"prompts_per_optim_step ({prompts_per_optim_step}) must be divisible by prompts_per_forward_backward ({prompts_per_forward_backward})"
@@ -101,6 +103,11 @@ async def main():
     # Reward stats accumulator (tracks ALL samples including filtered)
     reward_stats = RewardStats()
 
+    # Semaphore to limit concurrent reference model calls
+    # Without this, all producers queue ref_logprobs calls simultaneously,
+    # causing 10-30s latency as requests wait in line
+    ref_semaphore = asyncio.Semaphore(1)
+
     # --- Producer: generate -> {verify, ref_logprobs} concurrently -> buffer ---
     async def produce_epoch():
         async def process_one(item) -> str:
@@ -121,12 +128,22 @@ async def main():
                         return await verifier.verify_completions(item["problem"], completions, version=generated_at_step)
 
                 async def traced_ref_logprobs():
-                    with trace_span("ref_logprobs", args={"generated_at_step": generated_at_step}):
-                        return await reference.compute_logprobs(
-                            rollout_sample.input_ids, rollout_sample.completion_ids,
-                            torch.tensor([rollout_sample.prompt_len] * rollout_sample.input_ids.size(0)))
+                    async with ref_semaphore:
+                        with trace_span("ref_logprobs", args={"generated_at_step": generated_at_step}):
+                            n = rollout_sample.input_ids.size(0)
+                            mb = completions_per_micro_batch_reference or n
+                            chunks = [await reference.compute_logprobs(
+                                rollout_sample.input_ids[i:i+mb],
+                                rollout_sample.completion_ids[i:i+mb],
+                                torch.tensor([rollout_sample.prompt_len] * min(mb, n-i))
+                            ) for i in range(0, n, mb)]
+                            return torch.cat(chunks, dim=0)
 
                 rewards, ref_logprobs = await asyncio.gather(traced_verify(), traced_ref_logprobs())
+
+                # Log all rollouts (even filtered ones) for debugging
+                log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
+                            completions=completions, rewards=rewards, generated_at_step=generated_at_step)
 
                 # Filter - mark consumed even if filtered (don't retry)
                 if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
@@ -152,8 +169,6 @@ async def main():
                 reward_stats.record(rewards, used=True)
                 sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, generated_at_step=generated_at_step)
                 await buffer.put(sample, generated_at_step, item_id=prompt_id)
-                log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
-                            completions=completions, rewards=rewards, generated_at_step=generated_at_step)
                 return prompt_id
             except Exception as e:
                 # On error, mark pending for retry
