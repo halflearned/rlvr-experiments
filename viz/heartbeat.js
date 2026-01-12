@@ -379,37 +379,19 @@ class HeartbeatViz {
     }
 
     async loadDefaultTrace() {
+        // Load from /trace endpoint (serve.py serves the configured trace file there)
         try {
-            // Try /trace first (served by serve.py with configured trace file)
-            // Then fall back to common file locations
-            const paths = [
-                '/trace',  // serve.py endpoint (latest or specified trace)
-                '../traces/trace.jsonl',
-                'traces/trace.jsonl',
-                '../tracers/trace.jsonl',
-                'tracers/trace.jsonl',
-                '../trace.jsonl',
-                '/efs/rlvr-experiments/traces/trace.jsonl'
-            ];
-
-            for (const path of paths) {
-                try {
-                    const response = await fetch(path);
-                    if (response.ok) {
-                        const text = await response.text();
-                        this.processJSONL(text);
-                        console.log(`Loaded trace from ${path}`);
-                        return;
-                    }
-                } catch (e) {
-                    continue;
-                }
+            const response = await fetch('/trace');
+            if (response.ok) {
+                const text = await response.text();
+                this.processJSONL(text);
+                console.log(`Loaded trace: ${text.length} bytes, ${this.events.length} events`);
+                return;
             }
-
-            console.log('No default trace found. Please load a trace file.');
         } catch (e) {
-            console.log('No default trace found:', e);
+            console.error('Failed to load trace from /trace:', e);
         }
+        console.log('No trace loaded. Use: python viz/serve.py <trace_file.jsonl>');
     }
 
     loadFile(file) {
@@ -530,9 +512,6 @@ class HeartbeatViz {
 
             // Counter events (new format: type='counter')
             if (event.type === 'counter') {
-                if (event.name === 'rewards') {
-                    this.metrics.reward.push({ ts, value: event.mean || 0 });
-                }
                 if (event.name === 'metrics') {
                     if (event.loss !== undefined) {
                         this.metrics.loss.push({ ts, value: event.loss });

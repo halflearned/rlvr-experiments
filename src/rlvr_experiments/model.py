@@ -8,6 +8,24 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.checkpoint.state_dict import get_model_state_dict
 
 import torchtitan.protocols.train_spec as train_spec_module
+
+# Monkey-patch torchtitan's reshape_for_broadcast to remove assert that breaks torch.compile
+# with dynamic sequence lengths. The assert is redundant after the slice operation.
+def _patched_reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    ndim = x.ndim
+    assert ndim > 1
+    _, seqlen, _, head_dim = x.shape
+    rope_cache = rope_cache[0:seqlen]
+    # Removed: assert rope_cache.shape == (seqlen, head_dim * 2)
+    # The slice guarantees the shape, and the assert breaks torch.compile with dynamic shapes
+    shape = [-1, seqlen, 1, head_dim * 2]
+    return rope_cache.view(*shape)
+
+try:
+    import torchtitan.models.qwen3.model.model as qwen3_model
+    qwen3_model.reshape_for_broadcast = _patched_reshape_for_broadcast
+except ImportError:
+    pass  # qwen3 model not available
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.ft import FTManager
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
@@ -231,12 +249,9 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
 
             # If we padded the input, trim logits back to original sequence length
             # to maintain correct alignment with target tokens
-            from torch.distributed.tensor import DTensor
+            # Note: We slice DTensor directly to preserve sharding (don't call full_tensor())
             if pad_len > 0:
-                if isinstance(logits, DTensor):
-                    logits = logits.full_tensor()[:, :original_seq_len, :]
-                else:
-                    logits = logits[:, :original_seq_len, :]
+                logits = logits[:, :original_seq_len, :]
 
         logger.debug(f"TitanModel.forward: done, logits type={type(logits).__name__}")
         return logits
