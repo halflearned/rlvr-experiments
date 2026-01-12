@@ -104,19 +104,16 @@ async def main():
     # Reward stats accumulator (tracks ALL samples including filtered)
     reward_stats = RewardStats()
 
-    # Semaphore to limit concurrent reference model calls
-    # Without this, all producers queue ref_logprobs calls simultaneously,
-    # causing 10-30s latency as requests wait in line
-    ref_semaphore = asyncio.Semaphore(1)
-
     # --- Producer: generate -> {verify, ref_logprobs} concurrently -> buffer ---
     async def produce_epoch():
         async def process_one(item) -> str:
             """Process one item. Returns prompt_id for tracking."""
             prompt_id = item["problem"].get("prompt_id", "unknown")
             try:
+                t0 = time.perf_counter()
                 with trace_span("generate"):
                     response = await rollout.generate_single(item["template"], **sp)
+                t_gen = time.perf_counter()
                 # Capture generation_step AFTER generation - this reflects which trainer step's weights were used
                 generated_at_step = rollout.generation_step
 
@@ -129,18 +126,22 @@ async def main():
                         return await verifier.verify_completions(item["problem"], completions, version=generated_at_step)
 
                 async def traced_ref_logprobs():
-                    async with ref_semaphore:
-                        with trace_span("ref_logprobs", args={"generated_at_step": generated_at_step}):
-                            n = rollout_sample.input_ids.size(0)
-                            mb = completions_per_micro_batch_reference or n
-                            chunks = [await reference.compute_logprobs(
-                                rollout_sample.input_ids[i:i+mb],
-                                rollout_sample.completion_ids[i:i+mb],
-                                torch.tensor([rollout_sample.prompt_len] * min(mb, n-i))
-                            ) for i in range(0, n, mb)]
-                            return torch.cat(chunks, dim=0)
+                    t_start = time.perf_counter()
+                    with trace_span("ref_logprobs", args={"generated_at_step": generated_at_step}):
+                        n = rollout_sample.input_ids.size(0)
+                        mb = completions_per_micro_batch_reference or n
+                        chunks = [await reference.compute_logprobs(
+                            rollout_sample.input_ids[i:i+mb],
+                            rollout_sample.completion_ids[i:i+mb],
+                            torch.tensor([rollout_sample.prompt_len] * min(mb, n-i))
+                        ) for i in range(0, n, mb)]
+                        t_done = time.perf_counter()
+                        print(f"[TIMING ref_logprobs] compute={t_done-t_start:.2f}s", flush=True)
+                        return torch.cat(chunks, dim=0)
 
                 rewards, ref_logprobs = await asyncio.gather(traced_verify(), traced_ref_logprobs())
+                t_verify_ref = time.perf_counter()
+                print(f"[TIMING process_one] gen={t_gen-t0:.2f}s verify+ref={t_verify_ref-t_gen:.2f}s total={t_verify_ref-t0:.2f}s", flush=True)
 
                 # Log all rollouts (even filtered ones) for debugging
                 log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
@@ -176,30 +177,52 @@ async def main():
                 data_iter.mark_pending(prompt_id)
                 raise
 
-        # Spawn all tasks - vLLM's LoadAwareRouter handles backpressure
+        # Limit concurrent tasks to avoid queueing thousands waiting for slots
+        # 4 rollout replicas × 8 concurrent per replica = 32 active generations
+        # Add 2x headroom for pipelining verify+ref after generation completes
+        max_concurrent_tasks = 64
         tasks: set[asyncio.Task] = set()
-        for item in data_iter:
-            tasks.add(asyncio.create_task(process_one(item)))
+        data_iter_instance = iter(data_iter)  # Get iterator once
+        data_iter_exhausted = False
 
-        # Wait for all to complete, spawning retries as needed
-        # (consumer may mark items pending due to staleness)
-        while not data_iter.all_consumed():
-            # Spawn any newly pending items (from consumer staleness check or errors)
-            while True:
+        def spawn_tasks_up_to_limit():
+            """Spawn tasks from data_iter until we hit the limit or exhaust the iterator."""
+            nonlocal data_iter_exhausted
+            while len(tasks) < max_concurrent_tasks:
+                # First check pending items (retries from staleness)
                 item = data_iter.next_pending()
-                if item is None:
+                if item is not None:
+                    tasks.add(asyncio.create_task(process_one(item)))
+                    continue
+                # Then get new items from data_iter
+                if not data_iter_exhausted:
+                    try:
+                        item = next(data_iter_instance)
+                        tasks.add(asyncio.create_task(process_one(item)))
+                    except StopIteration:
+                        data_iter_exhausted = True
+                        break
+                else:
                     break
-                tasks.add(asyncio.create_task(process_one(item)))
 
+        # Initial spawn
+        spawn_tasks_up_to_limit()
+
+        # Process tasks, spawning new ones as slots free up
+        while not data_iter.all_consumed():
             if not tasks:
                 # All tasks done but not all consumed - items in buffer waiting
                 await asyncio.sleep(0.01)
+                spawn_tasks_up_to_limit()
                 continue
 
             done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 if task.exception():
                     print(f"[producer] task failed: {task.exception()}")
+
+            # Spawn more tasks to replace completed ones
+            spawn_tasks_up_to_limit()
 
         await buffer.mark_done()
 

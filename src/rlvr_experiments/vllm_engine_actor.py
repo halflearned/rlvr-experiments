@@ -282,7 +282,9 @@ class LoadAwareRouter:
         async with self._not_full:
             self._in_flight[replica_idx] -= 1
             self._occupied_slots[replica_idx].discard(slot_idx)
-            self._not_full.notify_all()
+            # Use notify(1) instead of notify_all() to avoid thundering herd
+            # Only one slot was released, so only one waiter needs to wake
+            self._not_full.notify(1)
 
     def get_load(self) -> list[int]:
         """Get current in-flight counts (for metrics)."""
@@ -345,13 +347,24 @@ class VLLMHandle:
         If the request is aborted due to weight sync, automatically retries
         after sync completes. Callers don't need to handle AbortedError.
         """
+        t_enter = time.perf_counter()
         while True:
             # Wait if paused
+            t_pause_start = time.perf_counter()
             if not self._paused.is_set():
                 await self._paused.wait()
+            t_pause_end = time.perf_counter()
 
             # Acquire slot first (this is where backpressure happens)
+            t_slot_start = time.perf_counter()
             replica_idx, slot_idx = await self._router.acquire_slot()
+            t_slot_end = time.perf_counter()
+
+            # Log timing if there was significant wait
+            pause_wait = t_pause_end - t_pause_start
+            slot_wait = t_slot_end - t_slot_start
+            if pause_wait > 0.1 or slot_wait > 0.1:
+                print(f"[TIMING generate_single] pause_wait={pause_wait:.2f}s slot_wait={slot_wait:.2f}s", flush=True)
 
             # Now track in-flight (only after we have a slot)
             self._in_flight += 1
@@ -366,8 +379,14 @@ class VLLMHandle:
 
                 actor = self._actors[replica_idx]
                 try:
+                    t_gen_start = time.perf_counter()
                     with trace_span("vllm.generate_single", args={"replica": replica_idx, "slot": slot_idx}):
                         result = await actor.generate.remote([prompt], **sampling_params)
+                    t_gen_end = time.perf_counter()
+                    gen_time = t_gen_end - t_gen_start
+                    total_time = t_gen_end - t_enter
+                    if total_time > 5.0:
+                        print(f"[TIMING generate_single DONE] gen={gen_time:.2f}s total={total_time:.2f}s overhead={total_time-gen_time:.2f}s", flush=True)
                     # Check if result was aborted (empty outputs)
                     if result and result[0].outputs and len(result[0].outputs) > 0:
                         # Check if any output has tokens (not all aborted)
