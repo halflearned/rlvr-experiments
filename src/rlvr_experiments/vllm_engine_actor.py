@@ -304,16 +304,16 @@ class VLLMHandle:
         self._paused = asyncio.Event()
         self._paused.set()  # Initially not paused (gate is open)
         self.name = name
-        self._generation_step = 0  # Trainer step when weights were last synced
+        self._trainer_version = 0  # Trainer version when weights were last synced
 
     @property
-    def generation_step(self) -> int:
-        """Trainer step when weights were last synced to this vLLM."""
-        return self._generation_step
+    def trainer_version(self) -> int:
+        """Trainer version when weights were last synced to this vLLM."""
+        return self._trainer_version
 
-    def set_generation_step(self, step: int) -> None:
-        """Update generation step after weight sync."""
-        self._generation_step = step
+    def set_trainer_version(self, version: int) -> None:
+        """Update trainer version after weight sync."""
+        self._trainer_version = version
 
     @property
     def num_replicas(self) -> int:

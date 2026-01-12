@@ -113,7 +113,7 @@ class TrainSample:
     rewards: list[float]
     ref_logprobs: torch.Tensor
     item_id: str  # prompt_id for status tracking
-    generated_at_step: int  # trainer step when weights were synced to vLLM
+    generated_at_version: int  # trainer version when weights were synced to vLLM
 
 
 @dataclass

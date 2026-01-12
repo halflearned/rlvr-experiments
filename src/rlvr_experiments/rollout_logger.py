@@ -31,7 +31,7 @@ class RolloutLogger:
         prompt: str,
         completions: list[str],
         rewards: list[float],
-        generated_at_step: int,
+        generated_at_version: int,
         epoch: int | None = None,
         **extra: Any,
     ):
@@ -42,7 +42,7 @@ class RolloutLogger:
             prompt: The prompt text (without chat template)
             completions: List of generated completions
             rewards: List of rewards (same length as completions)
-            generated_at_step: Trainer step when weights were synced to vLLM for this generation
+            generated_at_version: Trainer step when weights were synced to vLLM for this generation
             epoch: Training epoch (optional)
             **extra: Additional fields to include
         """
@@ -51,7 +51,7 @@ class RolloutLogger:
             "prompt": prompt,
             "completions": completions,
             "rewards": rewards,
-            "generated_at_step": generated_at_step,
+            "generated_at_version": generated_at_version,
         }
         if epoch is not None:
             record["epoch"] = epoch
@@ -95,12 +95,12 @@ def log_rollout(
     prompt: str,
     completions: list[str],
     rewards: list[float],
-    generated_at_step: int,
+    generated_at_version: int,
     **extra: Any,
 ):
     """Log a rollout. No-op if logger not initialized."""
     if _LOGGER:
-        _LOGGER.log(prompt_id, prompt, completions, rewards, generated_at_step, **extra)
+        _LOGGER.log(prompt_id, prompt, completions, rewards, generated_at_version, **extra)
 
 
 def get_rollout_logger() -> Optional[RolloutLogger]:

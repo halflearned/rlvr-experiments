@@ -80,16 +80,16 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
 
 
 @traced("sync.trainer_to_vllm")
-async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype="bfloat16", abort_in_flight=True, step=0):
+async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype="bfloat16", abort_in_flight=True, trainer_version=0):
     """Sync weights from trainer to vLLM.
 
     Pauses generation, aborts or waits for in-flight requests, syncs, then resumes.
-    Updates vllm.generation_step AFTER sync so new samples are tagged with current step.
+    Updates vllm.trainer_version AFTER sync so new samples are tagged with this version.
 
     Args:
         abort_in_flight: If True (default), abort in-flight requests instead of waiting.
                          This avoids wasted generation/verification work for stale samples.
-        step: Current trainer step - samples generated after this sync will be tagged with this step.
+        trainer_version: Current trainer version - samples generated after this sync will be tagged with this version.
     """
     with trace_span("sync.waiting_for_vllm_pause"):
         await vllm.stop(abort=abort_in_flight)
@@ -100,8 +100,8 @@ async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype
             await _sync_chunks(trainer, vllm._actors, channel, chunk_mb, wire_dtype, src_rank,
                                f"synced {trainer.name} -> {vllm.name}")
     finally:
-        # Update generation step AFTER sync - new samples will be tagged with this step
-        vllm.set_generation_step(step)
+        # Update trainer version AFTER sync - new samples will be tagged with this version
+        vllm.set_trainer_version(trainer_version)
         vllm.resume()
 
 
