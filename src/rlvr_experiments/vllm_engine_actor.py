@@ -162,9 +162,16 @@ class LoadAwareRouter:
         self._in_flight = [0] * num_replicas
         self._capacity = max_concurrent_per_replica
         self._not_full = asyncio.Condition()
+        # Track which slots are occupied per replica (for visualization)
+        self._occupied_slots: list[set[int]] = [set() for _ in range(num_replicas)]
 
-    async def acquire_slot(self) -> int:
-        """Get the index of the least-loaded replica and acquire a slot."""
+    async def acquire_slot(self) -> tuple[int, int]:
+        """Get the index of the least-loaded replica and acquire a slot.
+
+        Returns:
+            Tuple of (replica_idx, slot_idx) where slot_idx is a stable index
+            for visualization (0 to max_concurrent_per_replica-1).
+        """
         async with self._not_full:
             # Wait until at least one replica has capacity
             while all(c >= self._capacity for c in self._in_flight):
@@ -173,12 +180,21 @@ class LoadAwareRouter:
             # Find replica with lowest in-flight count
             best_idx = min(range(len(self._in_flight)), key=lambda i: self._in_flight[i])
             self._in_flight[best_idx] += 1
-            return best_idx
 
-    async def release_slot(self, replica_idx: int) -> None:
+            # Find first available slot index for this replica
+            occupied = self._occupied_slots[best_idx]
+            slot_idx = 0
+            while slot_idx in occupied:
+                slot_idx += 1
+            occupied.add(slot_idx)
+
+            return best_idx, slot_idx
+
+    async def release_slot(self, replica_idx: int, slot_idx: int) -> None:
         """Release a slot on the given replica."""
         async with self._not_full:
             self._in_flight[replica_idx] -= 1
+            self._occupied_slots[replica_idx].discard(slot_idx)
             self._not_full.notify_all()
 
     def get_load(self) -> list[int]:
@@ -248,7 +264,7 @@ class VLLMHandle:
                 await self._paused.wait()
 
             # Acquire slot first (this is where backpressure happens)
-            replica_idx = await self._router.acquire_slot()
+            replica_idx, slot_idx = await self._router.acquire_slot()
 
             # Now track in-flight (only after we have a slot)
             self._in_flight += 1
@@ -263,7 +279,7 @@ class VLLMHandle:
 
                 actor = self._actors[replica_idx]
                 try:
-                    with trace_span("vllm.generate_single", args={"replica": replica_idx}):
+                    with trace_span("vllm.generate_single", args={"replica": replica_idx, "slot": slot_idx}):
                         result = await actor.generate.remote([prompt], **sampling_params)
                     # Check if result was aborted (empty outputs)
                     if result and result[0].outputs and len(result[0].outputs) > 0:
@@ -277,7 +293,7 @@ class VLLMHandle:
                     # Request was aborted due to weight sync - will retry after finally block
                     continue
             finally:
-                await self._router.release_slot(replica_idx)
+                await self._router.release_slot(replica_idx, slot_idx)
                 self._in_flight -= 1
                 if self._in_flight == 0:
                     self._in_flight_zero.set()

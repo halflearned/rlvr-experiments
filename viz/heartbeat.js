@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 26');
+console.log('[heartbeat.js] Script loaded, version 27');
 
 class HeartbeatViz {
     constructor() {
@@ -115,6 +115,19 @@ class HeartbeatViz {
             verifyToggle.addEventListener('click', () => {
                 this.verifiersCollapsed = !this.verifiersCollapsed;
                 verifyToggle.classList.toggle('collapsed', this.verifiersCollapsed);
+                this.updateTimelinePanelHeight();
+                this.render();
+            });
+        }
+
+        // Setup vLLM toggle (collapsed by default - shows 1 lane per replica)
+        this.vllmCollapsed = true;
+        const vllmToggle = document.getElementById('vllm-toggle');
+        if (vllmToggle) {
+            vllmToggle.classList.add('collapsed');  // Start collapsed
+            vllmToggle.addEventListener('click', () => {
+                this.vllmCollapsed = !this.vllmCollapsed;
+                vllmToggle.classList.toggle('collapsed', this.vllmCollapsed);
                 this.updateTimelinePanelHeight();
                 this.render();
             });
@@ -496,12 +509,13 @@ class HeartbeatViz {
         this.rewardVsLen = [];
 
         // For utilization tracking
-        this.vllmSpans = [];  // {replica, ts, dur}
+        this.vllmSpans = [];  // {replica, slot, ts, dur}
         this.trainerSpans = [];  // {ts, dur}
         this.verifierSpans = [];  // {worker, ts, dur, n, passed}
 
         // Metadata from trace (for dynamic lane configuration)
         this.numVllmReplicas = 0;  // Detected from spans
+        this.vllmMaxConcurrent = 0;  // Max concurrent slots per replica (detected from spans)
         this.numVerifierWorkers = 0;  // From meta event or detected from spans
         this.verifierMaxConcurrent = 0;  // From meta event (max_concurrent containers per worker)
 
@@ -647,7 +661,12 @@ class HeartbeatViz {
                 // Track vLLM generation spans (prefer vllm.generate_single which has replica info)
                 if (event.name === 'vllm.generate_single' || event.name === 'vllm.generate' ||
                     (event.name === 'generate' && event.replica !== undefined)) {
-                    this.vllmSpans.push({ replica: event.replica || 0, ts: event.ts, dur: event.dur || 0 });
+                    this.vllmSpans.push({
+                        replica: event.replica || 0,
+                        slot: event.slot !== undefined ? event.slot : 0,
+                        ts: event.ts,
+                        dur: event.dur || 0
+                    });
                 }
                 // Track trainer spans
                 if (event.name === 'forward_backward') {
@@ -705,6 +724,12 @@ class HeartbeatViz {
         const vllmReplicas = new Set(this.vllmSpans.map(s => s.replica));
         this.numVllmReplicas = Math.max(this.numVllmReplicas, vllmReplicas.size);
 
+        // Detect max_concurrent slots per vLLM replica from span data
+        if (this.vllmSpans.length > 0) {
+            const maxSlot = Math.max(...this.vllmSpans.map(s => s.slot));
+            this.vllmMaxConcurrent = Math.max(this.vllmMaxConcurrent, maxSlot + 1);
+        }
+
         const verifierWorkers = new Set(this.verifierSpans.map(s => s.worker));
         this.numVerifierWorkers = Math.max(this.numVerifierWorkers, verifierWorkers.size);
 
@@ -722,11 +747,13 @@ class HeartbeatViz {
      * Dynamically adjust timeline panel height based on number of lanes.
      */
     updateTimelinePanelHeight() {
-        // Calculate number of lanes: vLLM replicas + Reference + Trainer + Sync + Verifier (workers × slots)
-        const numVllm = Math.max(1, this.numVllmReplicas);  // At least 1
+        // Calculate number of lanes: vLLM (replicas or replicas×slots) + Reference + Trainer + Sync + Verifier (workers × slots)
+        const numVllmReplicas = Math.max(1, this.numVllmReplicas);
+        const vllmMaxSlots = Math.max(1, this.vllmMaxConcurrent);
+        const numVllmLanes = this.vllmCollapsed ? numVllmReplicas : numVllmReplicas * vllmMaxSlots;
         const numVerifierSlots = this.verifiersCollapsed ? 0 : this.numVerifierWorkers * Math.max(1, this.verifierMaxConcurrent);
         const fixedLanes = 3;  // Reference, Trainer, Sync
-        const totalLanes = numVllm + fixedLanes + numVerifierSlots;
+        const totalLanes = numVllmLanes + fixedLanes + numVerifierSlots;
 
         // Base height per lane (pixels), with min/max bounds
         const heightPerLane = 28;
@@ -1183,9 +1210,9 @@ class HeartbeatViz {
         // Build dynamic swimlanes based on actual data
         const lanes = [];
 
-        // vLLM lanes (dynamic count, max 8)
-        // Use vllm.generate_single which has replica info, or vllm.generate/generate if they have replica
+        // vLLM lanes - either one per replica (collapsed) or one per replica+slot (expanded)
         const numVllm = Math.min(8, Math.max(1, this.numVllmReplicas));
+        const vllmMaxSlots = Math.max(1, this.vllmMaxConcurrent);
         const isVllmSpan = (e) => {
             if (e.name === 'vllm.generate_single') return true;
             if (e.name === 'vllm.generate') return true;
@@ -1193,11 +1220,27 @@ class HeartbeatViz {
             if (e.name === 'generate' && e.replica !== undefined) return true;
             return false;
         };
-        for (let i = 0; i < numVllm; i++) {
-            lanes.push({
-                name: numVllm === 1 ? 'vLLM' : `vLLM ${i}`,
-                filter: e => e.type === 'span' && isVllmSpan(e) && (e.replica || 0) === i
-            });
+
+        if (this.vllmCollapsed) {
+            // Collapsed: one lane per replica (spans overlap within lane)
+            for (let i = 0; i < numVllm; i++) {
+                lanes.push({
+                    name: numVllm === 1 ? 'vLLM' : `vLLM ${i}`,
+                    filter: e => e.type === 'span' && isVllmSpan(e) && (e.replica || 0) === i
+                });
+            }
+        } else {
+            // Expanded: one lane per replica+slot (each span has its own row)
+            for (let r = 0; r < numVllm; r++) {
+                for (let s = 0; s < vllmMaxSlots; s++) {
+                    lanes.push({
+                        name: `G${r}-${s}`,  // Compact: "G0-0", "G0-1", etc. (G for Generate)
+                        filter: e => e.type === 'span' && isVllmSpan(e) &&
+                                    (e.replica || 0) === r &&
+                                    (e.slot !== undefined ? e.slot : 0) === s
+                    });
+                }
+            }
         }
 
         // Fixed lanes

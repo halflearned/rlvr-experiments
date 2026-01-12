@@ -712,9 +712,10 @@
                 </div>
                 <button class="panel-toggle" id="timeline-toggle" title="Toggle rendering (improves performance)">▶ Enable</button>
                 <div class="legend">
-                    <div class="legend-item">
+                    <div class="legend-item legend-toggle" id="vllm-toggle" title="Click to show/hide vLLM slots">
                         <div class="legend-dot" style="background: #3fb950;"></div>
-                        <span>vLLM Generate</span>
+                        <span>vLLM</span>
+                        <span class="toggle-indicator">▼</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-dot" style="background: #58a6ff;"></div>
@@ -1096,6 +1097,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=39"></script>
+    <script src="heartbeat.js?v=40"></script>
 </body>
 </html>
