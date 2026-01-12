@@ -247,6 +247,12 @@ def make_batch(
     else:
         padded_seq_len = seq_buckets[-1]
 
+    # If seq_len was clamped to max bucket, we must also clamp completion_len
+    # to ensure completion fits within sequence: prompt_len + completion_len <= seq_len
+    max_completion_for_seq = padded_seq_len - max_prompt_len
+    if padded_completion_len > max_completion_for_seq:
+        padded_completion_len = max_completion_for_seq
+
     # Build prompt_lens
     prompt_lens_list = [r.prompt_len for r in rollouts for _ in range(r.input_ids.size(0))]
 
