@@ -182,28 +182,14 @@ async def main():
         # Add 2x headroom for pipelining verify+ref after generation completes
         max_concurrent_tasks = 64
         tasks: set[asyncio.Task] = set()
-        data_iter_instance = iter(data_iter)  # Get iterator once
-        data_iter_exhausted = False
 
         def spawn_tasks_up_to_limit():
-            """Spawn tasks from data_iter until we hit the limit or exhaust the iterator."""
-            nonlocal data_iter_exhausted
+            """Spawn tasks until we hit the limit or run out of pending items."""
             while len(tasks) < max_concurrent_tasks:
-                # First check pending items (retries from staleness)
-                item = data_iter.next_pending()
-                if item is not None:
-                    tasks.add(asyncio.create_task(process_one(item)))
-                    continue
-                # Then get new items from data_iter
-                if not data_iter_exhausted:
-                    try:
-                        item = next(data_iter_instance)
-                        tasks.add(asyncio.create_task(process_one(item)))
-                    except StopIteration:
-                        data_iter_exhausted = True
-                        break
-                else:
+                item = data_iter.get_next()
+                if item is None:
                     break
+                tasks.add(asyncio.create_task(process_one(item)))
 
         # Initial spawn
         spawn_tasks_up_to_limit()

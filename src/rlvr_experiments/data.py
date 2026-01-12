@@ -309,13 +309,21 @@ class DataIterator:
         """Count of consumed prompts."""
         return sum(1 for s in self._status.values() if s == "consumed")
 
-    def next_pending(self) -> dict | None:
-        """Get next pending item and mark it in_flight. Returns None if no pending."""
+    def get_next(self) -> dict | None:
+        """Get next pending item and mark it in_flight.
+
+        Returns the next available item (either a retry or new item), or None
+        if all items are either in_flight or consumed. This is the primary
+        interface for getting work items.
+        """
         for pid in self._prompt_ids:
             if self._status.get(pid) == "pending":
                 self._status[pid] = "in_flight"
                 return self._get_item(pid)
         return None
+
+    # Legacy alias
+    next_pending = get_next
 
     # --- Legacy iteration interface (for compatibility) ---
 
@@ -324,7 +332,7 @@ class DataIterator:
 
     def __next__(self) -> dict:
         """Legacy interface: get next pending item or raise StopIteration."""
-        item = self.next_pending()
+        item = self.get_next()
         if item is None:
             raise StopIteration
         return item
