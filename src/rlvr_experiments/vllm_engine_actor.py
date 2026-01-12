@@ -404,8 +404,11 @@ class VLLMHandle:
         Returns:
             [B, completion_len] tensor of logprobs for completion tokens.
         """
+        import time as time_module
+        t0 = time_module.perf_counter()
         batch_size = input_ids.shape[0]
         completion_len = completion_ids.shape[1]
+        print(f"[VLLMHandle.compute_logprobs] START batch_size={batch_size} completion_len={completion_len}", flush=True)
 
         # Convert tensors to lists for vLLM
         # Strip padding from input_ids based on actual sequence lengths
@@ -436,6 +439,8 @@ class VLLMHandle:
             actual_len = min(len(lps), completion_len)
             result[i, :actual_len] = torch.tensor(lps[:actual_len], dtype=torch.float32)
 
+        t1 = time_module.perf_counter()
+        print(f"[VLLMHandle.compute_logprobs] DONE batch_size={batch_size} time={t1-t0:.3f}s", flush=True)
         return result
 
     async def get_logprobs_single(
