@@ -17,6 +17,7 @@ from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
+from rlvr_experiments.vllm_engine_actor import VLLMHandle
 from rlvr_experiments.tracer import trace_span
 from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier, MathVerifier
 
@@ -345,11 +346,16 @@ async def main():
             avg_loss = accum_loss / accumulation_steps
             print(f"[TIMING] forward_backward={1000*(t1-t0):.0f}ms, gap={1000*(t2-t1):.0f}ms, optim_step={1000*(t3-t2):.0f}ms")
 
-            # Sync weights
+            # Sync weights to reference model
             if step % sync_ref_every == 0:
-                print(f"[step {step}] Starting sync_titan_to_titan (trainer -> reference)")
-                await sync_titan_to_titan(trainer, reference)
-                print(f"[step {step}] Finished sync_titan_to_titan")
+                if isinstance(reference, VLLMHandle):
+                    print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> reference)")
+                    await sync_titan_to_vllm(trainer, reference, abort_in_flight=abort_in_flight, step=step)
+                    print(f"[step {step}] Finished sync_titan_to_vllm (reference)")
+                else:
+                    print(f"[step {step}] Starting sync_titan_to_titan (trainer -> reference)")
+                    await sync_titan_to_titan(trainer, reference)
+                    print(f"[step {step}] Finished sync_titan_to_titan")
 
             if step % sync_model_every == 0:
                 print(f"[step {step}] Starting sync_titan_to_vllm (trainer -> rollout, abort={abort_in_flight})")

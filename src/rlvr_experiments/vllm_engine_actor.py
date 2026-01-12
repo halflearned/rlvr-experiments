@@ -120,6 +120,93 @@ class VLLMEngineRank:
 
         return results
 
+    async def get_logprobs(
+        self,
+        token_ids_list: list[list[int]],
+        prompt_lens: list[int],
+    ) -> list[list[float]]:
+        """Get logprobs for pre-tokenized sequences (for reference model use).
+
+        This is used for computing reference model logprobs efficiently. Instead of
+        running a full forward pass through a Titan model, we leverage vLLM's
+        prompt_logprobs feature with max_tokens=0.
+
+        Args:
+            token_ids_list: List of token ID sequences (prompt + completion).
+            prompt_lens: Length of the prompt portion for each sequence.
+                        Logprobs are returned only for tokens after this position.
+
+        Returns:
+            List of logprob lists, one per sequence. Each inner list contains
+            the logprob of each completion token (length = seq_len - prompt_len).
+        """
+        t0 = time.perf_counter()
+
+        # Use prompt_logprobs to get logprobs for input tokens, max_tokens=0 for no generation
+        sp = SamplingParams(
+            max_tokens=1,  # vLLM requires at least 1, but we ignore the output
+            prompt_logprobs=1,  # Get logprob of each prompt token
+            temperature=1.0,  # Doesn't matter since we're not sampling
+        )
+        sp.output_kind = RequestOutputKind.FINAL_ONLY
+
+        async def process_single(token_ids: list[int], prompt_len: int) -> list[float]:
+            req_id = str(uuid.uuid4())
+            self._active_requests.add(req_id)
+            try:
+                # Convert token_ids to a TokensPrompt for vLLM
+                from vllm.inputs import TokensPrompt
+                prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+                final = None
+                async for out in self.engine.generate(prompt, sp.clone(), req_id):
+                    final = out if final is None else final.add(out, aggregate=False) or final
+
+                # Extract logprobs for completion tokens (after prompt_len)
+                # prompt_logprobs is a list of dicts, one per token position
+                # Each dict maps token_id -> Logprob object
+                if final is None or final.prompt_logprobs is None:
+                    # Fallback: return zeros if no logprobs available
+                    return [0.0] * (len(token_ids) - prompt_len)
+
+                completion_logprobs = []
+                # prompt_logprobs[i] contains logprob info for token at position i
+                # We want logprobs for positions [prompt_len, len(token_ids))
+                # The logprob at position i is P(token[i] | token[0:i])
+                for i in range(prompt_len, len(token_ids)):
+                    if i < len(final.prompt_logprobs) and final.prompt_logprobs[i] is not None:
+                        token_id = token_ids[i]
+                        lp_dict = final.prompt_logprobs[i]
+                        if token_id in lp_dict:
+                            completion_logprobs.append(lp_dict[token_id].logprob)
+                        else:
+                            # Token not in top-k, use a small default
+                            completion_logprobs.append(-100.0)
+                    else:
+                        completion_logprobs.append(-100.0)
+
+                return completion_logprobs
+            finally:
+                self._active_requests.discard(req_id)
+
+        results = await asyncio.gather(*[
+            process_single(tids, plen)
+            for tids, plen in zip(token_ids_list, prompt_lens)
+        ])
+
+        t1 = time.perf_counter()
+        total_tokens = sum(len(tids) for tids in token_ids_list)
+        print(
+            f"[vLLM LOGPROBS replica={self.replica_id}] "
+            f"seqs={len(token_ids_list)}  "
+            f"total_tokens={total_tokens}  "
+            f"time={t1-t0:.2f}s  "
+            f"tps={total_tokens/(t1-t0):.0f}",
+            flush=True
+        )
+
+        return results
+
     async def recv_chunk(self, channel: str, chunk: dict, dtype_str: str, src_rank: int):
         # channel is unused - vLLM only has one sync channel
         await self.engine.collective_rpc(
@@ -291,6 +378,108 @@ class VLLMHandle:
                     continue
                 except (asyncio.CancelledError, ray.exceptions.RayTaskError):
                     # Request was aborted due to weight sync - will retry after finally block
+                    continue
+            finally:
+                await self._router.release_slot(replica_idx, slot_idx)
+                self._in_flight -= 1
+                if self._in_flight == 0:
+                    self._in_flight_zero.set()
+
+    async def compute_logprobs(
+        self,
+        input_ids: torch.Tensor,
+        completion_ids: torch.Tensor,
+        prompt_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute logprobs for reference model use (Titan-compatible interface).
+
+        This method provides the same interface as DistributedModelHandle.compute_logprobs
+        so vLLM can be used as a drop-in replacement for the reference model.
+
+        Args:
+            input_ids: [B, seq_len] - full sequence (prompt + completion + padding)
+            completion_ids: [B, completion_len] - just the completion tokens (for shape reference)
+            prompt_lens: [B] - length of prompt for each sample
+
+        Returns:
+            [B, completion_len] tensor of logprobs for completion tokens.
+        """
+        batch_size = input_ids.shape[0]
+        completion_len = completion_ids.shape[1]
+
+        # Convert tensors to lists for vLLM
+        # Strip padding from input_ids based on actual sequence lengths
+        token_ids_list = []
+        prompt_lens_list = prompt_lens.tolist()
+
+        for i in range(batch_size):
+            # Get actual sequence length (up to first pad token or end)
+            seq = input_ids[i].tolist()
+            plen = prompt_lens_list[i]
+            # Find actual completion length (non-padding portion)
+            comp_seq = completion_ids[i].tolist()
+            actual_comp_len = completion_len
+            for j in range(completion_len):
+                if comp_seq[j] == 0:  # Assuming 0 is pad_token_id or we need to strip trailing zeros
+                    actual_comp_len = j
+                    break
+            # Actual sequence = prompt + completion (no trailing padding)
+            actual_seq_len = plen + actual_comp_len
+            token_ids_list.append(seq[:actual_seq_len])
+
+        # Get logprobs from vLLM
+        logprobs_lists = await self.get_logprobs_single(token_ids_list, prompt_lens_list)
+
+        # Convert back to padded tensor [B, completion_len]
+        result = torch.zeros(batch_size, completion_len, dtype=torch.float32)
+        for i, lps in enumerate(logprobs_lists):
+            actual_len = min(len(lps), completion_len)
+            result[i, :actual_len] = torch.tensor(lps[:actual_len], dtype=torch.float32)
+
+        return result
+
+    async def get_logprobs_single(
+        self,
+        token_ids_list: list[list[int]],
+        prompt_lens: list[int],
+    ) -> list[list[float]]:
+        """Get logprobs for pre-tokenized sequences with load-aware routing.
+
+        Used for reference model logprob computation. Routes to the replica
+        with fewest in-flight requests.
+
+        Args:
+            token_ids_list: List of token ID sequences (prompt + completion).
+            prompt_lens: Length of prompt portion for each sequence.
+
+        Returns:
+            List of logprob lists for completion tokens.
+        """
+        while True:
+            # Wait if paused
+            if not self._paused.is_set():
+                await self._paused.wait()
+
+            # Acquire slot first (this is where backpressure happens)
+            replica_idx, slot_idx = await self._router.acquire_slot()
+
+            # Track in-flight
+            self._in_flight += 1
+            if self._in_flight == 1:
+                self._in_flight_zero.clear()
+
+            try:
+                # Check if we got paused while waiting for slot
+                if not self._paused.is_set():
+                    continue
+
+                actor = self._actors[replica_idx]
+                try:
+                    with trace_span("vllm.get_logprobs", args={"replica": replica_idx, "slot": slot_idx, "n_seqs": len(token_ids_list)}):
+                        result = await actor.get_logprobs.remote(token_ids_list, prompt_lens)
+                    return result
+                except (asyncio.CancelledError, ray.exceptions.RayTaskError):
+                    # Request was aborted - retry
                     continue
             finally:
                 await self._router.release_slot(replica_idx, slot_idx)
