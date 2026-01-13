@@ -47,25 +47,27 @@ class TestDataBufferPutPop:
         await buffer.put("second", version=0, item_id="id2")
         await buffer.put("third", version=0, item_id="id3")
 
-        result1 = await buffer.pop()
-        assert result1[0] == "first"
-        assert result1[1] == "id1"
-        assert result1[2] == 0
+        entry1 = await buffer.pop()
+        assert entry1.item == "first"
+        assert entry1.item_id == "id1"
+        assert entry1.version == 0
 
-        result2 = await buffer.pop()
-        assert result2[0] == "second"
+        entry2 = await buffer.pop()
+        assert entry2.item == "second"
 
-        result3 = await buffer.pop()
-        assert result3[0] == "third"
+        entry3 = await buffer.pop()
+        assert entry3.item == "third"
 
     @pytest.mark.asyncio
-    async def test_pop_returns_tuple(self, ray_context):
-        """pop() returns (item, item_id, version) tuple."""
+    async def test_pop_returns_entry(self, ray_context):
+        """pop() returns Entry with item, item_id, version."""
         buffer = DataBuffer()
         await buffer.put("item", version=5, item_id="prompt_123")
 
-        result = await buffer.pop()
-        assert result == ("item", "prompt_123", 5)
+        entry = await buffer.pop()
+        assert entry.item == "item"
+        assert entry.item_id == "prompt_123"
+        assert entry.version == 5
 
     @pytest.mark.asyncio
     async def test_stats_tracking(self, ray_context):
@@ -90,11 +92,13 @@ class TestDataBufferVersionTracking:
         await buffer.put("new", version=5, item_id="id2")
 
         # Buffer returns all items with their version - consumer decides staleness
-        result1 = await buffer.pop()
-        assert result1 == ("old", "id1", 0)
+        entry1 = await buffer.pop()
+        assert entry1.item == "old"
+        assert entry1.version == 0
 
-        result2 = await buffer.pop()
-        assert result2 == ("new", "id2", 5)
+        entry2 = await buffer.pop()
+        assert entry2.item == "new"
+        assert entry2.version == 5
 
     @pytest.mark.asyncio
     async def test_by_version_stats(self, ray_context):
@@ -131,17 +135,17 @@ class TestDataBufferMaxReads:
         await buffer.put("item", version=0, item_id="id1")
 
         # First two reads should keep the entry
-        result1 = await buffer.pop()
-        assert result1[0] == "item"
+        entry1 = await buffer.pop()
+        assert entry1.item == "item"
         assert buffer.size() == 1
 
-        result2 = await buffer.pop()
-        assert result2[0] == "item"
+        entry2 = await buffer.pop()
+        assert entry2.item == "item"
         assert buffer.size() == 1
 
         # Third read should remove it
-        result3 = await buffer.pop()
-        assert result3[0] == "item"
+        entry3 = await buffer.pop()
+        assert entry3.item == "item"
         assert buffer.size() == 0
 
     @pytest.mark.asyncio
@@ -150,10 +154,10 @@ class TestDataBufferMaxReads:
 
         await buffer.put("item", version=0, item_id="id1")
 
-        result1 = await buffer.pop()
-        result2 = await buffer.pop()
+        entry1 = await buffer.pop()
+        entry2 = await buffer.pop()
 
-        assert result1[0] == result2[0] == "item"
+        assert entry1.item == entry2.item == "item"
 
 
 class TestDataBufferConcurrency:
@@ -185,8 +189,8 @@ class TestDataBufferConcurrency:
 
         async def consumer():
             for _ in range(10):
-                result = await buffer.pop()
-                results.append(result[0])  # Extract item from tuple
+                entry = await buffer.pop()
+                results.append(entry.item)
 
         await asyncio.gather(producer(), consumer())
 
@@ -202,8 +206,8 @@ class TestDataBufferEpochHandling:
         await buffer.put("item", version=0, item_id="id1")
         await buffer.mark_done()
 
-        result = await buffer.pop()
-        assert result[0] == "item"
+        entry = await buffer.pop()
+        assert entry.item == "item"
         assert await buffer.pop() is None  # Done signal
 
     @pytest.mark.asyncio
@@ -224,8 +228,8 @@ class TestDataBufferEpochHandling:
         # First epoch
         await buffer.put("epoch1_item", version=0, item_id="id1")
         await buffer.mark_done()
-        result = await buffer.pop()
-        assert result[0] == "epoch1_item"
+        entry = await buffer.pop()
+        assert entry.item == "epoch1_item"
         assert await buffer.pop() is None  # Done
 
         # Reset for next epoch
@@ -234,6 +238,6 @@ class TestDataBufferEpochHandling:
         # Second epoch - should work normally
         await buffer.put("epoch2_item", version=1, item_id="id2")
         await buffer.mark_done()
-        result = await buffer.pop()
-        assert result[0] == "epoch2_item"
+        entry = await buffer.pop()
+        assert entry.item == "epoch2_item"
         assert await buffer.pop() is None  # Done

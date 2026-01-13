@@ -129,13 +129,10 @@ class DataBuffer(Generic[T]):
         entry = Entry(item=_Done(), version=-1, reads_remaining=1, item_id="__done__")
         await self._queue.put_async(entry)
 
-    async def pop(self) -> tuple[T, str, int] | None:
-        """Pop one item. Returns (item, item_id, version) tuple, or None when done.
+    async def pop(self) -> Entry[T] | None:
+        """Pop one item. Returns Entry or None when done.
 
         Consumer is responsible for staleness checks.
-
-        Returns:
-            Tuple of (item, item_id, version) or None if done signal received.
         """
         entry: Entry[T] = await self._queue.get_async()
 
@@ -150,7 +147,7 @@ class DataBuffer(Generic[T]):
             await self._queue.put_async(entry)
 
         self.stats.record_pop(entry.version, exhausted)
-        return (entry.item, entry.item_id, entry.version)
+        return entry
 
     def size(self) -> int:
         return self._queue.qsize()

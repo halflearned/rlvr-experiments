@@ -478,6 +478,7 @@ class DistributedModelHandle:
     def __init__(self, actors: List, name: str = "model"):
         self.actors = actors
         self.name = name
+        self.version = 0  # Incremented after each optimizer step
         self._in_flight = 0
         self._in_flight_zero = asyncio.Event()
         self._in_flight_zero.set()  # Initially no in-flight requests
@@ -495,6 +496,9 @@ class DistributedModelHandle:
             try:
                 refs = [a.call_method.remote(attr, *args, **kwargs) for a in self.actors]
                 results = await asyncio.gather(*[self._resolve(r) for r in refs])
+                # Auto-increment version after optimizer step
+                if attr == "optim_step":
+                    self.version += 1
                 return results[0]
             finally:
                 self._in_flight -= 1

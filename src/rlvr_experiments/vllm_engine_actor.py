@@ -374,8 +374,8 @@ class VLLMHandle:
             # Log timing if there was significant wait
             pause_wait = t_pause_end - t_pause_start
             slot_wait = t_slot_end - t_slot_start
-            if pause_wait > 0.1 or slot_wait > 0.1:
-                print(f"[TIMING generate_single] pause_wait={pause_wait:.2f}s slot_wait={slot_wait:.2f}s", flush=True)
+            # if pause_wait > 0.1 or slot_wait > 0.1:
+            #     print(f"[TIMING generate_single] pause_wait={pause_wait:.2f}s slot_wait={slot_wait:.2f}s", flush=True)
 
             # Now track in-flight (only after we have a slot)
             self._in_flight += 1
@@ -397,8 +397,8 @@ class VLLMHandle:
                     t_gen_end = time.perf_counter()
                     gen_time = t_gen_end - t_gen_start
                     total_time = t_gen_end - t_enter
-                    if total_time > 5.0:
-                        print(f"[TIMING generate_single DONE] gen={gen_time:.2f}s total={total_time:.2f}s overhead={total_time-gen_time:.2f}s", flush=True)
+                    # if total_time > 5.0:
+                    #     print(f"[TIMING generate_single DONE] gen={gen_time:.2f}s total={total_time:.2f}s overhead={total_time-gen_time:.2f}s", flush=True)
                     # Check if result was aborted (empty outputs)
                     if result and result[0].outputs and len(result[0].outputs) > 0:
                         # Check if any output has tokens (not all aborted)

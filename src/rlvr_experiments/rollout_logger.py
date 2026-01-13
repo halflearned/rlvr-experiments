@@ -95,12 +95,12 @@ def log_rollout(
     prompt: str,
     completions: list[str],
     rewards: list[float],
-    generated_at_version: int,
+    trainer_version: int,
     **extra: Any,
 ):
     """Log a rollout. No-op if logger not initialized."""
     if _LOGGER:
-        _LOGGER.log(prompt_id, prompt, completions, rewards, generated_at_version, **extra)
+        _LOGGER.log(prompt_id, prompt, completions, rewards, trainer_version, **extra)
 
 
 def get_rollout_logger() -> Optional[RolloutLogger]:
