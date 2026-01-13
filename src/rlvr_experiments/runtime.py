@@ -135,7 +135,24 @@ class Runtime:
             )
 
         if not ray.is_initialized():
-            ray.init(address="auto")
+            # Set up runtime_env to make rlvr_experiments available to all workers
+            # This is needed for SageMaker where source is in /opt/ml/code
+            import os
+            runtime_env = {}
+            src_path = "/opt/ml/code/src"
+            if os.path.exists(src_path):
+                # SageMaker environment - add src to Python path for all workers
+                # Also fix cuDNN version mismatch: PyTorch 2.9+cu128 bundles cuDNN 9.x,
+                # but the base AWS DLC image has an older system cuDNN. Prepend the
+                # nvidia pip packages to LD_LIBRARY_PATH so PyTorch finds them.
+                nvidia_libs = "/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib"
+                existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+                ld_path = f"{nvidia_libs}:{existing_ld}" if existing_ld else nvidia_libs
+                runtime_env["env_vars"] = {
+                    "PYTHONPATH": src_path,
+                    "LD_LIBRARY_PATH": ld_path,
+                }
+            ray.init(address="auto", runtime_env=runtime_env)
         host = ray.util.get_node_ip_address()
 
         run_name = plan.run.get("name", "unnamed_run")

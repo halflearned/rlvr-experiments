@@ -66,7 +66,6 @@ def start_ray_head():
         f"--port={RAY_PORT}",
         f"--dashboard-port={RAY_DASHBOARD_PORT}",
         f"--num-gpus={SM_NUM_GPUS}",
-        "--block=false",
     ]
     run(cmd)
     print(f"[launcher] Ray head started on port {RAY_PORT}", flush=True)
@@ -78,17 +77,65 @@ def start_ray_worker(head_addr: str):
         "ray", "start",
         f"--address={head_addr}:{RAY_PORT}",
         f"--num-gpus={SM_NUM_GPUS}",
-        "--block=true",  # Worker blocks forever
+        "--block",  # Worker blocks forever
     ]
     run(cmd)
 
 
+def download_model_if_needed(config_path: str):
+    """Download model from S3 if config uses HF-style identifier (e.g., 'Qwen/Qwen3-1.7B-Base')."""
+    import yaml
+    import os
+
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    # Check if model path looks like HF Hub identifier (contains /)
+    model_path = config.get('model', {}).get('path', '')
+    if '/' in model_path and not os.path.exists(model_path):
+        # Map HF-style paths to S3 bucket paths
+        # e.g., "Qwen/Qwen3-1.7B-Base" -> "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/"
+        model_name = model_path.split('/')[-1]  # Get last part of path
+        s3_path = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/{model_name}/"
+        local_path = f"/opt/ml/model/model_cache/{model_name}"
+
+        print(f"[launcher] Downloading model from S3: {s3_path}", flush=True)
+        os.makedirs(local_path, exist_ok=True)
+        run(["aws", "s3", "sync", s3_path, local_path, "--quiet"])
+        print(f"[launcher] Model downloaded to: {local_path}", flush=True)
+        return local_path
+    return None
+
+
 def run_training(config: str):
     """Run the actual training script."""
+    import os
+
+    # Download model from S3 if needed and get local path
+    local_model_path = download_model_if_needed(config)
+
     # SageMaker copies source to /opt/ml/code
+    # Ensure PYTHONPATH includes src directory for the subprocess
+    env = os.environ.copy()
+    src_path = "/opt/ml/code/src"
+    pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{src_path}:{pythonpath}" if pythonpath else src_path
+
+    # If we downloaded the model, set env var to override config paths
+    if local_model_path:
+        env["RLVR_MODEL_PATH_OVERRIDE"] = local_model_path
+
+    # Fix cuDNN version mismatch: PyTorch 2.9+cu128 bundles cuDNN 9.x, but the base
+    # AWS DLC image has an older system cuDNN. Prepend the nvidia pip packages to
+    # LD_LIBRARY_PATH so PyTorch finds the bundled (compatible) versions.
+    nvidia_libs = "/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib"
+    ld_path = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = f"{nvidia_libs}:{ld_path}" if ld_path else nvidia_libs
+
     script = "/opt/ml/code/entrypoints/train_grpo.py"
     cmd = [sys.executable, script, config]
-    run(cmd)
+    print(f"[launcher] Running: {' '.join(cmd)}", flush=True)
+    subprocess.run(cmd, check=True, env=env)
 
 
 def main():
