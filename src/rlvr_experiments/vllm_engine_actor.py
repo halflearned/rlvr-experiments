@@ -303,6 +303,7 @@ class VLLMHandle:
         self._in_flight_zero.set()  # Initially no in-flight requests
         self._paused = asyncio.Event()
         self._paused.set()  # Initially not paused (gate is open)
+        self._pause_generation = 0
         self.name = name
         self._trainer_version = 0  # Trainer version when weights were last synced
 
@@ -330,6 +331,7 @@ class VLLMHandle:
         Args:
             abort: If True, abort in-flight requests instead of waiting for them.
         """
+        self._pause_generation += 1
         self._paused.clear()  # Close the gate for new requests
         if abort:
             await self.abort_all()
@@ -337,6 +339,7 @@ class VLLMHandle:
 
     def resume(self) -> None:
         """Resume accepting generation requests after sync."""
+        self._pause_generation += 1
         self._paused.set()  # Open the gate
 
     async def generate_single(self, prompt: str, **sampling_params):
@@ -349,6 +352,13 @@ class VLLMHandle:
         after sync completes. Callers don't need to handle AbortedError.
         """
         t_enter = time.perf_counter()
+        empty_failures = 0
+        max_empty_retries = 2
+
+        def is_cancellation_error(e: BaseException) -> bool:
+            msg = str(e).lower()
+            return ("cancel" in msg) or ("abort" in msg)
+
         while True:
             # Wait if paused
             t_pause_start = time.perf_counter()
@@ -379,6 +389,7 @@ class VLLMHandle:
                     continue
 
                 actor = self._actors[replica_idx]
+                pause_generation_before_call = self._pause_generation
                 try:
                     t_gen_start = time.perf_counter()
                     with trace_span("vllm.generate_single", args={"replica": replica_idx, "slot": slot_idx}):
@@ -393,12 +404,26 @@ class VLLMHandle:
                         # Check if any output has tokens (not all aborted)
                         if any(len(out.token_ids) > 0 for out in result[0].outputs):
                             return result[0]
-                    # Result was aborted or empty - retry
-                    logger.info(f"[generate_single] got empty/aborted result, retrying")
+                    # Result was aborted or empty - retry iff a weight sync happened while in-flight.
+                    if pause_generation_before_call != self._pause_generation:
+                        empty_failures = 0
+                        continue
+
+                    empty_failures += 1
+                    if empty_failures >= max_empty_retries:
+                        raise RuntimeError(
+                            "vLLM returned empty outputs repeatedly (not during a weight sync). "
+                            "This is often caused by prompts exceeding max_model_len."
+                        )
+                    logger.info(f"[generate_single] got empty result, retrying ({empty_failures}/{max_empty_retries})")
                     continue
-                except (asyncio.CancelledError, ray.exceptions.RayTaskError):
-                    # Request was aborted due to weight sync - will retry after finally block
-                    continue
+                except ray.exceptions.RayTaskError as e:
+                    # During weight sync we abort in-flight requests; Ray can surface that as task errors.
+                    # Avoid infinite retry loops on real errors (e.g. prompt too long).
+                    if pause_generation_before_call != self._pause_generation or is_cancellation_error(e):
+                        empty_failures = 0
+                        continue
+                    raise
             finally:
                 await self._router.release_slot(replica_idx, slot_idx)
                 self._in_flight -= 1

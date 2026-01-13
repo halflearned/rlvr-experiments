@@ -16,9 +16,8 @@ from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
-from rlvr_experiments.sample_logger import init_sample_logger, log_sample
-from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
-from rlvr_experiments.vllm_engine_actor import VLLMHandle
+from rlvr_experiments.sample_logger import log_sample
+from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
 from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier, MathVerifier
 
@@ -101,6 +100,8 @@ async def main():
     completion_len_buckets = plan.training.get("completion_len_buckets") or [max_completion_len]
     max_seq_len = seq_len_buckets[-1]
     sp = {**plan.sampling, "logprobs": 0}
+    rollout_max_model_len = plan.roles.get("rollout").config.get("max_model_len")
+    rollout_timeout_s = plan.training.get("rollout_timeout_s")
 
     # Reward stats accumulator (tracks ALL samples including filtered)
     reward_stats = RewardStats()
@@ -110,114 +111,182 @@ async def main():
         async def process_one(item) -> str:
             """Process one item. Returns prompt_id for tracking."""
             prompt_id = item["problem"].get("prompt_id", "unknown")
-            try:
-                t0 = time.perf_counter()
-                log_sample("generation_start", prompt_id=prompt_id)
-                with trace_span("generate"):
-                    response = await rollout.generate_single(item["template"], **sp)
-                t_gen = time.perf_counter()
-                # Capture trainer_version AFTER generation - this reflects which trainer version's weights were used
-                generated_at_version = rollout.trainer_version
-                n_completions = len(response.outputs)
-                log_sample("generation_done", prompt_id=prompt_id, version=generated_at_version,
-                           n_completions=n_completions, duration=t_gen - t0)
+            t0 = time.perf_counter()
 
-                completions = [out.text for out in response.outputs]
-                rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
-
-                # Run verify and ref_logprobs concurrently (with tracing)
-                async def traced_verify():
-                    with trace_span("verify", args={"generated_at_version": generated_at_version}):
-                        return await verifier.verify_completions(item["problem"], completions, version=generated_at_version)
-
-                async def traced_ref_logprobs():
-                    t_start = time.perf_counter()
-                    with trace_span("ref_logprobs", args={"generated_at_version": generated_at_version}):
-                        n = rollout_sample.input_ids.size(0)
-                        mb = completions_per_micro_batch_reference or n
-                        chunks = [await reference.compute_logprobs(
-                            rollout_sample.input_ids[i:i+mb],
-                            rollout_sample.completion_ids[i:i+mb],
-                            torch.tensor([rollout_sample.prompt_len] * min(mb, n-i))
-                        ) for i in range(0, n, mb)]
-                        t_done = time.perf_counter()
-                        print(f"[TIMING ref_logprobs] compute={t_done-t_start:.2f}s", flush=True)
-                        return torch.cat(chunks, dim=0)
-
-                rewards, ref_logprobs = await asyncio.gather(traced_verify(), traced_ref_logprobs())
-                t_verify_ref = time.perf_counter()
-                print(f"[TIMING process_one] gen={t_gen-t0:.2f}s verify+ref={t_verify_ref-t_gen:.2f}s total={t_verify_ref-t0:.2f}s", flush=True)
-
-                # Log all rollouts (even filtered ones) for debugging
-                log_rollout(prompt_id=prompt_id, prompt=item["prompt"],
-                            completions=completions, rewards=rewards, generated_at_version=generated_at_version)
-
-                # Filter - mark consumed even if filtered (don't retry)
-                if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
-                    reward_stats.record(rewards, used=False)
-                    tracer.counter("skipped", {"zero_variance_samples": 1})
+            # Preflight: skip prompts that cannot fit in rollout vLLM context.
+            # vLLM may error/return empty outputs for overlong prompts; skipping avoids stalls/wasted retries.
+            sp_one = sp
+            if rollout_max_model_len is not None:
+                prompt_tokens = len(tokenizer.encode(item["template"], add_special_tokens=False))
+                if prompt_tokens >= rollout_max_model_len:
+                    generated_at_version = rollout.trainer_version
+                    tracer.counter("skipped", {
+                        "prompt_too_long_preflight": 1,
+                        "prompt_tokens": prompt_tokens,
+                        "rollout_max_model_len": rollout_max_model_len,
+                    })
                     buffer.stats.record_filtered(generated_at_version)
-                    data_iter.mark_consumed(prompt_id)
-                    log_sample("filtered", prompt_id=prompt_id, version=generated_at_version, reason="zero_variance")
+                    data_iter.mark_done(prompt_id)
+                    log_sample(
+                        "filtered",
+                        prompt_id=prompt_id,
+                        version=generated_at_version,
+                        reason="prompt_too_long_preflight",
+                        prompt_tokens=prompt_tokens,
+                        rollout_max_model_len=rollout_max_model_len,
+                    )
                     return prompt_id
-                if rollout_sample.input_ids.shape[1] > max_seq_len:
-                    reward_stats.record(rewards, used=False)
-                    tracer.counter("skipped", {"seq_too_long": 1})
-                    buffer.stats.record_filtered(generated_at_version)
-                    data_iter.mark_consumed(prompt_id)
-                    log_sample("filtered", prompt_id=prompt_id, version=generated_at_version, reason="seq_too_long")
-                    return prompt_id
-                if rollout_sample.completion_ids.shape[1] > max_completion_len:
-                    reward_stats.record(rewards, used=False)
-                    tracer.counter("skipped", {"completion_too_long": 1})
-                    buffer.stats.record_filtered(generated_at_version)
-                    data_iter.mark_consumed(prompt_id)
-                    log_sample("filtered", prompt_id=prompt_id, version=generated_at_version, reason="completion_too_long")
-                    return prompt_id
+                # Optional: cap max_tokens so prompt + completion <= max_model_len.
+                if "max_tokens" in sp and sp["max_tokens"] is not None:
+                    headroom = rollout_max_model_len - prompt_tokens
+                    if headroom <= 0:
+                        generated_at_version = rollout.trainer_version
+                        tracer.counter("skipped", {"no_generation_headroom": 1})
+                        buffer.stats.record_filtered(generated_at_version)
+                        data_iter.mark_done(prompt_id)
+                        log_sample(
+                            "filtered",
+                            prompt_id=prompt_id,
+                            version=generated_at_version,
+                            reason="no_generation_headroom",
+                            prompt_tokens=prompt_tokens,
+                            rollout_max_model_len=rollout_max_model_len,
+                        )
+                        return prompt_id
+                    if sp["max_tokens"] > headroom:
+                        sp_one = dict(sp)
+                        sp_one["max_tokens"] = headroom
 
-                # Record stats for used sample
-                reward_stats.record(rewards, used=True)
-                sample = TrainSample(rollout_sample, rewards, ref_logprobs, item_id=prompt_id, generated_at_version=generated_at_version)
-                await buffer.put(sample, generated_at_version, item_id=prompt_id)
-                log_sample("buffered", prompt_id=prompt_id, version=generated_at_version)
+            log_sample("generation_start", prompt_id=prompt_id)
+            with trace_span("generate"):
+                if rollout_timeout_s:
+                    response = await asyncio.wait_for(
+                        rollout.generate_single(item["template"], **sp_one),
+                        timeout=rollout_timeout_s,
+                    )
+                else:
+                    response = await rollout.generate_single(item["template"], **sp_one)
+            t_gen = time.perf_counter()
+            # Capture trainer_version AFTER generation - this reflects which trainer version's weights were used
+            generated_at_version = rollout.trainer_version
+            n_completions = len(response.outputs)
+            log_sample(
+                "generation_done",
+                prompt_id=prompt_id,
+                version=generated_at_version,
+                n_completions=n_completions,
+                duration=t_gen - t0,
+            )
+
+            completions = [out.text for out in response.outputs]
+            rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
+
+            # Run verify and ref_logprobs concurrently (with tracing)
+            async def traced_verify():
+                with trace_span("verify", args={"generated_at_version": generated_at_version}):
+                    return await verifier.verify_completions(item["problem"], completions, version=generated_at_version)
+
+            async def traced_ref_logprobs():
+                t_start = time.perf_counter()
+                with trace_span("ref_logprobs", args={"generated_at_version": generated_at_version}):
+                    n = rollout_sample.input_ids.size(0)
+                    mb = completions_per_micro_batch_reference or n
+                    chunks = [await reference.compute_logprobs(
+                        rollout_sample.input_ids[i:i+mb],
+                        rollout_sample.completion_ids[i:i+mb],
+                        torch.tensor([rollout_sample.prompt_len] * min(mb, n-i))
+                    ) for i in range(0, n, mb)]
+                    t_done = time.perf_counter()
+                    print(f"[TIMING ref_logprobs] compute={t_done-t_start:.2f}s", flush=True)
+                    return torch.cat(chunks, dim=0)
+
+            rewards, ref_logprobs = await asyncio.gather(traced_verify(), traced_ref_logprobs())
+            t_verify_ref = time.perf_counter()
+            print(
+                f"[TIMING process_one] gen={t_gen-t0:.2f}s verify+ref={t_verify_ref-t_gen:.2f}s total={t_verify_ref-t0:.2f}s",
+                flush=True,
+            )
+
+            # Log all rollouts (even filtered ones) for debugging
+            log_rollout(
+                prompt_id=prompt_id,
+                prompt=item["prompt"],
+                completions=completions,
+                rewards=rewards,
+                generated_at_version=generated_at_version,
+            )
+
+            # Filter - mark consumed even if filtered (don't retry)
+            if torch.tensor(rewards, dtype=torch.float32).std() < 1e-6:
+                reward_stats.record(rewards, used=False)
+                tracer.counter("skipped", {"zero_variance_samples": 1})
+                buffer.stats.record_filtered(generated_at_version)
+                data_iter.mark_done(prompt_id)
+                log_sample("filtered", prompt_id=prompt_id, version=generated_at_version, reason="zero_variance")
                 return prompt_id
-            except Exception as e:
-                # On error, mark pending for retry
-                data_iter.mark_pending(prompt_id)
-                raise
+            if rollout_sample.input_ids.shape[1] > max_seq_len:
+                reward_stats.record(rewards, used=False)
+                tracer.counter("skipped", {"seq_too_long": 1})
+                buffer.stats.record_filtered(generated_at_version)
+                data_iter.mark_done(prompt_id)
+                log_sample("filtered", prompt_id=prompt_id, version=generated_at_version, reason="seq_too_long")
+                return prompt_id
+            if rollout_sample.completion_ids.shape[1] > max_completion_len:
+                reward_stats.record(rewards, used=False)
+                tracer.counter("skipped", {"completion_too_long": 1})
+                buffer.stats.record_filtered(generated_at_version)
+                data_iter.mark_done(prompt_id)
+                log_sample("filtered", prompt_id=prompt_id, version=generated_at_version, reason="completion_too_long")
+                return prompt_id
 
-        # Limit concurrent tasks to avoid queueing thousands waiting for slots
-        # 4 rollout replicas × 8 concurrent per replica = 32 active generations
-        # Add 2x headroom for pipelining verify+ref after generation completes
-        max_concurrent_tasks = 64
-        tasks: set[asyncio.Task] = set()
+            # Record stats for used sample
+            reward_stats.record(rewards, used=True)
+            sample = TrainSample(
+                rollout_sample,
+                rewards,
+                ref_logprobs,
+                item_id=prompt_id,
+                generated_at_version=generated_at_version,
+            )
+            await buffer.put(sample, generated_at_version, item_id=prompt_id)
+            log_sample("buffered", prompt_id=prompt_id, version=generated_at_version)
+            return prompt_id
 
-        def spawn_tasks_up_to_limit():
-            """Spawn tasks until we hit the limit or run out of pending items."""
-            while len(tasks) < max_concurrent_tasks:
-                item = data_iter.get_next()
+        # Concurrency + backpressure:
+        # - Fixed worker pool pulls from DataIterator; no separate feeder/queue.
+        max_concurrent_tasks = plan.training.get("max_concurrent_tasks", 64)
+        poll_interval = plan.training.get("producer_poll_interval_s", 0.01)
+        # Prompt-level failures are permanent: mark failed and move on.
+
+        async def worker(worker_id: int):
+            while True:
+                item = await data_iter.get_next_async(poll_interval=poll_interval)
                 if item is None:
-                    break
-                tasks.add(asyncio.create_task(process_one(item)))
+                    return
+                prompt_id = item["problem"].get("prompt_id", "unknown")
+                try:
+                    await process_one(item)
+                except Exception as e:
+                    generated_at_version = rollout.trainer_version
+                    print(f"[producer] prompt failed prompt_id={prompt_id}: {e}", flush=True)
+                    tracer.counter("failed", {"prompt_failed": 1})
+                    buffer.stats.record_failed(generated_at_version)
+                    data_iter.mark_failed(prompt_id)
+                    log_sample(
+                        "failed",
+                        prompt_id=prompt_id,
+                        version=generated_at_version,
+                        error=str(e),
+                    )
+                await asyncio.sleep(0)  # explicit yield for fairness across workers
 
-        # Initial spawn
-        spawn_tasks_up_to_limit()
-
-        # Process tasks, spawning new ones as slots free up
-        while not data_iter.all_consumed():
-            if not tasks:
-                # All tasks done but not all consumed - items in buffer waiting
-                await asyncio.sleep(0.01)
-                spawn_tasks_up_to_limit()
-                continue
-
-            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                if task.exception():
-                    print(f"[producer] task failed: {task.exception()}")
-
-            # Spawn more tasks to replace completed ones
-            spawn_tasks_up_to_limit()
+        workers = [asyncio.create_task(worker(i)) for i in range(max_concurrent_tasks)]
+        try:
+            await asyncio.gather(*workers)
+        finally:
+            for t in workers:
+                t.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
         await buffer.mark_done()
 
@@ -263,7 +332,7 @@ async def main():
                 # Mark all samples in this batch as consumed and log lag
                 lags = []
                 for s in samples:
-                    data_iter.mark_consumed(s.item_id)
+                    data_iter.mark_done(s.item_id)
                     buffer.stats.record_used(s.generated_at_version)
                     lag = current_step - s.generated_at_version
                     lags.append(lag)
@@ -415,10 +484,11 @@ async def main():
 
     # Sample fate statistics
     fates = buffer.stats.get_fates()
-    total_used = sum(fates["used"].values())
-    total_wasted = sum(fates["wasted"].values())
-    total_filtered = sum(fates["filtered"].values())
-    total_samples = total_used + total_wasted + total_filtered
+    total_used = sum((fates.get("used") or {}).values())
+    total_wasted = sum((fates.get("wasted") or {}).values())
+    total_filtered = sum((fates.get("filtered") or {}).values())
+    total_failed = sum((fates.get("failed") or {}).values())
+    total_samples = total_used + total_wasted + total_filtered + total_failed
 
     print(f"\n=== Run Summary ===")
     print(f"Total wall-clock time: {run_elapsed:.1f}s")
@@ -429,6 +499,7 @@ async def main():
     print(f"  Used for training: {total_used} ({100*total_used/max(total_samples,1):.1f}%)")
     print(f"  Wasted (stale): {total_wasted} ({100*total_wasted/max(total_samples,1):.1f}%)")
     print(f"  Filtered: {total_filtered} ({100*total_filtered/max(total_samples,1):.1f}%)")
+    print(f"  Failed: {total_failed} ({100*total_failed/max(total_samples,1):.1f}%)")
     if not abort_in_flight:
         print(f"  (abort_in_flight=False - staleness allowed)")
 
@@ -439,6 +510,7 @@ async def main():
         "samples_used": total_used,
         "samples_wasted": total_wasted,
         "samples_filtered": total_filtered,
+        "samples_failed": total_failed,
         "abort_in_flight": abort_in_flight,
     })
 

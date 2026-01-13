@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from typing import Iterator
 import ray.data
 from datasets import load_dataset
 
@@ -198,10 +198,11 @@ class DataIterator:
     All datasets should have columns "prompt" and "problem", where
     "problem" is a dict containing whatever the verifier needs.
 
-    Tracks status per prompt_id: "pending" | "in_flight" | "consumed"
+    Tracks status per prompt_id: "pending" | "in_flight" | "done" | "failed"
     - pending: not yet processed or needs retry
-    - in_flight: currently being processed
-    - consumed: successfully trained on
+    - in_flight: currently being processed (generated, or waiting to be trained)
+    - done: finished (trained or intentionally skipped/filtered)
+    - failed: permanently failed (will not be retried)
 
     Usage:
         data_iter = DataIterator(ds, tokenizer=tokenizer)
@@ -209,14 +210,15 @@ class DataIterator:
         for epoch in range(num_epochs):
             data_iter.new_epoch(seed=epoch)
 
-            while not data_iter.all_consumed():
-                item = data_iter.next_pending()
+            while not data_iter.all_done():
+                item = data_iter.get_next()
                 if item is None:
                     # No pending items, wait for in-flight to complete
                     continue
                 # process item...
-                # on success: data_iter.mark_consumed(prompt_id)
+                # on success: data_iter.mark_done(prompt_id)
                 # on waste: data_iter.mark_pending(prompt_id)
+                # on permanent failure: data_iter.mark_failed(prompt_id)
     """
 
     def __init__(
@@ -233,7 +235,8 @@ class DataIterator:
         # Build index: prompt_id -> row data
         self._prompt_id_index: dict[str, dict] = {}
         self._build_index()
-        # Status tracking: prompt_id -> "pending" | "in_flight" | "consumed"
+        self._epoch_started = False
+        # Status tracking: prompt_id -> "pending" | "in_flight" | "done" | "failed"
         self._status: dict[str, str] = {}
         # Ordered list of prompt_ids for iteration
         self._prompt_ids: list[str] = list(self._prompt_id_index.keys())
@@ -274,31 +277,38 @@ class DataIterator:
     # --- Status management ---
 
     def new_epoch(self, seed: int | None = None) -> None:
-        """Reset all statuses to pending for a new epoch and shuffle order."""
+        """Reset all non-failed statuses to pending for a new epoch and shuffle order."""
         import random
 
+        self._epoch_started = True
         if seed is not None:
             rng = random.Random(seed)
             rng.shuffle(self._prompt_ids)
         for pid in self._prompt_ids:
+            if self._status.get(pid) == "failed":
+                continue
             self._status[pid] = "pending"
 
-    def mark_in_flight(self, prompt_id: str) -> None:
-        """Mark a prompt as currently being processed."""
-        self._status[prompt_id] = "in_flight"
+    def mark_done(self, prompt_id: str) -> None:
+        """Mark a prompt as finished (trained or intentionally skipped)."""
+        if self._status.get(prompt_id) == "failed":
+            return
+        self._status[prompt_id] = "done"
 
-    def mark_consumed(self, prompt_id: str) -> None:
-        """Mark a prompt as successfully consumed (trained on)."""
-        self._status[prompt_id] = "consumed"
+    def mark_failed(self, prompt_id: str) -> None:
+        """Mark a prompt as permanently failed (will not be retried)."""
+        self._status[prompt_id] = "failed"
 
     def mark_pending(self, prompt_id: str) -> None:
         """Mark a prompt as pending (for retry)."""
+        if self._status.get(prompt_id) == "failed":
+            return
         self._status[prompt_id] = "pending"
         log_sample("pending", prompt_id=prompt_id)
 
-    def all_consumed(self) -> bool:
-        """Check if all prompts have been consumed."""
-        return all(s == "consumed" for s in self._status.values())
+    def all_done(self) -> bool:
+        """Check if all prompts are finished (done or failed)."""
+        return all(s in {"done", "failed"} for s in self._status.values())
 
     def pending_count(self) -> int:
         """Count of pending prompts."""
@@ -308,35 +318,62 @@ class DataIterator:
         """Count of in-flight prompts."""
         return sum(1 for s in self._status.values() if s == "in_flight")
 
-    def consumed_count(self) -> int:
-        """Count of consumed prompts."""
-        return sum(1 for s in self._status.values() if s == "consumed")
+    def done_count(self) -> int:
+        """Count of done prompts."""
+        return sum(1 for s in self._status.values() if s == "done")
+
+    def failed_count(self) -> int:
+        """Count of failed prompts."""
+        return sum(1 for s in self._status.values() if s == "failed")
+
+    def _require_epoch(self) -> None:
+        if not self._epoch_started:
+            raise RuntimeError("DataIterator.new_epoch() must be called before iterating.")
 
     def get_next(self) -> dict | None:
         """Get next pending item and mark it in_flight.
 
         Returns the next available item (either a retry or new item), or None
-        if all items are either in_flight or consumed. This is the primary
+        if all items are either in_flight, done, or failed. This is the primary
         interface for getting work items.
         """
+        self._require_epoch()
         for pid in self._prompt_ids:
-            if self._status.get(pid) == "pending":
+            if self._status[pid] == "pending":
                 self._status[pid] = "in_flight"
                 log_sample("in_flight", prompt_id=pid)
                 return self._get_item(pid)
         return None
 
-    # Legacy alias
-    next_pending = get_next
+    # --- Async iteration interface ---
 
-    # --- Legacy iteration interface (for compatibility) ---
+    async def get_next_async(self, poll_interval: float = 0.01) -> dict | None:
+        """Await the next pending item, or return None when the epoch is exhausted.
 
-    def __iter__(self):
-        return self
+        This is a simple async wrapper around `get_next()` that waits when there
+        are no pending items but some are still in-flight (e.g. waiting to be
+        marked done, retried, or failed).
+        """
+        while True:
+            item = self.get_next()
+            if item is not None:
+                return item
+            if self.all_done():
+                return None
+            await asyncio.sleep(poll_interval)
 
-    def __next__(self) -> dict:
-        """Legacy interface: get next pending item or raise StopIteration."""
-        item = self.get_next()
-        if item is None:
-            raise StopIteration
-        return item
+    async def async_items(self, poll_interval: float = 0.01):
+        """Async generator yielding items until all are finished (done or failed).
+
+        Yields items as they become available (either new or retried).
+        Waits when items are in-flight but not yet resolved.
+
+        Usage:
+            async for item in data_iter.async_items():
+                await process(item)
+        """
+        while True:
+            item = await self.get_next_async(poll_interval=poll_interval)
+            if item is None:
+                return
+            yield item

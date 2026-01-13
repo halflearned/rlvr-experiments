@@ -91,7 +91,7 @@ class TestDataIterator:
         data_iter = DataIterator(dummy_dataset, tokenizer=mock_tokenizer)
 
         with pytest.raises(RuntimeError, match="new_epoch"):
-            next(data_iter)
+            data_iter.get_next()
 
     def test_next_returns_correct_keys(self, dummy_dataset, mock_tokenizer):
         from rlvr_experiments.data import DataIterator
@@ -99,7 +99,7 @@ class TestDataIterator:
         data_iter = DataIterator(dummy_dataset, tokenizer=mock_tokenizer)
         data_iter.new_epoch(seed=42)
 
-        item = next(data_iter)
+        item = data_iter.get_next()
         assert "template" in item
         assert "prompt" in item
         assert "problem" in item
@@ -110,7 +110,7 @@ class TestDataIterator:
         data_iter = DataIterator(dummy_dataset, tokenizer=mock_tokenizer)
         data_iter.new_epoch(seed=42)
 
-        item = next(data_iter)
+        item = data_iter.get_next()
         assert isinstance(item["template"], str)
 
     def test_problems_are_dicts(self, dummy_dataset, mock_tokenizer):
@@ -119,7 +119,7 @@ class TestDataIterator:
         data_iter = DataIterator(dummy_dataset, tokenizer=mock_tokenizer)
         data_iter.new_epoch(seed=42)
 
-        item = next(data_iter)
+        item = data_iter.get_next()
         assert isinstance(item["problem"], dict)
         assert "answer" in item["problem"]
 
@@ -129,8 +129,13 @@ class TestDataIterator:
         data_iter = DataIterator(dummy_dataset, tokenizer=mock_tokenizer)
         data_iter.new_epoch(seed=42)
 
-        # Exhaust the iterator
-        items = list(data_iter)
+        # Exhaust all pending items
+        items = []
+        while True:
+            item = data_iter.get_next()
+            if item is None:
+                break
+            items.append(item)
         assert len(items) == 64  # dummy dataset has 64 items
 
     def test_different_seeds_shuffle_differently(self, dummy_dataset, mock_tokenizer):
@@ -139,10 +144,10 @@ class TestDataIterator:
         data_iter = DataIterator(dummy_dataset, tokenizer=mock_tokenizer)
 
         data_iter.new_epoch(seed=1)
-        item1 = next(data_iter)
+        item1 = data_iter.get_next()
 
         data_iter.new_epoch(seed=2)
-        item2 = next(data_iter)
+        item2 = data_iter.get_next()
 
         # Since all dummy data is the same, we can't really test ordering
         # But we verify the mechanism works
@@ -159,7 +164,7 @@ class TestDataIterator:
         )
         data_iter.new_epoch(seed=42)
 
-        item = next(data_iter)
+        item = data_iter.get_next()
         # System prompt should appear in the template
         assert "You are a helpful assistant." in item["template"]
 
@@ -173,6 +178,6 @@ class TestDataIterator:
         )
         data_iter.new_epoch(seed=42)
 
-        item = next(data_iter)
+        item = data_iter.get_next()
         # Assistant prefix should be in the template
         assert "Let me think step by step." in item["template"]

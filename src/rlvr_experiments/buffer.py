@@ -29,6 +29,7 @@ class SampleFateTracker:
         self.used_by_version: dict[int, int] = defaultdict(int)
         self.wasted_by_version: dict[int, int] = defaultdict(int)
         self.filtered_by_version: dict[int, int] = defaultdict(int)
+        self.failed_by_version: dict[int, int] = defaultdict(int)
 
     def _emit(self) -> None:
         """Emit current state to tracer."""
@@ -70,6 +71,12 @@ class SampleFateTracker:
             self.filtered_by_version[version] += 1
         self._emit()
 
+    def record_failed(self, version: int) -> None:
+        """Record an item that permanently failed (will not be retried)."""
+        if version >= 0:
+            self.failed_by_version[version] += 1
+        self._emit()
+
     def get_by_version(self) -> dict[int, int]:
         """Return per-version counts (excludes zeros)."""
         return {k: v for k, v in self.by_version.items() if v > 0}
@@ -80,6 +87,7 @@ class SampleFateTracker:
             "used": {k: v for k, v in self.used_by_version.items() if v > 0},
             "wasted": {k: v for k, v in self.wasted_by_version.items() if v > 0},
             "filtered": {k: v for k, v in self.filtered_by_version.items() if v > 0},
+            "failed": {k: v for k, v in self.failed_by_version.items() if v > 0},
         }
 
     def to_dict(self, current_size: int) -> dict:
