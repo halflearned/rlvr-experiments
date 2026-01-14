@@ -194,42 +194,37 @@ async def main():
             log_sample("buffered", prompt_id=prompt_id, version=trainer_version)
 
         # --- Worker pool ---
+        # Use a fixed pool of long-lived workers that repeatedly pulls from the iterator.
+        # This avoids subtle busy-spin edge cases in manual task-dispatch loops.
         max_concurrent_tasks = plan.training.get("max_concurrent_tasks", 64)
-        sem = asyncio.Semaphore(max_concurrent_tasks)
-        pending_tasks = set()
 
-        async def bounded_process(item):
+        async def safe_process_one(item):
             prompt_id = item["problem"].get("prompt_id", "unknown")
-            async with sem:
-                try:
-                    await process_one(item)
-                except Exception as e:
-                    trainer_version = rollout.trainer_version
-                    print(f"[producer] prompt failed {prompt_id}: {e}")
-                    tracer.counter("failed", {"prompt_failed": 1})
-                    buffer.stats.record_failed(trainer_version)
-                    log_sample("failed", prompt_id=prompt_id, version=trainer_version, error=str(e))
-                    data_iter.mark_failed(prompt_id)
+            try:
+                await process_one(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                trainer_version = rollout.trainer_version
+                print(f"[producer] prompt failed {prompt_id}: {e}")
+                tracer.counter("failed", {"prompt_failed": 1})
+                buffer.stats.record_failed(trainer_version)
+                log_sample("failed", prompt_id=prompt_id, version=trainer_version, error=str(e))
+                data_iter.mark_failed(prompt_id)
 
-        while not data_iter.all_done():
-            item = data_iter.get_next()
-            if item is not None:
-                task = asyncio.create_task(bounded_process(item))
-                pending_tasks.add(task)
-                task.add_done_callback(pending_tasks.discard)
-            elif pending_tasks:
-                # No pending items right now, wait for a task to finish (may produce retries)
-                await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
-            else:
-                # All items dispatched, no pending tasks, but some items still in buffer
-                # awaiting training. Yield to event loop so consumer can drain buffer.
-                await asyncio.sleep(0.001)
+        async def worker() -> None:
+            while True:
+                item = await data_iter.get_next_async()
+                if item is None:
+                    return
+                await safe_process_one(item)
 
-        # Wait for any remaining tasks
-        if pending_tasks:
-            await asyncio.gather(*pending_tasks)
-
-        await buffer.mark_done()
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for _ in range(max_concurrent_tasks):
+                    tg.create_task(worker())
+        finally:
+            await buffer.mark_done()
 
     # =========================================================================
     # CONSUMER: drain buffer -> make batches -> yield for training
