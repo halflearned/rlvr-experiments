@@ -9,11 +9,20 @@ from .code_executor import CodeExecutor, ExecutorConfig, ExecutionResult
 
 
 def extract_code_from_markdown(text: str) -> str:
-    """Extract Python code from ```python blocks, or return text as-is."""
+    """Extract Python code from ```python blocks, or return text as-is.
+
+    Also handles:
+    - Trailing ``` (model closing a code block started by assistant_prefix)
+    - [DONE] markers (lm_eval MBPP format)
+    """
     for pattern in [r'```(?:python|py)\s*\n(.*?)```', r'```\s*\n(.*?)```']:
         blocks = re.findall(pattern, text, re.DOTALL)
         if blocks:
             return '\n\n'.join(b.strip() for b in blocks)
+    # Strip trailing ``` if present (model closing a code block started by assistant_prefix)
+    text = re.sub(r'\s*```\s*$', '', text)
+    # Strip [DONE] marker (lm_eval MBPP format)
+    text = re.sub(r'\s*\[DONE\]\s*$', '', text)
     return text
 
 

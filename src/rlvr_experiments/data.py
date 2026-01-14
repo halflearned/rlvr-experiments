@@ -101,15 +101,21 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
     ds = ray.data.from_huggingface(hf_dataset)
 
     def preprocess(row):
-        # The prompt is the problem description
-        # Model needs to generate a complete function
-        # Use task_id as prompt_id (e.g., "mbpp_123")
+        # Use lm_eval MBPP prompt format for consistency with standard evals
+        # Model needs to generate a complete function ending with [DONE]
         prompt_id = f"mbpp_{row['task_id']}"
+        test_list = row["test_list"]
+        # Format: task description + test cases + [BEGIN] marker
+        prompt = (
+            f"You are an expert Python programmer, and here is your task: {row['text']} "
+            f"Your code should pass these tests:\n\n"
+            f"{test_list[0]}\n{test_list[1]}\n{test_list[2]}\n[BEGIN]\n"
+        )
         return {
-            "prompt": row["text"],
+            "prompt": prompt,
             "problem": {
                 "text": row["text"],
-                "test_list": row["test_list"],
+                "test_list": test_list,
                 "task_id": row["task_id"],
                 "prompt_id": prompt_id,
             },

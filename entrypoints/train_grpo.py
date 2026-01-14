@@ -157,7 +157,7 @@ async def main():
                 data_iter.mark_done(prompt_id)
                 return
 
-            # --- Filter: sequence too long for trainer ---
+            # --- Filter: sequence too long for trainer (defensive) ---
             if rollout_sample.input_ids.shape[1] > max_seq_len:
                 reward_stats.record(rewards, used=False)
                 tracer.counter("skipped", {"seq_too_long": 1})
@@ -336,7 +336,9 @@ async def main():
             stats.trace(tracer)
             tracer.counter("metrics", {"loss": avg_loss, "grad_norm": grad_norm, "avg_reward": avg_reward})
             tracer.counter("grpo.debug", grpo_debug)
-            tracer.counter("titan.metrics", await trainer.log_metrics(avg_loss, grad_norm, accum_ntokens))
+            titan_metrics = await trainer.log_metrics(avg_loss, grad_norm, accum_ntokens)
+            if titan_metrics:
+                tracer.counter("titan.metrics", titan_metrics)
             tracer.counter("reward_stats", rw_metrics)
             tracer.counter("vllm.metrics", await rollout.get_metrics())
             tracer.counter("health", {
