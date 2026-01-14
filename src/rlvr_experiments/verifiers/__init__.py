@@ -29,6 +29,7 @@ Usage:
 
 from .code_executor import CodeExecutor, ExecutorConfig, ExecutionResult
 from .code import (
+    APPSVerifier,
     CodeVerifier,
     HumanEvalVerifier,
     MBPPVerifier,
@@ -44,6 +45,7 @@ __all__ = [
     "ExecutorConfig",
     "ExecutionResult",
     # Code verifiers
+    "APPSVerifier",
     "CodeVerifier",
     "HumanEvalVerifier",
     "MBPPVerifier",

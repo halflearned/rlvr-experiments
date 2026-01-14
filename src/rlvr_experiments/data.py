@@ -97,8 +97,42 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
     Returns dataset with columns: "prompt", "problem"
     where "problem" is a dict for use with MBPPVerifier.
     """
-    hf_dataset = load_dataset("google-research-datasets/mbpp", "full", split=split)
-    ds = ray.data.from_huggingface(hf_dataset)
+    import os
+    import subprocess
+    import tempfile
+
+    # Check for S3 cache first (for SageMaker VPC environments without internet)
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/mbpp_{split}/"
+    local_cache = f"/tmp/mbpp_{split}_cache"
+
+    use_local_cache = False
+    if os.path.exists(local_cache):
+        # Already cached locally
+        print(f"[load_mbpp] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_mbpp] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            print(f"[load_mbpp] Loaded from S3 cache")
+            use_local_cache = True
+        except Exception as e:
+            print(f"[load_mbpp] S3 cache not available ({e}), loading from HuggingFace Hub")
+
+    if use_local_cache:
+        # Load directly from disk using Arrow - avoids HuggingFace Hub entirely
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        # Convert to list of dicts and create Ray dataset directly (avoids HF metadata fetches)
+        ds = ray.data.from_items(list(hf_dataset))
+    else:
+        hf_dataset = load_dataset("google-research-datasets/mbpp", "full", split=split)
+        ds = ray.data.from_huggingface(hf_dataset)
 
     def preprocess(row):
         # Use lm_eval MBPP prompt format for consistency with standard evals
@@ -173,6 +207,102 @@ def load_math(
         return {
             "prompt": question,
             "problem": {"answer": row["solution"], "prompt_id": prompt_id},
+        }
+
+    return ds.map(preprocess)
+
+
+def load_apps(
+    split: str = "train",
+    difficulty: list[str] | None = None,
+) -> ray.data.Dataset:
+    """
+    Load APPS (Automated Programming Progress Standard) dataset as a Ray Dataset.
+
+    APPS has 5000 training and 5000 test problems from competitive programming
+    sites like Codeforces, with three difficulty levels.
+
+    Args:
+        split: Dataset split ("train" or "test")
+        difficulty: Filter by difficulty level(s). Can be:
+            - None: Include all levels
+            - list[str]: Specific levels (e.g., ["introductory", "interview"])
+            Valid values: "introductory", "interview", "competition"
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict for use with APPSVerifier.
+    """
+    import json
+    from huggingface_hub import hf_hub_download
+
+    # Download JSONL file from HuggingFace
+    filename = f"{split}.jsonl"
+    path = hf_hub_download(
+        repo_id="codeparrot/apps",
+        filename=filename,
+        repo_type="dataset"
+    )
+    print(f"[load_apps] Loaded {split} from: {path}")
+
+    # Parse JSONL
+    all_rows = []
+    with open(path) as f:
+        for line in f:
+            row = json.loads(line)
+            # Filter by difficulty if specified
+            if difficulty is not None and row.get("difficulty") not in difficulty:
+                continue
+            all_rows.append(row)
+
+    print(f"[load_apps] Loaded {len(all_rows)} problems (difficulty filter: {difficulty})")
+    ds = ray.data.from_items(all_rows)
+
+    def preprocess(row):
+        prompt_id = f"apps_{row['id']}"
+        question = row["question"]
+
+        # Parse input_output - it's a JSON string
+        io_data = row.get("input_output", "{}")
+        if isinstance(io_data, str):
+            io_data = json.loads(io_data) if io_data else {}
+
+        # Ensure inputs/outputs are always lists (for consistent Arrow schema)
+        inputs = io_data.get("inputs", [])
+        outputs = io_data.get("outputs", [])
+        if not isinstance(inputs, list):
+            inputs = []
+        if not isinstance(outputs, list):
+            outputs = []
+
+        # Parse solutions - it's a JSON string containing a list
+        solutions = row.get("solutions", "[]")
+        if isinstance(solutions, str):
+            solutions = json.loads(solutions) if solutions else []
+        if not isinstance(solutions, list):
+            solutions = []
+
+        # Format prompt - include starter code if present
+        starter = row.get("starter_code", "")
+        if starter is None:
+            starter = ""
+        starter = starter.strip()
+        if starter:
+            prompt = f"{question}\n\nStarter code:\n```python\n{starter}\n```\n"
+        else:
+            prompt = question
+
+        return {
+            "prompt": prompt,
+            "problem": {
+                "question": question,
+                "inputs": inputs,
+                "outputs": outputs,
+                "num_solutions": len(solutions),  # Store count instead of list to avoid schema issues
+                "starter_code": starter,
+                "difficulty": row.get("difficulty", "unknown"),
+                "task_id": row["id"],
+                "prompt_id": prompt_id,
+            },
         }
 
     return ds.map(preprocess)

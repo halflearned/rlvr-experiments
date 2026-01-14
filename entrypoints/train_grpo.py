@@ -11,16 +11,17 @@ import torch
 from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
-from rlvr_experiments.data import DataIterator, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy
+from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
-from rlvr_experiments.verifiers import VerifierPool, MBPPVerifier, HumanEvalVerifier, MathVerifier
+from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier
 
 DATASETS = {
+    "apps": (load_apps, APPSVerifier),
     "humaneval": (load_humaneval, HumanEvalVerifier),
     "mbpp": (load_mbpp, MBPPVerifier),
     "gsm8k": (load_gsm8k, MathVerifier),
@@ -219,6 +220,10 @@ async def main():
             elif pending_tasks:
                 # No pending items right now, wait for a task to finish (may produce retries)
                 await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                # All items dispatched, no pending tasks, but some items still in buffer
+                # awaiting training. Yield to event loop so consumer can drain buffer.
+                await asyncio.sleep(0.001)
 
         # Wait for any remaining tasks
         if pending_tasks:

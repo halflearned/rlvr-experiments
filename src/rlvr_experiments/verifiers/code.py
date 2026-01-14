@@ -150,3 +150,109 @@ class SimpleCodeVerifier(CodeVerifier):
 
     def count_tests(self, problem: dict) -> int:
         return max(len(re.findall(r"^\s*assert\s+", problem.get("tests", ""), re.MULTILINE)), 1)
+
+
+class APPSVerifier(CodeVerifier):
+    """APPS: competitive programming problems with stdin/stdout testing.
+
+    APPS problems provide:
+    - question: Problem description
+    - input_output: Dict with "inputs" and "outputs" lists for test cases
+    - starter_code: Optional starter code
+
+    The model generates a complete program that reads from stdin and writes to stdout.
+    """
+
+    def assemble_code(self, problem: dict, completion: str) -> str:
+        """Extract and clean code from completion."""
+        return extract_code_from_markdown(completion)
+
+    def count_tests(self, problem: dict) -> int:
+        """Count number of test cases."""
+        inputs = problem.get("inputs", [])
+        return max(len(inputs), 1)
+
+    async def verify(self, problem: dict, completion: str) -> TestResult:
+        """Verify completion against all input/output test cases."""
+        code = self.assemble_code(problem, completion)
+        inputs = problem.get("inputs", [])
+        outputs = problem.get("outputs", [])
+
+        if not inputs or not outputs:
+            # No test cases - can't verify, return failure
+            return TestResult(
+                passed=0,
+                total=1,
+                execution_result=ExecutionResult(
+                    stdout="", stderr="No test cases available",
+                    exit_code=-1, timed_out=False, duration_ms=0.0
+                )
+            )
+
+        total = len(inputs)
+        passed = 0
+        all_stdout = []
+        all_stderr = []
+        total_duration = 0.0
+        any_timeout = False
+        last_result = None
+
+        for inp, expected_out in zip(inputs, outputs):
+            # Create code that reads from a string as if it were stdin
+            # This wraps the solution to feed it input
+            wrapped_code = self._wrap_with_input(code, inp)
+            result = await self.executor.execute(wrapped_code)
+            last_result = result
+            total_duration += result.duration_ms
+
+            if result.timed_out:
+                any_timeout = True
+                continue
+
+            if result.exit_code != 0:
+                all_stderr.append(result.stderr)
+                continue
+
+            # Compare output (normalize whitespace)
+            actual = result.stdout.strip()
+            expected = expected_out.strip()
+
+            if self._outputs_match(actual, expected):
+                passed += 1
+            else:
+                all_stderr.append(f"Expected:\n{expected}\nGot:\n{actual}")
+
+            all_stdout.append(result.stdout)
+
+        return TestResult(
+            passed=passed,
+            total=total,
+            execution_result=ExecutionResult(
+                stdout="\n---\n".join(all_stdout),
+                stderr="\n---\n".join(all_stderr),
+                exit_code=0 if passed == total else 1,
+                timed_out=any_timeout,
+                duration_ms=total_duration,
+                actual_start_time=last_result.actual_start_time if last_result else None,
+            )
+        )
+
+    def _wrap_with_input(self, code: str, stdin_input: str) -> str:
+        """Wrap code to provide stdin input."""
+        # Use StringIO to mock stdin
+        escaped_input = stdin_input.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+        return f'''import sys
+from io import StringIO
+
+_INPUT = """{escaped_input}"""
+sys.stdin = StringIO(_INPUT)
+
+{code}
+'''
+
+    def _outputs_match(self, actual: str, expected: str) -> bool:
+        """Compare outputs with flexible whitespace handling."""
+        # Normalize: strip, split by whitespace, compare tokens
+        actual_tokens = actual.split()
+        expected_tokens = expected.split()
+        return actual_tokens == expected_tokens
