@@ -49,7 +49,7 @@ class MathVerifier:
         """
         futures = [self._executor.submit(_warmup) for _ in range(self.max_workers)]
         for f in futures:
-            f.result(timeout=30.0)  # Long timeout for initial import
+            f.result(timeout=120.0)  # Very long timeout for initial import under load
 
     def verify(self, response: str, target: str) -> float:
         """Return 1.0 if response matches target, 0.0 otherwise. Uses subprocess with timeout."""
