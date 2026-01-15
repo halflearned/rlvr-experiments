@@ -80,6 +80,22 @@ SageMaker training job names must match the regex pattern: `[a-zA-Z0-9](-*[a-zA-
 
 The `submit.py` script uses `adhoc-{timestamp}` format (e.g., `adhoc-0111-0644`) to avoid issues with config filenames containing periods (like `qwen3-1.7B-gsm8k.yaml`).
 
+### Model Weights in S3
+
+SageMaker instances don't have access to `/efs`. Model weights must be uploaded to S3 first:
+
+```bash
+# Upload model to S3
+aws s3 sync /efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base \
+    s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/
+```
+
+The `sagemaker_launcher.py` automatically downloads models from S3 at job start. It looks for HF-style paths in the config (e.g., `Qwen/Qwen3-1.7B-Base`) and maps them to S3:
+
+- Config path: `Qwen/Qwen3-1.7B-Base`
+- S3 path: `s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/`
+- Local path (on SageMaker): `/opt/ml/model/model_cache/Qwen3-1.7B-Base`
+
 ### Common Issues
 
 1. **ECR Repository Not Found**: The ECR repository `rlvr-experiments` must exist before pushing. The script attempts to create it automatically, but requires `ecr:CreateRepository` permission.
@@ -87,6 +103,8 @@ The `submit.py` script uses `adhoc-{timestamp}` format (e.g., `adhoc-0111-0644`)
 2. **Docker Image Build**: Use `--build` flag to rebuild the image. Use `--push` to push to ECR.
 
 3. **Local Testing**: Use `--local --gpus "0,1,2,3"` to run in Docker locally before submitting to SageMaker.
+
+4. **Model Not Found on SageMaker**: Ensure model weights are uploaded to S3 before submitting the job (see "Model Weights in S3" above).
 
 ### Example Commands
 
