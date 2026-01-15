@@ -11,7 +11,7 @@ import torch
 from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
-from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy
+from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy, load_ifeval
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
@@ -19,7 +19,7 @@ from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
 from rlvr_experiments.utils import set_seed
-from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier
+from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier, IFEvalVerifier
 
 DATASETS = {
     "apps": (load_apps, APPSVerifier),
@@ -28,6 +28,7 @@ DATASETS = {
     "gsm8k": (load_gsm8k, MathVerifier),
     "math": (load_math, MathVerifier),
     "dummy": (load_dummy, MathVerifier),
+    "ifeval": (load_ifeval, IFEvalVerifier),
 }
 
 
@@ -117,6 +118,7 @@ async def main():
         async def process_one(item):
             """Process one prompt: generate completions, verify, compute ref logprobs, buffer."""
             prompt_id = item["problem"].get("prompt_id", "unknown")
+            dataset = item["problem"].get("verifier_type", "unknown")
             sp = sampling_params
 
             # --- Preflight check: skip prompts too long for vLLM context ---
@@ -127,14 +129,14 @@ async def main():
                     trainer_version = rollout.trainer_version
                     tracer.counter("skipped", {"prompt_too_long": 1})
                     buffer.stats.record_filtered(trainer_version)
-                    log_sample("filtered", prompt_id=prompt_id, version=trainer_version, reason="prompt_too_long")
+                    log_sample("filtered", prompt_id=prompt_id, version=trainer_version, reason="prompt_too_long", dataset=dataset)
                     data_iter.mark_done(prompt_id)
                     return
                 if sp.get("max_tokens") and sp["max_tokens"] > headroom:
                     sp = {**sp, "max_tokens": headroom}
 
             # --- Generate completions ---
-            log_sample("generation_start", prompt_id=prompt_id)
+            log_sample("generation_start", prompt_id=prompt_id, dataset=dataset)
             with trace_span("generate"):
                 response = await asyncio.wait_for(
                     rollout.generate_single(item["template"], **sp),
@@ -143,7 +145,7 @@ async def main():
             trainer_version = rollout.trainer_version
             completions = [out.text for out in response.outputs]
             rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
-            log_sample("generation_done", prompt_id=prompt_id, version=trainer_version, n_completions=len(completions))
+            log_sample("generation_done", prompt_id=prompt_id, version=trainer_version, n_completions=len(completions), dataset=dataset)
 
             # --- Verify completions ---
             with trace_span("verify"):
@@ -156,6 +158,7 @@ async def main():
                 completions=completions,
                 rewards=rewards,
                 trainer_version=trainer_version,
+                dataset=dataset,
             )
 
             # --- Filter: zero variance rewards (all correct or all wrong) ---
@@ -163,7 +166,7 @@ async def main():
                 reward_stats.record(rewards, used=False)
                 tracer.counter("skipped", {"zero_variance": 1})
                 buffer.stats.record_filtered(trainer_version)
-                log_sample("filtered", prompt_id=prompt_id, version=trainer_version, reason="zero_variance")
+                log_sample("filtered", prompt_id=prompt_id, version=trainer_version, reason="zero_variance", dataset=dataset)
                 data_iter.mark_done(prompt_id)
                 return
 
@@ -172,7 +175,7 @@ async def main():
                 reward_stats.record(rewards, used=False)
                 tracer.counter("skipped", {"seq_too_long": 1})
                 buffer.stats.record_filtered(trainer_version)
-                log_sample("filtered", prompt_id=prompt_id, version=trainer_version, reason="seq_too_long")
+                log_sample("filtered", prompt_id=prompt_id, version=trainer_version, reason="seq_too_long", dataset=dataset)
                 data_iter.mark_done(prompt_id)
                 return
 
@@ -200,7 +203,7 @@ async def main():
                 trainer_version=trainer_version,
             )
             await buffer.put(sample, trainer_version, item_id=prompt_id)
-            log_sample("buffered", prompt_id=prompt_id, version=trainer_version)
+            log_sample("buffered", prompt_id=prompt_id, version=trainer_version, dataset=dataset)
 
         # --- Worker pool ---
         # Use a fixed pool of long-lived workers that repeatedly pulls from the iterator.

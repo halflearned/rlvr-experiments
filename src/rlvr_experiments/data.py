@@ -13,6 +13,29 @@ def _hash_prompt(prompt: str) -> str:
     return hashlib.sha256(prompt.encode()).hexdigest()[:12]
 
 
+# --- Default config per dataset type ---
+# These can be overridden by config, but provide sensible defaults for mixed training.
+
+# GSM8K: Grade school math, shorter reasoning chains
+GSM8K_SYSTEM_PROMPT = "Solve the following math problem and provide the final answer inside \\boxed{}"
+GSM8K_ASSISTANT_PREFIX = "Let's think step by step."
+GSM8K_MAX_COMPLETION_LEN = 512
+
+# MATH: Competition math, longer reasoning needed
+MATH_SYSTEM_PROMPT = "Solve the following math problem and provide the final answer inside \\boxed{}"
+MATH_ASSISTANT_PREFIX = "Let's think step by step."
+MATH_MAX_COMPLETION_LEN = 1024
+
+# Code datasets
+CODE_SYSTEM_PROMPT = ""
+CODE_ASSISTANT_PREFIX = ""
+CODE_MAX_COMPLETION_LEN = 512
+
+# IFEval: Instruction following
+IFEVAL_SYSTEM_PROMPT = ""
+IFEVAL_ASSISTANT_PREFIX = ""
+IFEVAL_MAX_COMPLETION_LEN = 2048
+
 
 def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     """
@@ -31,7 +54,14 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
         prompt_id = f"gsm8k_{_hash_prompt(question)}"
         return {
             "prompt": question,
-            "problem": {"answer": answer, "prompt_id": prompt_id},
+            "problem": {
+                "answer": answer,
+                "prompt_id": prompt_id,
+                "verifier_type": "math",
+                "system_prompt": GSM8K_SYSTEM_PROMPT,
+                "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
+                "max_completion_len": GSM8K_MAX_COMPLETION_LEN,
+            },
         }
 
     return ds.map(preprocess)
@@ -72,6 +102,10 @@ def load_humaneval(**kwargs) -> ray.data.Dataset:
                 "entry_point": row["entry_point"],
                 "task_id": row["task_id"],
                 "prompt_id": row["task_id"],
+                "verifier_type": "humaneval",
+                "system_prompt": CODE_SYSTEM_PROMPT,
+                "assistant_prefix": CODE_ASSISTANT_PREFIX,
+                "max_completion_len": CODE_MAX_COMPLETION_LEN,
             },
         }
 
@@ -152,6 +186,10 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
                 "test_list": test_list,
                 "task_id": row["task_id"],
                 "prompt_id": prompt_id,
+                "verifier_type": "mbpp",
+                "system_prompt": CODE_SYSTEM_PROMPT,
+                "assistant_prefix": CODE_ASSISTANT_PREFIX,
+                "max_completion_len": CODE_MAX_COMPLETION_LEN,
             },
         }
 
@@ -206,7 +244,14 @@ def load_math(
         prompt_id = f"math_{row['type']}_{_hash_prompt(question)}"
         return {
             "prompt": question,
-            "problem": {"answer": row["solution"], "prompt_id": prompt_id},
+            "problem": {
+                "answer": row["solution"],
+                "prompt_id": prompt_id,
+                "verifier_type": "math",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": MATH_MAX_COMPLETION_LEN,
+            },
         }
 
     return ds.map(preprocess)
@@ -302,15 +347,65 @@ def load_apps(
                 "difficulty": row.get("difficulty", "unknown"),
                 "task_id": row["id"],
                 "prompt_id": prompt_id,
+                "verifier_type": "apps",
+                "system_prompt": CODE_SYSTEM_PROMPT,
+                "assistant_prefix": CODE_ASSISTANT_PREFIX,
+                "max_completion_len": CODE_MAX_COMPLETION_LEN,
             },
         }
 
     return ds.map(preprocess)
 
 
-def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
+def load_ifeval(split: str = "train") -> ray.data.Dataset:
     """
-    Load a dummy dataset with a single question repeated 64 times.
+    Load RLVR-IFeval dataset as a Ray Dataset.
+
+    RLVR-IFeval contains 14,973 instruction-following prompts with verifiable
+    constraints from IFEval. Each prompt includes a constraint that can be
+    automatically verified (e.g., "all lowercase", "include keyword X times").
+
+    Args:
+        split: Dataset split ("train")
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict containing ground_truth JSON for use with IFEvalVerifier.
+    """
+    hf_dataset = load_dataset("allenai/RLVR-IFeval", split=split)
+    ds = ray.data.from_huggingface(hf_dataset)
+
+    def preprocess(row):
+        # Extract user message content from messages list
+        messages = row["messages"]
+        user_content = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                user_content = msg["content"]
+                break
+
+        # Use hash of prompt as ID since dataset doesn't have explicit IDs
+        prompt_id = f"ifeval_{_hash_prompt(user_content)}"
+
+        return {
+            "prompt": user_content,
+            "problem": {
+                "ground_truth": row["ground_truth"],
+                "constraint_type": row["constraint_type"],
+                "constraint": row["constraint"],
+                "prompt_id": prompt_id,
+                "verifier_type": "ifeval",
+                "system_prompt": IFEVAL_SYSTEM_PROMPT,
+                "assistant_prefix": IFEVAL_ASSISTANT_PREFIX,
+                "max_completion_len": IFEVAL_MAX_COMPLETION_LEN,
+            },
+        }
+
+    return ds.map(preprocess)
+
+
+def load_dummy(split: str = "train", num_samples: int = 64) -> ray.data.Dataset:
+    """
+    Load a dummy dataset with a single question repeated N times.
 
     Useful for testing that rewards are increasing on a single problem.
     Returns dataset with columns: "prompt", "problem"
@@ -320,10 +415,117 @@ def load_dummy(split: str = "train", num_samples = 64) -> ray.data.Dataset:
     rows = [
         {
             "prompt": prompt,
-            "problem": {"answer": "1", "prompt_id": "dummy_0"},
+            "problem": {
+                "answer": "1",
+                "prompt_id": "dummy_0",
+                "verifier_type": "math",
+                "system_prompt": GSM8K_SYSTEM_PROMPT,
+                "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
+                "max_completion_len": GSM8K_MAX_COMPLETION_LEN,
+            },
         }
     ] * num_samples
     return ray.data.from_items(rows)
+
+
+# --- Dataset registry for load_mixed ---
+
+DATASET_LOADERS = {
+    "gsm8k": load_gsm8k,
+    "math": load_math,
+    "humaneval": load_humaneval,
+    "mbpp": load_mbpp,
+    "apps": load_apps,
+    "ifeval": load_ifeval,
+    "dummy": load_dummy,
+}
+
+
+def load_mixed(
+    datasets: list[dict],
+    shuffle: bool = True,
+    seed: int = 42,
+) -> ray.data.Dataset:
+    """
+    Load and combine multiple datasets for mixed training.
+
+    Each dataset config can specify:
+    - name: Dataset name (required, must be in DATASET_LOADERS)
+    - split: Split to load (default: "train")
+    - weight: Sampling weight / max samples (optional)
+    - **kwargs: Additional args passed to the loader (e.g., level for MATH)
+
+    Args:
+        datasets: List of dataset configs, e.g.:
+            [
+                {"name": "gsm8k", "split": "train"},
+                {"name": "math", "split": "train", "level": [1, 2, 3]},
+                {"name": "ifeval"},
+                {"name": "mbpp", "split": "train"},
+            ]
+        shuffle: Whether to shuffle the combined dataset
+        seed: Random seed for shuffling
+
+    Returns:
+        Combined Ray Dataset with all samples from specified datasets.
+        Each sample has verifier_type, system_prompt, assistant_prefix in problem dict.
+
+    Example config:
+        data:
+          datasets:
+            - name: gsm8k
+              split: train
+            - name: math
+              split: train
+              level: [1, 2, 3]
+            - name: ifeval
+            - name: mbpp
+              split: train
+    """
+    import random
+
+    if not datasets:
+        raise ValueError("datasets list cannot be empty")
+
+    all_rows = []
+
+    for ds_config in datasets:
+        name = ds_config.get("name")
+        if not name:
+            raise ValueError("Each dataset config must have a 'name' key")
+
+        if name not in DATASET_LOADERS:
+            raise ValueError(
+                f"Unknown dataset: {name}. Available: {list(DATASET_LOADERS.keys())}"
+            )
+
+        # Extract loader kwargs (everything except 'name' and 'weight')
+        loader_kwargs = {k: v for k, v in ds_config.items() if k not in ("name", "weight")}
+
+        # Load the dataset
+        loader = DATASET_LOADERS[name]
+        ds = loader(**loader_kwargs)
+
+        # Materialize to list for combining
+        rows = list(ds.iter_rows())
+
+        # Apply weight/sampling if specified
+        weight = ds_config.get("weight")
+        if weight is not None and isinstance(weight, int) and weight < len(rows):
+            rng = random.Random(seed)
+            rows = rng.sample(rows, weight)
+
+        print(f"[load_mixed] Loaded {len(rows)} samples from {name}")
+        all_rows.extend(rows)
+
+    print(f"[load_mixed] Total: {len(all_rows)} samples from {len(datasets)} datasets")
+
+    # Shuffle if requested
+    if shuffle:
+        rng = random.Random(seed)
+        rng.shuffle(all_rows)
+
+    return ray.data.from_items(all_rows)
 
 
 class DataIterator:
@@ -387,25 +589,33 @@ class DataIterator:
                 if prompt_id:
                     self._prompt_id_index[prompt_id] = {"prompt": p, "problem": prob}
 
-    def _apply_template(self, prompt: str) -> str:
-        """Apply chat template to a single prompt."""
+    def _apply_template(self, prompt: str, problem: dict) -> str:
+        """Apply chat template to a single prompt.
+
+        Uses per-row system_prompt/assistant_prefix from problem dict if present,
+        otherwise falls back to global defaults.
+        """
+        # Per-row overrides take precedence over global config
+        system_prompt = problem.get("system_prompt") or self.system_prompt
+        assistant_prefix = problem.get("assistant_prefix") or self.assistant_prefix
+
         messages = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         content = self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,  # TODO: make configurable
-        ) + self.assistant_prefix
+        ) + assistant_prefix
         return content
 
     def _get_item(self, prompt_id: str) -> dict:
         """Get formatted item for a prompt_id."""
         row = self._prompt_id_index[prompt_id]
         return {
-            "template": self._apply_template(row["prompt"]),
+            "template": self._apply_template(row["prompt"], row["problem"]),
             "prompt": row["prompt"],
             "problem": row["problem"],
         }

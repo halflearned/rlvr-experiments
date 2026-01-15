@@ -37,6 +37,8 @@ from .code import (
     TestResult,
 )
 from .math import MathVerifier
+from .ifeval import IFEvalVerifier
+from .multi import MultiVerifier
 from .distributed import VerifierPool
 
 __all__ = [
@@ -53,6 +55,10 @@ __all__ = [
     "TestResult",
     # Math verifier
     "MathVerifier",
+    # IFEval verifier
+    "IFEvalVerifier",
+    # Multi-verifier (for mixed datasets)
+    "MultiVerifier",
     # Distributed
     "VerifierPool",
 ]
