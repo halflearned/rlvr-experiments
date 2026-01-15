@@ -18,6 +18,7 @@ from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
+from rlvr_experiments.utils import set_seed
 from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier
 
 DATASETS = {
@@ -43,6 +44,12 @@ async def main():
     runtime = await Runtime.from_plan(args.config)
     plan = runtime.plan
     run_name = plan.run.get("name", "grpo_run")
+
+    # Set random seed for reproducibility
+    seed = plan.run.get("seed", 42)
+    set_seed(seed)
+    print(f"[init] Using seed: {seed}")
+
     await runtime.start()
 
     trainer = runtime.roles["trainer"]
@@ -93,8 +100,10 @@ async def main():
     completion_len_buckets = plan.training.get("completion_len_buckets") or [max_completion_len]
     max_seq_len = seq_len_buckets[-1]
 
-    # Sampling params (strip logprobs for generation)
+    # Sampling params (strip logprobs for generation, add seed if not present)
     sampling_params = {**plan.sampling, "logprobs": 0}
+    if "seed" not in sampling_params:
+        sampling_params["seed"] = seed
     rollout_max_model_len = plan.roles.get("rollout").config.get("max_model_len")
     rollout_timeout_s = plan.training.get("rollout_timeout_s", 9999)
 
@@ -293,7 +302,7 @@ async def main():
         if max_steps and trainer.version >= max_steps:
             break
 
-        data_iter.new_epoch(seed=epoch)
+        data_iter.new_epoch(seed=seed + epoch)
         tracer.counter("epoch", {"epoch": epoch})
         producer = asyncio.create_task(produce_epoch())
 
@@ -405,7 +414,10 @@ async def main():
     print(f"\n=== Run Summary ===")
     print(f"Total time: {run_elapsed:.1f}s")
 
-
+    # Force exit to terminate any lingering background tasks (producer workers, etc.)
+    # Without this, the process may hang for hours processing remaining prompts.
+    import sys
+    sys.exit(0)
 
 
 if __name__ == "__main__":
