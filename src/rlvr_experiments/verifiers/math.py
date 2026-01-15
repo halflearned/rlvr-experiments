@@ -46,10 +46,18 @@ class MathVerifier:
         """Pre-import math_verify in all worker processes.
 
         This avoids the ~1.5s import time on first verification call.
+        Warms up in batches to avoid overwhelming the system.
         """
-        futures = [self._executor.submit(_warmup) for _ in range(self.max_workers)]
-        for f in futures:
-            f.result(timeout=120.0)  # Very long timeout for initial import under load
+        # Warm up in batches of 16 to avoid timeout issues with many workers
+        batch_size = min(16, self.max_workers)
+        for i in range(0, self.max_workers, batch_size):
+            batch_count = min(batch_size, self.max_workers - i)
+            futures = [self._executor.submit(_warmup) for _ in range(batch_count)]
+            for f in futures:
+                try:
+                    f.result(timeout=60.0)
+                except Exception:
+                    pass  # Continue even if some workers fail to warm up
 
     def verify(self, response: str, target: str) -> float:
         """Return 1.0 if response matches target, 0.0 otherwise. Uses subprocess with timeout."""
@@ -60,6 +68,28 @@ class MathVerifier:
             return 0.0
         except Exception:
             return 0.0
+
+    def verify_batch_parallel(self, completions: list[str], target: str) -> list[float]:
+        """Verify multiple completions against a single target in parallel.
+
+        Submits all verification tasks at once and collects results.
+        """
+        futures = [
+            self._executor.submit(_verify_single, completion, target)
+            for completion in completions
+        ]
+
+        scores = []
+        for f in futures:
+            try:
+                score = f.result(timeout=self.timeout)
+            except FuturesTimeoutError:
+                score = 0.0
+            except Exception:
+                score = 0.0
+            scores.append(score)
+
+        return scores
 
     async def verify_completions(self, problem: dict, completions: list[str], **kwargs) -> list[float]:
         """Verify N completions for one problem. Returns list of scores."""
