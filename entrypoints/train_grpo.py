@@ -4,6 +4,7 @@ import asyncio
 import argparse
 import os
 import time
+import traceback
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -11,7 +12,7 @@ import torch
 from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
-from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy, load_ifeval
+from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy, load_ifeval, load_mixed, DATASET_LOADERS
 from rlvr_experiments.losses import GRPOLoss, compute_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
@@ -19,7 +20,7 @@ from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
 from rlvr_experiments.utils import set_seed
-from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier, IFEvalVerifier
+from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier, IFEvalVerifier, MultiVerifier
 
 DATASETS = {
     "apps": (load_apps, APPSVerifier),
@@ -29,6 +30,7 @@ DATASETS = {
     "math": (load_math, MathVerifier),
     "dummy": (load_dummy, MathVerifier),
     "ifeval": (load_ifeval, IFEvalVerifier),
+    "mixed": (load_mixed, MultiVerifier),
 }
 
 
@@ -67,7 +69,13 @@ async def main():
     dataset_name = data_cfg.pop("dataset")
     load_fn, verifier_cls = DATASETS[dataset_name]
     verifier = VerifierPool(verifier_cls, **plan.verifier)
-    data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
+
+    # load_mixed returns (dataset, order), other loaders return just dataset
+    if dataset_name == "mixed":
+        ds, order = load_fn(**data_cfg)
+        data_iter = DataIterator(ds, tokenizer=tokenizer, order=order, **plan.data_iter)
+    else:
+        data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
 
     loss_fn = GRPOLoss(**plan.loss)
     reward_stats = RewardStats()
@@ -118,8 +126,12 @@ async def main():
         async def process_one(item):
             """Process one prompt: generate completions, verify, compute ref logprobs, buffer."""
             prompt_id = item["problem"].get("prompt_id", "unknown")
-            dataset = item["problem"].get("verifier_type", "unknown")
-            sp = sampling_params
+            dataset = item["problem"].get("dataset_name", item["problem"].get("verifier_type", "unknown"))
+
+            # Use per-sample max_completion_len if available and valid, else fall back to global
+            per_sample_max = item["problem"].get("max_completion_len")
+            effective_max_tokens = per_sample_max if isinstance(per_sample_max, int) else max_completion_len
+            sp = {**sampling_params, "max_tokens": effective_max_tokens}
 
             # --- Preflight check: skip prompts too long for vLLM context ---
             if rollout_max_model_len is not None:
@@ -201,6 +213,7 @@ async def main():
                 ref_logprobs,
                 item_id=prompt_id,
                 trainer_version=trainer_version,
+                dataset=dataset,
             )
             await buffer.put(sample, trainer_version, item_id=prompt_id)
             log_sample("buffered", prompt_id=prompt_id, version=trainer_version, dataset=dataset)
@@ -218,10 +231,11 @@ async def main():
                 raise
             except Exception as e:
                 trainer_version = rollout.trainer_version
-                print(f"[producer] prompt failed {prompt_id}: {e}")
+                tb = traceback.format_exc()
+                print(f"[producer] prompt failed {prompt_id}: {e}\n{tb}")
                 tracer.counter("failed", {"prompt_failed": 1})
                 buffer.stats.record_failed(trainer_version)
-                log_sample("failed", prompt_id=prompt_id, version=trainer_version, error=str(e))
+                log_sample("failed", prompt_id=prompt_id, version=trainer_version, error=str(e), traceback=tb)
                 data_iter.mark_failed(prompt_id)
 
         async def worker() -> None:
@@ -277,18 +291,34 @@ async def main():
                     seq_len_buckets=seq_len_buckets,
                     completion_len_buckets=completion_len_buckets,
                 )
-                # Log lag for each sample in batch
+                # Log lag and dataset for each sample in batch
                 lags = []
+                dataset_counts = {}
+                dataset_tokens = {}
                 for s in samples:
                     lag = trainer.version - s.trainer_version
                     lags.append(lag)
+                    sample_tokens = sum(s.rollout.completion_lens)
                     buffer.stats.record_used(s.trainer_version)
                     log_sample("trained", prompt_id=s.item_id, trained_at_step=trainer.version,
-                               trainer_version=s.trainer_version, lag=lag)
+                               trainer_version=s.trainer_version, lag=lag, dataset=s.dataset,
+                               n_tokens=sample_tokens)
+                    dataset_counts[s.dataset] = dataset_counts.get(s.dataset, 0) + 1
+                    dataset_tokens[s.dataset] = dataset_tokens.get(s.dataset, 0) + sample_tokens
+                # Lag breakdown: count samples at each lag value
+                lag_counts = {}
+                for lag in lags:
+                    lag_counts[lag] = lag_counts.get(lag, 0) + 1
                 tracer.counter("batch.lag", {
                     "mean_lag": sum(lags) / len(lags) if lags else 0,
                     "max_lag": max(lags) if lags else 0,
                     "trained_at_step": trainer.version,
+                    **{f"lag_{k}": v for k, v in lag_counts.items()},
+                })
+                tracer.counter("batch.datasets", {
+                    "trained_at_step": trainer.version,
+                    **dataset_counts,
+                    **{f"{k}_tokens": v for k, v in dataset_tokens.items()},
                 })
                 item_ids = [s.item_id for s in samples]
                 yield batch, stats, item_ids

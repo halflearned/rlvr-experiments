@@ -94,9 +94,9 @@ class MultiVerifier:
             elif verifier_type == "ifeval":
                 score = verifier.verify(c, p.get("ground_truth", ""))
             else:
-                # Code verifiers - use verify_completions with single completion
-                result = await verifier.verify_completions(p, [c])
-                score = result[0] if result else 0.0
+                # Code verifiers - verify_completions returns (scores, durations)
+                scores_result, _ = await verifier.verify_completions(p, [c])
+                score = scores_result[0] if scores_result else 0.0
 
             dur_ms = (time.perf_counter() - t0) * 1000
             scores.append(score)
@@ -130,9 +130,9 @@ class MultiVerifier:
             elif verifier_type == "ifeval":
                 score = verifier.verify(c, p.get("ground_truth", ""))
             else:
-                # Code verifiers - use verify_completions with single completion
-                result = await verifier.verify_completions(p, [c])
-                score = result[0] if result else 0.0
+                # Code verifiers - verify_completions returns (scores, durations)
+                scores_result, _ = await verifier.verify_completions(p, [c])
+                score = scores_result[0] if scores_result else 0.0
 
             dur_ms = (time.perf_counter() - t0) * 1000
             scores.append(score)

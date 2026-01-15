@@ -114,6 +114,7 @@ class TrainSample:
     ref_logprobs: torch.Tensor
     item_id: str  # prompt_id for status tracking
     trainer_version: int  # trainer version when weights were synced to vLLM
+    dataset: str = "unknown"  # dataset/verifier_type for mixed training
 
 
 @dataclass

@@ -58,6 +58,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
                 "answer": answer,
                 "prompt_id": prompt_id,
                 "verifier_type": "math",
+                "dataset_name": "gsm8k",
                 "system_prompt": GSM8K_SYSTEM_PROMPT,
                 "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
                 "max_completion_len": GSM8K_MAX_COMPLETION_LEN,
@@ -103,6 +104,7 @@ def load_humaneval(**kwargs) -> ray.data.Dataset:
                 "task_id": row["task_id"],
                 "prompt_id": row["task_id"],
                 "verifier_type": "humaneval",
+                "dataset_name": "humaneval",
                 "system_prompt": CODE_SYSTEM_PROMPT,
                 "assistant_prefix": CODE_ASSISTANT_PREFIX,
                 "max_completion_len": CODE_MAX_COMPLETION_LEN,
@@ -187,6 +189,7 @@ def load_mbpp(split: str = "train") -> ray.data.Dataset:
                 "task_id": row["task_id"],
                 "prompt_id": prompt_id,
                 "verifier_type": "mbpp",
+                "dataset_name": "mbpp",
                 "system_prompt": CODE_SYSTEM_PROMPT,
                 "assistant_prefix": CODE_ASSISTANT_PREFIX,
                 "max_completion_len": CODE_MAX_COMPLETION_LEN,
@@ -248,6 +251,7 @@ def load_math(
                 "answer": row["solution"],
                 "prompt_id": prompt_id,
                 "verifier_type": "math",
+                "dataset_name": "math",
                 "system_prompt": MATH_SYSTEM_PROMPT,
                 "assistant_prefix": MATH_ASSISTANT_PREFIX,
                 "max_completion_len": MATH_MAX_COMPLETION_LEN,
@@ -348,6 +352,7 @@ def load_apps(
                 "task_id": row["id"],
                 "prompt_id": prompt_id,
                 "verifier_type": "apps",
+                "dataset_name": "apps",
                 "system_prompt": CODE_SYSTEM_PROMPT,
                 "assistant_prefix": CODE_ASSISTANT_PREFIX,
                 "max_completion_len": CODE_MAX_COMPLETION_LEN,
@@ -394,6 +399,7 @@ def load_ifeval(split: str = "train") -> ray.data.Dataset:
                 "constraint": row["constraint"],
                 "prompt_id": prompt_id,
                 "verifier_type": "ifeval",
+                "dataset_name": "ifeval",
                 "system_prompt": IFEVAL_SYSTEM_PROMPT,
                 "assistant_prefix": IFEVAL_ASSISTANT_PREFIX,
                 "max_completion_len": IFEVAL_MAX_COMPLETION_LEN,
@@ -417,14 +423,16 @@ def load_dummy(split: str = "train", num_samples: int = 64) -> ray.data.Dataset:
             "prompt": prompt,
             "problem": {
                 "answer": "1",
-                "prompt_id": "dummy_0",
+                "prompt_id": f"dummy_{i}",
                 "verifier_type": "math",
+                "dataset_name": "dummy",
                 "system_prompt": GSM8K_SYSTEM_PROMPT,
                 "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
                 "max_completion_len": GSM8K_MAX_COMPLETION_LEN,
             },
         }
-    ] * num_samples
+        for i in range(num_samples)
+    ]
     return ray.data.from_items(rows)
 
 
@@ -443,51 +451,59 @@ DATASET_LOADERS = {
 
 def load_mixed(
     datasets: list[dict],
-    shuffle: bool = True,
     seed: int = 42,
-) -> ray.data.Dataset:
+) -> tuple[ray.data.Dataset, list[str]]:
     """
-    Load and combine multiple datasets for mixed training.
+    Load and combine multiple datasets with weighted interleaved ordering.
 
     Each dataset config can specify:
     - name: Dataset name (required, must be in DATASET_LOADERS)
     - split: Split to load (default: "train")
-    - weight: Sampling weight / max samples (optional)
+    - weight: Sampling probability weight (default: 1.0, weights are normalized)
+    - order_file: Path to file with line-separated prompt_ids for priority ordering
     - **kwargs: Additional args passed to the loader (e.g., level for MATH)
+
+    The function builds an interleaved order by:
+    1. Loading each dataset and applying per-dataset ordering (from order_file) or shuffle
+    2. Drawing from datasets according to normalized weights
+    3. Within each dataset, taking items in order (priority order or shuffled)
+    4. When a dataset is exhausted, continuing with remaining datasets
 
     Args:
         datasets: List of dataset configs, e.g.:
             [
-                {"name": "gsm8k", "split": "train"},
-                {"name": "math", "split": "train", "level": [1, 2, 3]},
-                {"name": "ifeval"},
-                {"name": "mbpp", "split": "train"},
+                {"name": "gsm8k", "weight": 0.7},
+                {"name": "math", "weight": 0.3, "order_file": "/path/to/order.txt"},
             ]
-        shuffle: Whether to shuffle the combined dataset
-        seed: Random seed for shuffling
+        seed: Random seed for shuffling and weighted sampling
 
     Returns:
-        Combined Ray Dataset with all samples from specified datasets.
-        Each sample has verifier_type, system_prompt, assistant_prefix in problem dict.
+        Tuple of (combined_dataset, order_list) where:
+        - combined_dataset: Ray Dataset with all samples
+        - order_list: List of prompt_ids in the interleaved order
 
     Example config:
         data:
           datasets:
             - name: gsm8k
-              split: train
+              weight: 0.7
             - name: math
-              split: train
-              level: [1, 2, 3]
-            - name: ifeval
-            - name: mbpp
-              split: train
+              weight: 0.3
+              level: [3, 4, 5]
+              order_file: experiments/math_order.txt
     """
     import random
 
     if not datasets:
         raise ValueError("datasets list cannot be empty")
 
+    rng = random.Random(seed)
+
+    # Step 1: Load all datasets and build per-dataset ordered prompt_id lists
     all_rows = []
+    per_dataset_queues: dict[str, list[str]] = {}  # name -> ordered list of prompt_ids
+    prompt_id_to_row: dict[str, dict] = {}
+    weights: dict[str, float] = {}
 
     for ds_config in datasets:
         name = ds_config.get("name")
@@ -499,33 +515,78 @@ def load_mixed(
                 f"Unknown dataset: {name}. Available: {list(DATASET_LOADERS.keys())}"
             )
 
-        # Extract loader kwargs (everything except 'name' and 'weight')
-        loader_kwargs = {k: v for k, v in ds_config.items() if k not in ("name", "weight")}
+        # Extract loader kwargs (everything except 'name', 'weight', 'order_file')
+        loader_kwargs = {k: v for k, v in ds_config.items() if k not in ("name", "weight", "order_file")}
 
         # Load the dataset
         loader = DATASET_LOADERS[name]
         ds = loader(**loader_kwargs)
 
-        # Materialize to list for combining
+        # Materialize to list
         rows = list(ds.iter_rows())
+        row_by_id = {row["problem"]["prompt_id"]: row for row in rows}
 
-        # Apply weight/sampling if specified
-        weight = ds_config.get("weight")
-        if weight is not None and isinstance(weight, int) and weight < len(rows):
-            rng = random.Random(seed)
-            rows = rng.sample(rows, weight)
+        # Build ordered prompt_id list for this dataset
+        order_file = ds_config.get("order_file")
+        if order_file:
+            # Use explicit order from file, filtering to valid IDs
+            with open(order_file, "r") as f:
+                file_order = [line.strip() for line in f if line.strip()]
+            ordered_ids = [pid for pid in file_order if pid in row_by_id]
+            if not ordered_ids:
+                raise ValueError(f"Order file {order_file} has no valid prompt_ids for {name}")
+            print(f"[load_mixed] {name}: using order file with {len(ordered_ids)}/{len(file_order)} valid IDs")
+        else:
+            # No order file -> shuffle
+            ordered_ids = list(row_by_id.keys())
+            rng.shuffle(ordered_ids)
 
-        print(f"[load_mixed] Loaded {len(rows)} samples from {name}")
-        all_rows.extend(rows)
+        per_dataset_queues[name] = ordered_ids
+        weights[name] = ds_config.get("weight", 1.0)
 
-    print(f"[load_mixed] Total: {len(all_rows)} samples from {len(datasets)} datasets")
+        # Add rows and index
+        for row in rows:
+            pid = row["problem"]["prompt_id"]
+            if pid in ordered_ids:  # Only include if in order
+                prompt_id_to_row[pid] = row
+                all_rows.append(row)
 
-    # Shuffle if requested
-    if shuffle:
-        rng = random.Random(seed)
-        rng.shuffle(all_rows)
+        print(f"[load_mixed] Loaded {len(ordered_ids)} samples from {name} (weight={weights[name]})")
 
-    return ray.data.from_items(all_rows)
+    # Step 2: Build interleaved order by weighted sampling
+    interleaved_order: list[str] = []
+
+    def get_active_datasets() -> list[str]:
+        return [n for n, q in per_dataset_queues.items() if q]
+
+    def sample_dataset() -> str | None:
+        active = get_active_datasets()
+        if not active:
+            return None
+        # Normalize weights for active datasets
+        active_weights = [weights[n] for n in active]
+        total = sum(active_weights)
+        probs = [w / total for w in active_weights]
+        # Weighted random choice
+        r = rng.random()
+        cumsum = 0.0
+        for n, p in zip(active, probs):
+            cumsum += p
+            if r <= cumsum:
+                return n
+        return active[-1]  # Fallback
+
+    while True:
+        ds_name = sample_dataset()
+        if ds_name is None:
+            break
+        # Pop next item from this dataset's queue
+        prompt_id = per_dataset_queues[ds_name].pop(0)
+        interleaved_order.append(prompt_id)
+
+    print(f"[load_mixed] Total: {len(interleaved_order)} samples, interleaved from {len(datasets)} datasets")
+
+    return ray.data.from_items(all_rows), interleaved_order
 
 
 class DataIterator:
@@ -541,6 +602,10 @@ class DataIterator:
     - in_flight: currently being processed (generated, or waiting to be trained)
     - done: finished (trained or intentionally skipped/filtered)
     - failed: permanently failed (will not be retried)
+
+    Supports priority ordering:
+    - Pass `order` to __init__ or new_epoch() to specify initial prompt order
+    - Retried prompts (via mark_pending) are moved to the front of the queue
 
     Usage:
         data_iter = DataIterator(ds, tokenizer=tokenizer)
@@ -565,6 +630,7 @@ class DataIterator:
         tokenizer,
         system_prompt: str = "",
         assistant_prefix: str = "",
+        order: list[str] | None = None,
     ):
         self.ds = ds
         self.tokenizer = tokenizer
@@ -576,8 +642,17 @@ class DataIterator:
         self._epoch_started = False
         # Status tracking: prompt_id -> "pending" | "in_flight" | "done" | "failed"
         self._status: dict[str, str] = {}
-        # Ordered list of prompt_ids for iteration
-        self._prompt_ids: list[str] = list(self._prompt_id_index.keys())
+        # Ordered list of prompt_ids for iteration (determines priority)
+        # Items at the front are processed first
+        # Items not in order are ignored (not processed)
+        if order is not None:
+            # Filter to only valid prompt_ids, ignore unknown ones silently
+            valid_ids = set(self._prompt_id_index.keys())
+            self._order: list[str] = [pid for pid in order if pid in valid_ids]
+            if not self._order:
+                raise ValueError("order contains no valid prompt_ids")
+        else:
+            self._order: list[str] = list(self._prompt_id_index.keys())
 
     def _build_index(self) -> None:
         """Build prompt_id -> row index."""
@@ -622,15 +697,30 @@ class DataIterator:
 
     # --- Status management ---
 
-    def new_epoch(self, seed: int | None = None) -> None:
-        """Reset all non-failed statuses to pending for a new epoch and shuffle order."""
+    def new_epoch(self, seed: int | None = None, order: list[str] | None = None) -> None:
+        """Reset all non-failed statuses to pending for a new epoch.
+
+        Args:
+            seed: Random seed for shuffling. If None and order is None, keeps current order.
+            order: Explicit ordering of prompt_ids. If provided, overrides seed-based shuffling.
+                   Items not in order are appended at the end.
+        """
         import random
 
         self._epoch_started = True
-        if seed is not None:
+
+        if order is not None:
+            # Use provided order, filter to valid ids only
+            # Items not in order are ignored (not processed this epoch)
+            valid_ids = set(self._prompt_id_index.keys())
+            self._order = [pid for pid in order if pid in valid_ids]
+            if not self._order:
+                raise ValueError("order contains no valid prompt_ids")
+        elif seed is not None:
             rng = random.Random(seed)
-            rng.shuffle(self._prompt_ids)
-        for pid in self._prompt_ids:
+            rng.shuffle(self._order)
+
+        for pid in self._order:
             if self._status.get(pid) == "failed":
                 continue
             self._status[pid] = "pending"
@@ -646,10 +736,17 @@ class DataIterator:
         self._status[prompt_id] = "failed"
 
     def mark_pending(self, prompt_id: str) -> None:
-        """Mark a prompt as pending (for retry)."""
+        """Mark a prompt as pending (for retry) and move it to front of queue.
+
+        Retried items get priority over fresh items to minimize staleness waste.
+        """
         if self._status.get(prompt_id) == "failed":
             return
         self._status[prompt_id] = "pending"
+        # Move to front of order list for priority processing
+        if prompt_id in self._order:
+            self._order.remove(prompt_id)
+        self._order.insert(0, prompt_id)
         log_sample("pending", prompt_id=prompt_id)
 
     def all_done(self) -> bool:
@@ -682,10 +779,12 @@ class DataIterator:
         Returns the next available item (either a retry or new item), or None
         if all items are either in_flight, done, or failed. This is the primary
         interface for getting work items.
+
+        Items are processed in order of self._order (front = highest priority).
         """
         self._require_epoch()
-        for pid in self._prompt_ids:
-            if self._status[pid] == "pending":
+        for pid in self._order:
+            if self._status.get(pid) == "pending":
                 self._status[pid] = "in_flight"
                 log_sample("in_flight", prompt_id=pid)
                 return self._get_item(pid)
