@@ -1094,8 +1094,8 @@
             </div>
         </div>
 
-        <!-- Panel 9: Batch Breakdown (Lag + Dataset) -->
-        <div class="panel" id="batch-breakdown-panel" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
+        <!-- Panel 9: Batch Breakdown (Lag + Dataset + Tokens) -->
+        <div class="panel" id="batch-breakdown-panel" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
             <!-- Lag Breakdown -->
             <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
@@ -1113,11 +1113,23 @@
                 <div class="panel-header">
                     <div>
                         <div class="panel-title">Dataset Breakdown</div>
-                        <div class="panel-subtitle">Sample sources per optim step</div>
+                        <div class="panel-subtitle">Samples per dataset per step</div>
                     </div>
                 </div>
                 <div class="panel-content">
                     <canvas id="dataset-breakdown-canvas" style="width: 100%; height: 100%;"></canvas>
+                </div>
+            </div>
+            <!-- Token Breakdown -->
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Token Breakdown</div>
+                        <div class="panel-subtitle">Tokens per dataset per step</div>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <canvas id="token-breakdown-canvas" style="width: 100%; height: 100%;"></canvas>
                 </div>
             </div>
         </div>
@@ -1125,6 +1137,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=42"></script>
+    <script src="heartbeat.js?v=43"></script>
 </body>
 </html>

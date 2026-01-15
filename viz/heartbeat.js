@@ -77,6 +77,7 @@ class HeartbeatViz {
         // Batch breakdown data: lag and dataset per optim step
         this.lagBreakdown = [];  // [{step, lag_0: N, lag_1: M, ...}, ...]
         this.datasetBreakdown = [];  // [{step, math: N, ifeval: M, ...}, ...]
+        this.tokenBreakdown = [];  // [{step, math: N, ifeval: M, ...}, ...] - tokens per dataset
 
         // Hover state for quantile charts
         this.quantileHover = {
@@ -183,12 +184,14 @@ class HeartbeatViz {
         const fatesCanvas = document.getElementById('fates-canvas');
         const lagBreakdownCanvas = document.getElementById('lag-breakdown-canvas');
         const datasetBreakdownCanvas = document.getElementById('dataset-breakdown-canvas');
+        const tokenBreakdownCanvas = document.getElementById('token-breakdown-canvas');
 
         this.timelineCtx = timelineCanvas.getContext('2d');
         this.bufferCtx = bufferCanvas.getContext('2d');
         this.fatesCtx = fatesCanvas.getContext('2d');
         this.lagBreakdownCtx = lagBreakdownCanvas ? lagBreakdownCanvas.getContext('2d') : null;
         this.datasetBreakdownCtx = datasetBreakdownCanvas ? datasetBreakdownCanvas.getContext('2d') : null;
+        this.tokenBreakdownCtx = tokenBreakdownCanvas ? tokenBreakdownCanvas.getContext('2d') : null;
 
         // Store fate bar positions for hover detection
         this.fateBars = [];
@@ -676,16 +679,29 @@ class HeartbeatViz {
                 // Batch dataset breakdown (per optim step) - aggregate by step
                 if (event.name === 'batch.datasets') {
                     const step = event.trained_at_step;
-                    // Find or create entry for this step
+                    // Find or create entry for this step (sample counts)
                     let dsData = this.datasetBreakdown.find(d => d.step === step);
                     if (!dsData) {
                         dsData = { step };
                         this.datasetBreakdown.push(dsData);
                     }
-                    // Accumulate dataset counts
+                    // Find or create entry for this step (token counts)
+                    let tokData = this.tokenBreakdown.find(d => d.step === step);
+                    if (!tokData) {
+                        tokData = { step };
+                        this.tokenBreakdown.push(tokData);
+                    }
+                    // Accumulate dataset counts and token counts
                     for (const [key, value] of Object.entries(event)) {
                         if (key !== 'trained_at_step' && key !== 'type' && key !== 'name' && key !== 'ts') {
-                            dsData[key] = (dsData[key] || 0) + value;
+                            if (key.endsWith('_tokens')) {
+                                // Token count: strip _tokens suffix for dataset name
+                                const dsName = key.slice(0, -7);
+                                tokData[dsName] = (tokData[dsName] || 0) + value;
+                            } else {
+                                // Sample count
+                                dsData[key] = (dsData[key] || 0) + value;
+                            }
                         }
                     }
                 }
@@ -2644,6 +2660,7 @@ class HeartbeatViz {
     renderBatchBreakdown() {
         this.renderLagBreakdown();
         this.renderDatasetBreakdown();
+        this.renderTokenBreakdown();
     }
 
     renderLagBreakdown() {
@@ -2867,6 +2884,136 @@ class HeartbeatViz {
                 ctx.fillRect(x, y, w, barHeight);
                 x += w;
             }
+        }
+
+        // Legend at bottom
+        ctx.font = '9px -apple-system, sans-serif';
+        let legendX = padding.left;
+        for (const dsName of sortedDatasets) {
+            const color = datasetColors[dsName] || defaultColor;
+            ctx.fillStyle = color;
+            ctx.fillRect(legendX, height - 12, 8, 8);
+            ctx.fillStyle = '#8b949e';
+            ctx.textAlign = 'left';
+            ctx.fillText(dsName, legendX + 10, height - 4);
+            legendX += 50;
+        }
+    }
+
+    renderTokenBreakdown() {
+        if (!this.tokenBreakdownCtx) return;
+        const canvas = document.getElementById('token-breakdown-canvas');
+        const ctx = this.tokenBreakdownCtx;
+
+        // Handle high DPI
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear
+        ctx.fillStyle = '#0d1117';
+        ctx.fillRect(0, 0, width, height);
+
+        if (this.tokenBreakdown.length === 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '14px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Token breakdown will appear here', width / 2, height / 2);
+            return;
+        }
+
+        // Color palette for datasets (same as dataset breakdown)
+        const datasetColors = {
+            'gsm8k': '#58a6ff',   // blue
+            'math': '#a371f7',    // purple
+            'mbpp': '#3fb950',    // green
+            'ifeval': '#f85149',  // red
+            'humaneval': '#39d4e0', // cyan
+            'apps': '#d29922',    // orange
+        };
+        const defaultColor = '#8b949e';
+
+        const padding = { left: 35, right: 10, top: 10, bottom: 20 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        // Limit to recent steps
+        const maxVisible = 15;
+        const recentData = this.tokenBreakdown.slice(-maxVisible);
+
+        const barHeight = Math.min(16, (plotHeight - 10) / recentData.length - 2);
+        const barSpacing = (plotHeight - recentData.length * barHeight) / (recentData.length + 1);
+
+        // Find max total for scaling and collect all dataset names
+        const allDatasets = new Set();
+        let maxTotal = 0;
+        for (const d of recentData) {
+            let sum = 0;
+            for (const [key, val] of Object.entries(d)) {
+                if (key !== 'step') {
+                    allDatasets.add(key);
+                    sum += val;
+                }
+            }
+            maxTotal = Math.max(maxTotal, sum);
+        }
+
+        // Sort datasets for consistent ordering
+        const datasetOrder = ['gsm8k', 'math', 'mbpp', 'ifeval', 'humaneval', 'apps'];
+        const sortedDatasets = [...allDatasets].sort((a, b) => {
+            const ai = datasetOrder.indexOf(a);
+            const bi = datasetOrder.indexOf(b);
+            if (ai === -1 && bi === -1) return a.localeCompare(b);
+            if (ai === -1) return 1;
+            if (bi === -1) return -1;
+            return ai - bi;
+        });
+
+        for (let i = 0; i < recentData.length; i++) {
+            const d = recentData[i];
+            const y = padding.top + barSpacing + i * (barHeight + barSpacing);
+
+            // Step label
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('s' + d.step, padding.left - 5, y + barHeight / 2 + 3);
+
+            // Calculate total
+            let total = 0;
+            for (const [key, val] of Object.entries(d)) {
+                if (key !== 'step') total += val;
+            }
+
+            if (total === 0) continue;
+
+            const totalBarWidth = (total / maxTotal) * plotWidth;
+            let x = padding.left;
+            const scale = totalBarWidth / total;
+
+            // Draw stacked bar for each dataset
+            for (const dsName of sortedDatasets) {
+                const count = d[dsName] || 0;
+                if (count <= 0) continue;
+                ctx.fillStyle = datasetColors[dsName] || defaultColor;
+                const w = count * scale;
+                ctx.fillRect(x, y, w, barHeight);
+                x += w;
+            }
+
+            // Show total tokens on right
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '9px -apple-system, sans-serif';
+            ctx.textAlign = 'left';
+            const totalK = (total / 1000).toFixed(1) + 'k';
+            ctx.fillText(totalK, padding.left + totalBarWidth + 4, y + barHeight / 2 + 3);
         }
 
         // Legend at bottom
