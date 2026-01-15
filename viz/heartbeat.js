@@ -74,6 +74,10 @@ class HeartbeatViz {
         // Scatter plot data: reward vs completion length
         this.rewardVsLen = [];  // [{reward, len}, ...]
 
+        // Batch breakdown data: lag and dataset per optim step
+        this.lagBreakdown = [];  // [{step, lag_0: N, lag_1: M, ...}, ...]
+        this.datasetBreakdown = [];  // [{step, math: N, ifeval: M, ...}, ...]
+
         // Hover state for quantile charts
         this.quantileHover = {
             completion_len_mean: null,  // percentile being hovered (0-1), or null
@@ -177,10 +181,14 @@ class HeartbeatViz {
         const timelineCanvas = document.getElementById('timeline-canvas');
         const bufferCanvas = document.getElementById('buffer-canvas');
         const fatesCanvas = document.getElementById('fates-canvas');
+        const lagBreakdownCanvas = document.getElementById('lag-breakdown-canvas');
+        const datasetBreakdownCanvas = document.getElementById('dataset-breakdown-canvas');
 
         this.timelineCtx = timelineCanvas.getContext('2d');
         this.bufferCtx = bufferCanvas.getContext('2d');
         this.fatesCtx = fatesCanvas.getContext('2d');
+        this.lagBreakdownCtx = lagBreakdownCanvas ? lagBreakdownCanvas.getContext('2d') : null;
+        this.datasetBreakdownCtx = datasetBreakdownCanvas ? datasetBreakdownCanvas.getContext('2d') : null;
 
         // Store fate bar positions for hover detection
         this.fateBars = [];
@@ -649,6 +657,38 @@ class HeartbeatViz {
                         this.metrics.frac_all_wrong.push({ ts, value: event.frac_all_wrong });
                     }
                 }
+                // Batch lag breakdown (per optim step) - aggregate by step
+                if (event.name === 'batch.lag') {
+                    const step = event.trained_at_step;
+                    // Find or create entry for this step
+                    let lagData = this.lagBreakdown.find(d => d.step === step);
+                    if (!lagData) {
+                        lagData = { step };
+                        this.lagBreakdown.push(lagData);
+                    }
+                    // Accumulate lag counts
+                    for (const [key, value] of Object.entries(event)) {
+                        if (key.startsWith('lag_')) {
+                            lagData[key] = (lagData[key] || 0) + value;
+                        }
+                    }
+                }
+                // Batch dataset breakdown (per optim step) - aggregate by step
+                if (event.name === 'batch.datasets') {
+                    const step = event.trained_at_step;
+                    // Find or create entry for this step
+                    let dsData = this.datasetBreakdown.find(d => d.step === step);
+                    if (!dsData) {
+                        dsData = { step };
+                        this.datasetBreakdown.push(dsData);
+                    }
+                    // Accumulate dataset counts
+                    for (const [key, value] of Object.entries(event)) {
+                        if (key !== 'trained_at_step' && key !== 'type' && key !== 'name' && key !== 'ts') {
+                            dsData[key] = (dsData[key] || 0) + value;
+                        }
+                    }
+                }
             }
 
             // Span events for timeline
@@ -826,6 +866,7 @@ class HeartbeatViz {
         this.renderEfficiencyQuantiles();
         this.renderRecommendations();
         this.renderRewardVsLen();
+        this.renderBatchBreakdown();
     }
 
     renderRunConfig() {
@@ -2598,6 +2639,248 @@ class HeartbeatViz {
     truncateText(text, maxLen) {
         if (text.length <= maxLen) return text;
         return text.slice(0, maxLen) + '\n... [truncated]';
+    }
+
+    renderBatchBreakdown() {
+        this.renderLagBreakdown();
+        this.renderDatasetBreakdown();
+    }
+
+    renderLagBreakdown() {
+        if (!this.lagBreakdownCtx) return;
+        const canvas = document.getElementById('lag-breakdown-canvas');
+        const ctx = this.lagBreakdownCtx;
+
+        // Handle high DPI
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear
+        ctx.fillStyle = '#0d1117';
+        ctx.fillRect(0, 0, width, height);
+
+        if (this.lagBreakdown.length === 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '14px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Lag breakdown will appear here', width / 2, height / 2);
+            return;
+        }
+
+        // Color palette for lag values (green for lag=0, progressing to red)
+        const lagColors = {
+            0: '#3fb950',  // green - fresh
+            1: '#57ab5a',
+            2: '#d29922',  // yellow
+            3: '#e3b341',
+            4: '#f85149',  // red - stale
+            5: '#f85149',
+        };
+        const defaultLagColor = '#f85149';
+
+        const padding = { left: 35, right: 10, top: 10, bottom: 20 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        // Limit to recent steps
+        const maxVisible = 15;
+        const recentData = this.lagBreakdown.slice(-maxVisible);
+
+        const barHeight = Math.min(16, (plotHeight - 10) / recentData.length - 2);
+        const barSpacing = (plotHeight - recentData.length * barHeight) / (recentData.length + 1);
+
+        // Find max total for scaling
+        const maxTotal = Math.max(...recentData.map(d => {
+            let sum = 0;
+            for (const [key, val] of Object.entries(d)) {
+                if (key.startsWith('lag_')) sum += val;
+            }
+            return sum;
+        }));
+
+        for (let i = 0; i < recentData.length; i++) {
+            const d = recentData[i];
+            const y = padding.top + barSpacing + i * (barHeight + barSpacing);
+
+            // Step label
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('s' + d.step, padding.left - 5, y + barHeight / 2 + 3);
+
+            // Calculate total and collect lag values
+            const lagEntries = [];
+            let total = 0;
+            for (const [key, val] of Object.entries(d)) {
+                if (key.startsWith('lag_')) {
+                    const lagVal = parseInt(key.replace('lag_', ''));
+                    lagEntries.push({ lag: lagVal, count: val });
+                    total += val;
+                }
+            }
+            lagEntries.sort((a, b) => a.lag - b.lag);
+
+            if (total === 0) continue;
+
+            const totalBarWidth = (total / maxTotal) * plotWidth;
+            let x = padding.left;
+            const scale = totalBarWidth / total;
+
+            // Draw stacked bar for each lag value
+            for (const { lag, count } of lagEntries) {
+                if (count <= 0) continue;
+                ctx.fillStyle = lagColors[lag] || defaultLagColor;
+                const w = count * scale;
+                ctx.fillRect(x, y, w, barHeight);
+                x += w;
+            }
+        }
+
+        // Legend at bottom
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        let legendX = padding.left;
+        for (const [lag, color] of Object.entries(lagColors)) {
+            if (parseInt(lag) > 4) break;
+            ctx.fillStyle = color;
+            ctx.fillRect(legendX, height - 12, 8, 8);
+            ctx.fillStyle = '#8b949e';
+            ctx.textAlign = 'left';
+            ctx.fillText(lag, legendX + 10, height - 4);
+            legendX += 30;
+        }
+    }
+
+    renderDatasetBreakdown() {
+        if (!this.datasetBreakdownCtx) return;
+        const canvas = document.getElementById('dataset-breakdown-canvas');
+        const ctx = this.datasetBreakdownCtx;
+
+        // Handle high DPI
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear
+        ctx.fillStyle = '#0d1117';
+        ctx.fillRect(0, 0, width, height);
+
+        if (this.datasetBreakdown.length === 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '14px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Dataset breakdown will appear here', width / 2, height / 2);
+            return;
+        }
+
+        // Color palette for datasets
+        const datasetColors = {
+            'gsm8k': '#58a6ff',   // blue
+            'math': '#a371f7',    // purple
+            'mbpp': '#3fb950',    // green
+            'ifeval': '#f85149',  // red
+            'humaneval': '#39d4e0', // cyan
+            'apps': '#d29922',    // orange
+        };
+        const defaultColor = '#8b949e';
+
+        const padding = { left: 35, right: 10, top: 10, bottom: 20 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        // Limit to recent steps
+        const maxVisible = 15;
+        const recentData = this.datasetBreakdown.slice(-maxVisible);
+
+        const barHeight = Math.min(16, (plotHeight - 10) / recentData.length - 2);
+        const barSpacing = (plotHeight - recentData.length * barHeight) / (recentData.length + 1);
+
+        // Find max total for scaling and collect all dataset names
+        const allDatasets = new Set();
+        let maxTotal = 0;
+        for (const d of recentData) {
+            let sum = 0;
+            for (const [key, val] of Object.entries(d)) {
+                if (key !== 'step') {
+                    allDatasets.add(key);
+                    sum += val;
+                }
+            }
+            maxTotal = Math.max(maxTotal, sum);
+        }
+
+        // Sort datasets for consistent ordering
+        const datasetOrder = ['gsm8k', 'math', 'mbpp', 'ifeval', 'humaneval', 'apps'];
+        const sortedDatasets = [...allDatasets].sort((a, b) => {
+            const ai = datasetOrder.indexOf(a);
+            const bi = datasetOrder.indexOf(b);
+            if (ai === -1 && bi === -1) return a.localeCompare(b);
+            if (ai === -1) return 1;
+            if (bi === -1) return -1;
+            return ai - bi;
+        });
+
+        for (let i = 0; i < recentData.length; i++) {
+            const d = recentData[i];
+            const y = padding.top + barSpacing + i * (barHeight + barSpacing);
+
+            // Step label
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('s' + d.step, padding.left - 5, y + barHeight / 2 + 3);
+
+            // Calculate total
+            let total = 0;
+            for (const [key, val] of Object.entries(d)) {
+                if (key !== 'step') total += val;
+            }
+
+            if (total === 0) continue;
+
+            const totalBarWidth = (total / maxTotal) * plotWidth;
+            let x = padding.left;
+            const scale = totalBarWidth / total;
+
+            // Draw stacked bar for each dataset
+            for (const dsName of sortedDatasets) {
+                const count = d[dsName] || 0;
+                if (count <= 0) continue;
+                ctx.fillStyle = datasetColors[dsName] || defaultColor;
+                const w = count * scale;
+                ctx.fillRect(x, y, w, barHeight);
+                x += w;
+            }
+        }
+
+        // Legend at bottom
+        ctx.font = '9px -apple-system, sans-serif';
+        let legendX = padding.left;
+        for (const dsName of sortedDatasets) {
+            const color = datasetColors[dsName] || defaultColor;
+            ctx.fillStyle = color;
+            ctx.fillRect(legendX, height - 12, 8, 8);
+            ctx.fillStyle = '#8b949e';
+            ctx.textAlign = 'left';
+            ctx.fillText(dsName, legendX + 10, height - 4);
+            legendX += 50;
+        }
     }
 }
 

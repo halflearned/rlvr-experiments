@@ -57,7 +57,7 @@
 
         .container {
             display: grid;
-            grid-template-rows: 100px 325px 180px 180px 180px 180px 180px 180px 180px 180px;
+            grid-template-rows: 100px 325px 180px 180px 180px 180px 180px 180px 180px 180px 180px;
             grid-auto-rows: 180px;  /* Fallback for any extra rows */
             gap: 1px;
             background: #30363d;
@@ -1093,10 +1093,38 @@
                 <canvas id="reward-vs-len-canvas" style="width: 100%; height: 100%;"></canvas>
             </div>
         </div>
+
+        <!-- Panel 9: Batch Breakdown (Lag + Dataset) -->
+        <div class="panel" id="batch-breakdown-panel" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
+            <!-- Lag Breakdown -->
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Lag Breakdown</div>
+                        <div class="panel-subtitle">Sample staleness per optim step</div>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <canvas id="lag-breakdown-canvas" style="width: 100%; height: 100%;"></canvas>
+                </div>
+            </div>
+            <!-- Dataset Breakdown -->
+            <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
+                <div class="panel-header">
+                    <div>
+                        <div class="panel-title">Dataset Breakdown</div>
+                        <div class="panel-subtitle">Sample sources per optim step</div>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <canvas id="dataset-breakdown-canvas" style="width: 100%; height: 100%;"></canvas>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=40"></script>
+    <script src="heartbeat.js?v=42"></script>
 </body>
 </html>
