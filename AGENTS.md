@@ -80,21 +80,31 @@ SageMaker training job names must match the regex pattern: `[a-zA-Z0-9](-*[a-zA-
 
 The `submit.py` script uses `adhoc-{timestamp}` format (e.g., `adhoc-0111-0644`) to avoid issues with config filenames containing periods (like `qwen3-1.7B-gsm8k.yaml`).
 
-### Model Weights in S3
+### Model Weights
 
-SageMaker instances don't have access to `/efs`. Model weights must be uploaded to S3 first:
+SageMaker instances don't have access to `/efs`. Options for model weights:
 
+**Option 1: HuggingFace Hub (recommended for public models)**
+
+Use HF Hub paths directly in configs. The model will be downloaded at job start:
+```yaml
+model:
+  path: "Qwen/Qwen3-1.7B-Base"  # Downloaded from HF Hub
+```
+
+**Option 2: S3 (for private/fine-tuned models)**
+
+Upload to S3, then the `sagemaker_launcher.py` downloads at job start:
 ```bash
 # Upload model to S3
 aws s3 sync /efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base \
     s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/
 ```
 
-The `sagemaker_launcher.py` automatically downloads models from S3 at job start. It looks for HF-style paths in the config (e.g., `Qwen/Qwen3-1.7B-Base`) and maps them to S3:
+The launcher maps HF-style paths to S3:
+- Config: `Qwen/Qwen3-1.7B-Base` → S3: `s3://.../models/Qwen3-1.7B-Base/`
 
-- Config path: `Qwen/Qwen3-1.7B-Base`
-- S3 path: `s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/`
-- Local path (on SageMaker): `/opt/ml/model/model_cache/Qwen3-1.7B-Base`
+Note: The current `sagemaker_launcher.py` always tries S3 first for paths with `/`. To use HF Hub directly, either use the full HF path or modify the launcher.
 
 ### Common Issues
 
