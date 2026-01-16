@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""Submit GRPO training jobs to SageMaker.
+"""Submit evaluation jobs to SageMaker.
 
 Uses boto3 directly to avoid sagemaker SDK's omegaconf dependency which
 conflicts with antlr4 (required by lm-eval).
+
+Example:
+    # Submit to SageMaker (8x L40S on g6e.48xlarge)
+    python -m rlvr_experiments.submit_eval configs/eval/hadadv-adhoc-mixed.yaml
+
+    # Run locally with specific GPUs
+    python -m rlvr_experiments.submit_eval configs/eval/hadadv-adhoc-mixed.yaml --local --gpus 0,1,2,3,4,5,6,7
+
+    # Use smaller instance (4x L40S on g6e.24xlarge)
+    python -m rlvr_experiments.submit_eval configs/eval/example.yaml --instance-type ml.g6e.24xlarge
 """
 
 import argparse
@@ -23,12 +33,12 @@ ROLE = f"arn:aws:iam::{ACCOUNT}:role/SageMaker"
 ECR_PREFIX = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com"
 BUCKET = f"sagemaker-{REGION}-{ACCOUNT}"
 
-# VPC config (EFA-enabled)
+# VPC config
 SUBNETS = ["subnet-08b78e8d13faebd65"]
 SECURITY_GROUP_IDS = ["sg-0448b04b00c40d716"]
 
 # Defaults
-DEFAULT_INSTANCE_TYPE = "ml.p4de.24xlarge"
+DEFAULT_INSTANCE_TYPE = "ml.g6e.48xlarge"  # 8x L40S (48GB each)
 DEFAULT_IMAGE_NAME = "rlvr-experiments"
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -81,61 +91,32 @@ def upload_source_to_s3(source_dir: str, job_name: str) -> str:
     return f"s3://{BUCKET}/{s3_key}"
 
 
-def get_image_uri(tag: str | None = None, build: bool = False, push: bool = False) -> str:
-    """Get or build Docker image URI."""
+def get_image_uri(tag: str | None = None) -> str:
+    """Get Docker image URI."""
     if tag is None:
         tag = datetime.now().strftime("%Y%m%d")
-
-    local_uri = f"{DEFAULT_IMAGE_NAME}:{tag}"
-    remote_uri = f"{ECR_PREFIX}/{DEFAULT_IMAGE_NAME}:{tag}"
-
-    if build:
-        # Login to AWS DL container ECR (for base image)
-        run_cmd(f"aws ecr get-login-password --region {REGION} | "
-                f"docker login --username AWS --password-stdin 763104351884.dkr.ecr.{REGION}.amazonaws.com")
-        run_cmd(f"docker build --no-cache -f Dockerfile -t {local_uri} .")
-
-    if push:
-        # Create repo if needed
-        ecr = boto3.client("ecr", region_name=REGION)
-        try:
-            ecr.create_repository(repositoryName=DEFAULT_IMAGE_NAME)
-        except ecr.exceptions.RepositoryAlreadyExistsException:
-            pass
-
-        # Login and push
-        run_cmd(f"aws ecr get-login-password --region {REGION} | "
-                f"docker login --username AWS --password-stdin {ECR_PREFIX}")
-        run_cmd(f"docker tag {local_uri} {remote_uri}")
-        run_cmd(f"docker push {remote_uri}")
-
-    return remote_uri
+    return f"{ECR_PREFIX}/{DEFAULT_IMAGE_NAME}:{tag}"
 
 
-def submit_job(
+def submit_eval(
     config: str,
     instance_type: str = DEFAULT_INSTANCE_TYPE,
-    instance_count: int = 1,
     image_tag: str | None = None,
-    build: bool = False,
-    push: bool = False,
     job_name: str | None = None,
     wait: bool = False,
     local: bool = False,
     gpus: str | None = None,
 ):
-    """Submit a training job to SageMaker."""
+    """Submit an evaluation job to SageMaker."""
     local_uri = f"{DEFAULT_IMAGE_NAME}:{image_tag or datetime.now().strftime('%Y%m%d')}"
-    remote_uri = get_image_uri(tag=image_tag, build=build, push=push)
+    remote_uri = get_image_uri(tag=image_tag)
 
-    # For local mode with specific GPUs, run docker directly (bypass SageMaker)
+    # For local mode with specific GPUs, run docker directly
     if local and gpus:
         print(f"\nRunning locally with GPUs: {gpus}")
         print(f"  Image: {local_uri}")
         print(f"  Config: {config}")
 
-        num_gpus = len(gpus.split(","))
-        # cuDNN fix: PyTorch bundles the correct cuDNN in nvidia/cudnn
         nvidia_libs = "/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib"
         cmd = (
             f"docker run --rm "
@@ -144,30 +125,32 @@ def submit_job(
             f"-v /dev/shm:/dev/shm "
             f"-v {PROJECT_DIR}:/opt/ml/code "
             f"-v {PROJECT_DIR}:{PROJECT_DIR} "
-            f"-v {PROJECT_DIR}/training_output:/opt/ml/model "
-            f"-e PYTORCH_ALLOC_CONF=expandable_segments:True "
+            f"-v {PROJECT_DIR}/eval_output:/opt/ml/model "
             f"-e PYTHONPATH=/opt/ml/code/src "
             f"-e LD_LIBRARY_PATH={nvidia_libs} "
+            f"-e HF_ALLOW_CODE_EVAL=1 "
             f"-w /opt/ml/code "
             f"{local_uri} "
-            f"bash -c 'ray start --head --num-gpus={num_gpus} && python entrypoints/train_grpo.py {config}'"
+            f"python entrypoints/eval_benchmarks.py {config}"
         )
         print(f"$ {cmd}")
         run_cmd(cmd)
         return None
 
-    # For local mode without GPU selection, run directly (no docker)
+    # For local mode without GPU selection, just run directly (no docker)
     if local and not gpus:
         print(f"\nRunning locally (no docker)")
         print(f"  Config: {config}")
-        cmd = f"python entrypoints/train_grpo.py {config}"
+        cmd = f"python entrypoints/eval_benchmarks.py {config}"
         run_cmd(cmd)
         return None
 
     # Job name
     if job_name is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        job_name = f"grpo-adhoc-{timestamp}"
+        # Extract config name for job name
+        config_name = Path(config).stem.replace("_", "-")
+        job_name = f"eval-{config_name}-{timestamp}"
 
     # Stage and upload source
     source_dir = stage_source_dir(PROJECT_DIR)
@@ -186,32 +169,32 @@ def submit_job(
         },
         "HyperParameters": {
             "config": config,
-            "sagemaker_program": "entrypoints/sagemaker_launcher.py",
+            "sagemaker_program": "entrypoints/sagemaker_eval_launcher.py",
             "sagemaker_submit_directory": s3_source_uri,
         },
         "ResourceConfig": {
             "InstanceType": instance_type,
-            "InstanceCount": instance_count,
+            "InstanceCount": 1,
             "VolumeSizeInGB": 100,
         },
         "StoppingCondition": {
-            "MaxRuntimeInSeconds": 5 * 24 * 3600,  # 5 days
+            "MaxRuntimeInSeconds": 24 * 3600,  # 24 hours max
         },
         "VpcConfig": {
             "Subnets": SUBNETS,
             "SecurityGroupIds": SECURITY_GROUP_IDS,
         },
         "Environment": {
-            "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+            "HF_ALLOW_CODE_EVAL": "1",
         },
         "OutputDataConfig": {
-            "S3OutputPath": f"s3://{BUCKET}/rlvr-experiments/output/",
+            "S3OutputPath": f"s3://{BUCKET}/rlvr-experiments/eval_output/",
         },
     }
 
-    print(f"\nSubmitting job: {job_name}")
+    print(f"\nSubmitting eval job: {job_name}")
     print(f"  Image: {remote_uri}")
-    print(f"  Instance: {instance_type} x {instance_count}")
+    print(f"  Instance: {instance_type}")
     print(f"  Config: {config}")
 
     sm_client.create_training_job(**training_job_config)
@@ -230,27 +213,22 @@ def submit_job(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Submit GRPO training to SageMaker")
-    parser.add_argument("config", help="Training config file (e.g., configs/qwen3-17B-base-gsm8k.yaml)")
-    parser.add_argument("--instance-type", default=DEFAULT_INSTANCE_TYPE, help="Instance type")
-    parser.add_argument("--instance-count", type=int, default=1, help="Number of instances")
+    parser = argparse.ArgumentParser(description="Submit evaluation job to SageMaker")
+    parser.add_argument("config", help="Eval config file (e.g., configs/eval/example.yaml)")
+    parser.add_argument("--instance-type", default=DEFAULT_INSTANCE_TYPE,
+                        help=f"Instance type (default: {DEFAULT_INSTANCE_TYPE})")
     parser.add_argument("--image-tag", default=None, help="Docker image tag (default: YYYYMMDD)")
-    parser.add_argument("--build", action="store_true", help="Build Docker image")
-    parser.add_argument("--push", action="store_true", help="Push Docker image to ECR")
     parser.add_argument("--job-name", default=None, help="Job name (default: auto-generated)")
     parser.add_argument("--wait", action="store_true", help="Wait for job to complete")
-    parser.add_argument("--local", action="store_true", help="Run locally using Docker")
-    parser.add_argument("--gpus", default=None, help="GPU IDs for local mode (e.g., '5,6,7')")
+    parser.add_argument("--local", action="store_true", help="Run locally")
+    parser.add_argument("--gpus", default=None, help="GPU IDs for local mode (e.g., '0,1,2,3')")
 
     args = parser.parse_args()
 
-    submit_job(
+    submit_eval(
         config=args.config,
         instance_type=args.instance_type,
-        instance_count=args.instance_count,
         image_tag=args.image_tag,
-        build=args.build,
-        push=args.push,
         job_name=args.job_name,
         wait=args.wait,
         local=args.local,
