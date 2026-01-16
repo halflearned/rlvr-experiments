@@ -1,5 +1,5 @@
 run:
-  name: qwen3_1_7b_ifeval_smoke
+  name: qwen3_1_7b_mixed
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,23 +9,31 @@ tokenizer:
   use_fast: false
 
 training:
-  # num_epochs: 1
-  max_steps: 10
+  max_steps: 100
   max_staleness: 0
-  abort_in_flight: true
-  checkpoint_interval: 100  # No checkpointing during smoke test
+  abort_in_flight: false
+  checkpoint_interval: 100  
 
   # Fixed bucket sizes to avoid torch.compile recompilations
   # seq_len_buckets is TOTAL seq length (prompt + completion)
-  seq_len_buckets: [2560]        # ~512 prompt + 2048 completion
-  completion_len_buckets: [2048]  # IFEval can be verbose
+  # Multiple buckets for mixed datasets:
+  # - GSM8K/MBPP: ~256 prompt + 512 completion = 768
+  # - MATH: ~256 prompt + 1024 completion = 1280
+  # - IFEval: ~512 prompt + 2048 completion = 2560
+  seq_len_buckets: [768, 1280, 2560]
+  completion_len_buckets: [512, 1024, 2048]
 
-  # Batching config - smaller for smoke test with n=16
+  # Batching config
   prompts_per_rollout_sync: 16
   prompts_per_reference_sync: 64
-  prompts_per_optim_step: 16      # 16 prompts * 16 completions = 256
-  prompts_per_forward_backward: 1  # 4 prompts * 16 completions = 64 samples per micro-batch
-  completions_per_micro_batch: 64
+  prompts_per_optim_step: 16
+  prompts_per_forward_backward: 2
+  # Micro-batch size varies by completion length bucket for better GPU utilization
+  # Shorter sequences can fit more samples per micro-batch
+  completions_per_micro_batch:
+    768: 64
+    1280: 16
+    2560: 8
   max_concurrent_tasks: 4
 
 verifier:
@@ -35,10 +43,30 @@ loss:
   beta: 0.05
   eps: 0.2
 
-data:
-  dataset: ifeval
+verifier:
+  num_workers: 4
 
-# IFEval doesn't need system prompt or assistant prefix - constraints are in the prompt
+loss:
+  beta: 0.05
+  eps: 0.2
+
+data:
+  dataset: mixed
+  datasets:
+    - name: gsm8k
+      split: train
+      weight: 0.25
+    - name: math
+      split: train
+      weight: 0.25
+    - name: mbpp
+      split: train
+      weight: 0.1
+    - name: ifeval
+      weight: 0.4
+  seed: 42
+
+# Mixed datasets have different system prompts per sample, so leave empty here
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
@@ -47,8 +75,8 @@ sampling:
   temperature: 0.6
   top_p: 0.95
   top_k: 20
-  max_tokens: 2048  # Match IFEVAL_MAX_COMPLETION_LEN
-  n: 16             # Smoke test with 16 completions
+  max_tokens: 2048
+  n: 16
   logprobs: 0
 
 
@@ -79,7 +107,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.0001  
         eps: 0.0001
 
       lr_scheduler:
@@ -87,7 +115,7 @@ roles:
         decay_ratio: 0.0
 
       training:
-        seq_len: 2560  # 512 prompt + 2048 completion
+        seq_len: 2560
         dtype: "bfloat16"
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
@@ -96,7 +124,7 @@ roles:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 4
+        tensor_parallel_degree: 2
         context_parallel_degree: 1
         disable_loss_parallel: false
 
@@ -119,46 +147,22 @@ roles:
           - "model"
 
 
+  # Reference model as vLLM - much faster than Titan for logprobs-only workload
   - name: reference
-    kind: titan
+    kind: vllm
     config:
-      trainable: false
-
-      model:
-        name: "qwen3"
-        flavor: "1.7B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
-
-      parallelism:
-        data_parallel_replicate_degree: 1
-        data_parallel_shard_degree: 1
-        fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 1
-        context_parallel_degree: 1
-
-      training:
-        seq_len: 2560
-        dtype: "bfloat16"
-        mixed_precision_param: "bfloat16"
-        mixed_precision_reduce: "float32"
-
-      checkpoint:
-        enable: true
-        folder: "checkpoint"
-        initial_load_in_hf: true
-        interval: 500
-        last_save_model_only: false
-        export_dtype: "bfloat16"
-        async_mode: "disabled"
-
-      activation_checkpoint:
-        mode: none
-        selective_ac_option: op
-
-      compile:
-        enable: true
-        components:
-          - "model"
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      max_model_len: 2561  # seq_len_buckets[-1] + 1 for logprobs
+      gpu_memory_utilization: 0.90
+      dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: false  # Prefix caching may interfere with prompt_logprobs
+      enable_chunked_prefill: true
 
 
   - name: rollout
@@ -166,11 +170,11 @@ roles:
 
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
-      max_concurrent_per_replica: 4   # 4 prompts * 16 completions = 64 seqs
+      max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 2
-      max_model_len: 2560  # 512 + 2048
+      data_parallel_size: 5
+      max_model_len: 2560
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"

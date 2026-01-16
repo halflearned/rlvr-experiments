@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import queue
 import random
 import re
 import time
@@ -30,6 +31,7 @@ from vllm import LLM, SamplingParams
 from rlvr_experiments.verifiers.math import MathVerifier
 from rlvr_experiments.verifiers.code import MBPPVerifier
 from rlvr_experiments.verifiers.code_executor import CodeExecutor, ExecutorConfig
+from rlvr_experiments.verifiers.ifeval import IFEvalVerifier
 
 
 # =============================================================================
@@ -397,12 +399,70 @@ Problem:
         return True
 
 
+class IFEvalLoader(DatasetLoader):
+    """Loader for RLVR-IFeval instruction-following dataset."""
+
+    def __init__(self, split: str = "train"):
+        self.split = split
+
+    def load_and_sample(self, num_prompts: int, seed: int, **kwargs) -> list[dict]:
+        print(f"Loading RLVR-IFeval {self.split} split...")
+        hf_dataset = load_dataset("allenai/RLVR-IFeval", split=self.split)
+
+        all_rows = []
+        for i, row in enumerate(hf_dataset):
+            # Extract user message from chat format
+            user_content = row["messages"][0]["content"] if row["messages"] else ""
+            prompt_id = f"ifeval_{i}"
+
+            all_rows.append({
+                "prompt": user_content,
+                "problem": {
+                    "prompt_id": prompt_id,
+                    "ground_truth": row["ground_truth"],
+                    "constraint_type": row["constraint_type"],
+                    "constraint": row["constraint"],
+                },
+            })
+
+        print(f"Loaded {len(all_rows)} prompts from RLVR-IFeval {self.split}")
+
+        # Show constraint type distribution
+        constraint_counts = {}
+        for r in all_rows:
+            ct = r["problem"]["constraint_type"]
+            constraint_counts[ct] = constraint_counts.get(ct, 0) + 1
+        print(f"Constraint types: {len(constraint_counts)} unique")
+
+        # num_prompts <= 0 means use all prompts
+        if num_prompts <= 0:
+            print(f"Using all {len(all_rows)} prompts")
+            return all_rows
+
+        random.seed(seed)
+        sampled = random.sample(all_rows, min(num_prompts, len(all_rows)))
+        print(f"Sampled {len(sampled)} prompts (seed={seed})")
+
+        return sampled
+
+    def format_prompt(self, row: dict) -> str:
+        """Format IFeval prompt - the constraint is already embedded in the user message."""
+        return row["prompt"]
+
+    def get_output_prefix(self) -> str:
+        return "ifeval"
+
+    def is_ifeval_dataset(self) -> bool:
+        return True
+
+
 # Registry of available datasets
 DATASET_REGISTRY = {
     "gsm8k": GSM8kLoader,
     "math": MATHLoader,
     "mbpp": MBPPLoader,
     "apps": APPSLoader,
+    "ifeval": IFEvalLoader,
 }
 
 
@@ -410,12 +470,24 @@ DATASET_REGISTRY = {
 # vLLM Worker
 # =============================================================================
 
-def worker(gpu_id, prompts, model_path, sampling_params_dict, tp_size, max_model_len, result_queue):
-    """Worker function for each GPU."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+def generate_with_vllm(
+    prompts: list[str],
+    model_path: str,
+    sampling_params_dict: dict,
+    tp_size: int,
+    max_model_len: int,
+    cuda_visible_devices: str | None = None,
+) -> list[list[tuple[str, str, int]]]:
+    """Generate completions with vLLM and return a JSON-serializable structure."""
+    if cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+    # vLLM spawns its own EngineCore subprocesses; forcing spawn avoids
+    # fork-related hangs in multi-threaded contexts.
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    # Avoid HuggingFace tokenizers threadpool + fork interactions.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     sp = SamplingParams(**sampling_params_dict)
-
     llm = LLM(
         model=model_path,
         tensor_parallel_size=tp_size,
@@ -428,12 +500,23 @@ def worker(gpu_id, prompts, model_path, sampling_params_dict, tp_size, max_model
 
     outputs = llm.generate(prompts, sp)
 
-    # Convert outputs to serializable format (text, finish_reason, num_tokens)
-    results = []
+    results: list[list[tuple[str, str, int]]] = []
     for output in outputs:
         completions = [(o.text, o.finish_reason, len(o.token_ids)) for o in output.outputs]
         results.append(completions)
+    return results
 
+
+def worker(gpu_id, prompts, model_path, sampling_params_dict, tp_size, max_model_len, result_queue):
+    """Worker function for each GPU."""
+    results = generate_with_vllm(
+        prompts,
+        model_path=model_path,
+        sampling_params_dict=sampling_params_dict,
+        tp_size=tp_size,
+        max_model_len=max_model_len,
+        cuda_visible_devices=str(gpu_id),
+    )
     result_queue.put((gpu_id, results))
 
 
@@ -537,6 +620,20 @@ def parse_args():
         default=1,
         help="Tensor parallel size per replica (default: 1)",
     )
+    parser.add_argument(
+        "--generation-backend",
+        type=str,
+        default="multiprocess",
+        choices=["multiprocess", "direct"],
+        help="Generation backend: 'multiprocess' starts one worker process per replica; "
+             "'direct' runs generation in the main process (requires data_parallel_size == tensor_parallel_size).",
+    )
+    parser.add_argument(
+        "--generation-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional wall-clock timeout for generation (multiprocess backend only).",
+    )
 
     # Output
     parser.add_argument(
@@ -549,6 +646,12 @@ def parse_args():
         "--verbose",
         action="store_true",
         help="Print detailed results for each prompt",
+    )
+    parser.add_argument(
+        "--completions-file",
+        type=str,
+        default=None,
+        help="Load completions from file instead of generating (for recovery)",
     )
 
     return parser.parse_args()
@@ -612,106 +715,273 @@ def main():
     # Load and sample prompts
     rows = loader.load_and_sample(args.num_prompts, args.seed)
 
-    # Format prompts (plain text, no chat template for base models)
-    print("\nFormatting prompts...")
-    formatted_prompts = format_prompts(rows, loader)
+    # Either load completions from file or generate new ones
+    if args.completions_file:
+        # Load pre-generated completions
+        print(f"\nLoading completions from {args.completions_file}...")
+        with open(args.completions_file) as f:
+            completions_data = json.load(f)
 
-    # Show example formatted prompt
-    print(f"\nExample formatted prompt:\n{'-'*40}")
-    print(formatted_prompts[0])
-    print(f"{'-'*40}")
+        # Build lookup by prompt_id for alignment
+        completions_by_prompt_id = {}
+        for prompt_data in completions_data["prompts"]:
+            completions_by_prompt_id[prompt_data["prompt_id"]] = [
+                (c["text"], c["finish_reason"], c["num_tokens"])
+                for c in prompt_data["completions"]
+            ]
 
-    # Set up parallelism
-    dp_size = args.data_parallel_size
-    tp_size = args.tensor_parallel_size
-    num_replicas = dp_size // tp_size
+        # Build outputs_by_idx aligned with rows (which were sampled from dataset)
+        outputs_by_idx = {}
+        missing_prompts = []
+        for i, row in enumerate(rows):
+            prompt_id = row["problem"]["prompt_id"]
+            if prompt_id in completions_by_prompt_id:
+                outputs_by_idx[i] = completions_by_prompt_id[prompt_id]
+            else:
+                missing_prompts.append(prompt_id)
+                outputs_by_idx[i] = []
 
-    print(f"\nUsing {num_replicas} vLLM replicas across {dp_size} GPUs")
+        if missing_prompts:
+            print(f"WARNING: {len(missing_prompts)} prompts not found in completions file")
+            print(f"  Missing: {missing_prompts[:5]}{'...' if len(missing_prompts) > 5 else ''}")
 
-    # Distribute prompts across replicas
-    prompts_per_replica = [[] for _ in range(num_replicas)]
-    rows_per_replica = [[] for _ in range(num_replicas)]
-    for i, (prompt, row) in enumerate(zip(formatted_prompts, rows)):
-        replica_idx = i % num_replicas
-        prompts_per_replica[replica_idx].append(prompt)
-        rows_per_replica[replica_idx].append(row)
+        gen_time = completions_data["metadata"].get("generation_time_seconds", 0)
+        total_completions = sum(len(c) for c in outputs_by_idx.values())
+        print(f"Loaded {total_completions:,} completions from disk (aligned by prompt_id)")
 
-    for i, prompts in enumerate(prompts_per_replica):
-        print(f"  Replica {i}: {len(prompts)} prompts")
+    else:
+        # Generate completions
+        print("\nFormatting prompts...")
+        formatted_prompts = format_prompts(rows, loader)
 
-    # Generate completions
-    print(f"\nGenerating {args.n} completions for each of {len(formatted_prompts)} prompts...")
-    print(f"Total completions to generate: {args.n * len(formatted_prompts):,}")
+        # Show example formatted prompt
+        print(f"\nExample formatted prompt:\n{'-'*40}")
+        print(formatted_prompts[0])
+        print(f"{'-'*40}")
 
-    start_time = time.time()
+        # Set up parallelism
+        dp_size = args.data_parallel_size
+        tp_size = args.tensor_parallel_size
+        num_replicas = dp_size // tp_size
 
-    import torch.multiprocessing as mp
-    mp.set_start_method('spawn', force=True)
+        print(f"\nUsing {num_replicas} vLLM replicas across {dp_size} GPUs")
 
-    result_queue = mp.Queue()
-    processes = []
+        # Distribute prompts across replicas
+        prompts_per_replica = [[] for _ in range(num_replicas)]
+        rows_per_replica = [[] for _ in range(num_replicas)]
+        for i, (prompt, row) in enumerate(zip(formatted_prompts, rows)):
+            replica_idx = i % num_replicas
+            prompts_per_replica[replica_idx].append(prompt)
+            rows_per_replica[replica_idx].append(row)
 
-    sampling_params_dict = {
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "top_k": args.top_k,
-        "max_tokens": args.max_tokens,
-        "n": args.n,
-    }
+        for i, prompts in enumerate(prompts_per_replica):
+            print(f"  Replica {i}: {len(prompts)} prompts")
 
-    for replica_idx in range(num_replicas):
-        gpu_id = replica_idx * tp_size
-        if tp_size == 1:
-            gpu_ids = str(gpu_id)
+        print(f"\nGenerating {args.n} completions for each of {len(formatted_prompts)} prompts...")
+        print(f"Total completions to generate: {args.n * len(formatted_prompts):,}")
+
+        start_time = time.time()
+
+        sampling_params_dict = {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "max_tokens": args.max_tokens,
+            "n": args.n,
+        }
+
+        if args.generation_backend == "direct":
+            if num_replicas != 1:
+                raise ValueError(
+                    "--generation-backend direct requires data_parallel_size == tensor_parallel_size "
+                    f"(got data_parallel_size={dp_size}, tensor_parallel_size={tp_size})"
+                )
+            # Run vLLM in the current process (no outer multiprocessing wrapper).
+            all_completions = [
+                generate_with_vllm(
+                    prompts_per_replica[0],
+                    model_path=args.model_path,
+                    sampling_params_dict=sampling_params_dict,
+                    tp_size=tp_size,
+                    max_model_len=args.max_model_len,
+                    cuda_visible_devices=None,
+                )
+            ]
+            gen_time = time.time() - start_time
         else:
-            gpu_ids = ",".join(str(gpu_id + j) for j in range(tp_size))
+            import torch.multiprocessing as mp
 
-        p = mp.Process(
-            target=worker,
-            args=(gpu_ids, prompts_per_replica[replica_idx], args.model_path,
-                  sampling_params_dict, tp_size, args.max_model_len, result_queue)
-        )
-        processes.append(p)
-        p.start()
+            ctx = mp.get_context("spawn")
+            result_queue = ctx.Queue()
+            processes = []
 
-    # Collect results
-    all_completions = [None] * num_replicas
-    for _ in range(num_replicas):
-        gpu_id, results = result_queue.get()
-        if isinstance(gpu_id, str):
-            replica_idx = int(gpu_id.split(",")[0]) // tp_size
+            def _kill_worker_tree(p) -> None:
+                if p.pid is None:
+                    return
+                try:
+                    from vllm.utils.system_utils import kill_process_tree
+                    kill_process_tree(p.pid)
+                except Exception:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+
+            def _cleanup_workers() -> None:
+                for proc in processes:
+                    if proc.is_alive() or proc.exitcode is None:
+                        _kill_worker_tree(proc)
+                for proc in processes:
+                    proc.join(timeout=5)
+
+            for replica_idx in range(num_replicas):
+                gpu_id = replica_idx * tp_size
+                if tp_size == 1:
+                    gpu_ids = str(gpu_id)
+                else:
+                    gpu_ids = ",".join(str(gpu_id + j) for j in range(tp_size))
+
+                p = ctx.Process(
+                    target=worker,
+                    args=(
+                        gpu_ids,
+                        prompts_per_replica[replica_idx],
+                        args.model_path,
+                        sampling_params_dict,
+                        tp_size,
+                        args.max_model_len,
+                        result_queue,
+                    ),
+                )
+                processes.append(p)
+                p.start()
+
+            generation_deadline = (
+                time.monotonic() + args.generation_timeout_seconds
+                if args.generation_timeout_seconds is not None
+                else None
+            )
+
+            # Collect results
+            all_completions = [None] * num_replicas
+            received = 0
+            try:
+                while received < num_replicas:
+                    timeout_s = 10.0
+                    if generation_deadline is not None:
+                        remaining = generation_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError(
+                                f"Timed out waiting for vLLM workers after {args.generation_timeout_seconds:.0f}s"
+                            )
+                        timeout_s = min(timeout_s, remaining)
+
+                    try:
+                        gpu_id, results = result_queue.get(timeout=timeout_s)
+                    except queue.Empty:
+                        # Avoid hanging forever if a worker died before putting results.
+                        finished_without_result = [
+                            idx
+                            for idx, proc in enumerate(processes)
+                            if proc.exitcode is not None and all_completions[idx] is None
+                        ]
+                        if finished_without_result:
+                            raise RuntimeError(
+                                "One or more vLLM worker processes exited unexpectedly: "
+                                + ", ".join(
+                                    f"replica={idx} exitcode={processes[idx].exitcode}"
+                                    for idx in finished_without_result
+                                )
+                            )
+                        continue
+
+                    if isinstance(gpu_id, str):
+                        replica_idx = int(gpu_id.split(",")[0]) // tp_size
+                    else:
+                        replica_idx = gpu_id // tp_size
+                    all_completions[replica_idx] = results
+                    received += 1
+                    print(f"  Replica {replica_idx} completed: {len(results)} prompts")
+            except Exception:
+                _cleanup_workers()
+                raise
+
+            for proc in processes:
+                proc.join()
+            for idx, proc in enumerate(processes):
+                if proc.exitcode != 0:
+                    raise RuntimeError(
+                        f"vLLM worker replica {idx} exited with code {proc.exitcode}"
+                    )
+
+            gen_time = time.time() - start_time
+
+        # Reassemble results in original order
+        outputs_by_idx = {}
+        for replica_idx in range(num_replicas):
+            for local_idx, completions in enumerate(all_completions[replica_idx]):
+                global_idx = local_idx * num_replicas + replica_idx
+                outputs_by_idx[global_idx] = completions
+
+        print(f"\nGeneration completed in {gen_time:.1f}s")
+        total_completions = sum(len(c) for c in outputs_by_idx.values())
+        print(f"Generated {total_completions:,} completions")
+        print(f"Throughput: {total_completions / gen_time:.1f} completions/sec")
+
+        # Save raw completions to disk (for recovery if verification fails)
+        if args.output_dir:
+            completions_dir = Path(args.output_dir)
         else:
-            replica_idx = gpu_id // tp_size
-        all_completions[replica_idx] = results
-        print(f"  Replica {replica_idx} completed: {len(results)} prompts")
+            model_name = Path(args.model_path).name.lower()
+            completions_dir = Path(f"experiments/{model_name}-pass-rate")
+        completions_dir.mkdir(parents=True, exist_ok=True)
 
-    for p in processes:
-        p.join()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        completions_file = completions_dir / f"{loader.get_output_prefix()}_{Path(args.model_path).name}_completions_{timestamp}.json"
 
-    gen_time = time.time() - start_time
-
-    # Reassemble results in original order
-    outputs_by_idx = {}
-    for replica_idx in range(num_replicas):
-        for local_idx, completions in enumerate(all_completions[replica_idx]):
-            global_idx = local_idx * num_replicas + replica_idx
-            outputs_by_idx[global_idx] = completions
-
-    print(f"\nGeneration completed in {gen_time:.1f}s")
-    total_completions = sum(len(c) for c in outputs_by_idx.values())
-    print(f"Generated {total_completions:,} completions")
-    print(f"Throughput: {total_completions / gen_time:.1f} completions/sec")
+        print(f"\nSaving completions to {completions_file}...")
+        completions_data = {
+            "metadata": {
+                "dataset": args.dataset,
+                "split": args.split,
+                "model_path": args.model_path,
+                "num_prompts": len(rows),
+                "completions_per_prompt": args.n,
+                "max_tokens": args.max_tokens,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "seed": args.seed,
+                "generation_time_seconds": gen_time,
+                "timestamp": timestamp,
+            },
+            "prompts": [
+                {
+                    "prompt_id": row["problem"]["prompt_id"],
+                    "prompt": row["prompt"],
+                    "target": row["problem"].get("answer", str(row["problem"].get("test_list", []))),
+                    "completions": [
+                        {"text": c[0], "finish_reason": c[1], "num_tokens": c[2]}
+                        for c in outputs_by_idx.get(i, [])
+                    ],
+                }
+                for i, row in enumerate(rows)
+            ],
+        }
+        with open(completions_file, "w") as f:
+            json.dump(completions_data, f)
+        print(f"Saved {total_completions:,} completions to disk")
 
     # Verify completions
     print("\nVerifying completions...")
 
     is_code = loader.is_code_dataset()
-    if is_code:
-        # Use async code verifier with Docker isolation
-        executor = CodeExecutor(ExecutorConfig(timeout=10.0), max_concurrent=32)
-        code_verifier = MBPPVerifier(executor=executor)
-    else:
-        math_verifier = MathVerifier()
+    is_ifeval = hasattr(loader, 'is_ifeval_dataset') and loader.is_ifeval_dataset()
+    if is_ifeval:
+        ifeval_verifier = IFEvalVerifier()
+    elif not is_code:
+        # Use many workers for parallel math verification (192 vCPUs available)
+        math_verifier = MathVerifier(max_workers=128, warmup=True)
 
     results: list[PromptResult] = []
     total_correct = 0
@@ -731,16 +1001,50 @@ def main():
         "length_lengths": [],
     }
 
+    # Checkpointing setup
+    if args.output_dir:
+        checkpoint_dir = Path(args.output_dir)
+    else:
+        model_name = Path(args.model_path).name.lower()
+        checkpoint_dir = Path(f"experiments/{model_name}-pass-rate")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_file = checkpoint_dir / f"{loader.get_output_prefix()}_{Path(args.model_path).name}_checkpoint.json"
+
+    # Try to resume from checkpoint
+    start_idx = 0
+    if checkpoint_file.exists():
+        print(f"Found checkpoint file: {checkpoint_file}")
+        try:
+            with open(checkpoint_file) as f:
+                checkpoint = json.load(f)
+            results = [PromptResult(**r) for r in checkpoint["results"]]
+            finish_stats = checkpoint["finish_stats"]
+            length_stats = checkpoint["length_stats"]
+            total_correct = checkpoint["total_correct"]
+            total_completions_verified = checkpoint["total_completions_verified"]
+            start_idx = checkpoint["next_idx"]
+            print(f"Resuming from prompt {start_idx}/{len(rows)} ({start_idx/len(rows)*100:.1f}%)")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}, starting fresh")
+            start_idx = 0
+            results = []
+
     verify_start = time.time()
 
     for i, row in enumerate(rows):
+        # Skip already processed prompts
+        if i < start_idx:
+            continue
         problem = row["problem"]
         prompt_id = problem["prompt_id"]
 
         # For math datasets, target is the answer string
         # For code datasets, target is the problem dict with test_list
+        # For ifeval datasets, target is the constraint description
         if is_code:
             target = str(problem.get("test_list", []))  # Store for reference
+        elif is_ifeval:
+            target = problem.get("constraint", "")  # Store constraint description
         else:
             target = problem["answer"]
 
@@ -754,6 +1058,10 @@ def main():
 
         if is_code:
             # Verify all completions for this problem in parallel using async
+            # NOTE: Create a new executor for each prompt to avoid asyncio.Semaphore issues
+            # when calling asyncio.run() multiple times (each call creates/destroys an event loop)
+            executor = CodeExecutor(ExecutorConfig(timeout=10.0), max_concurrent=32)
+            code_verifier = MBPPVerifier(executor=executor)
             completions_only = [c[0] for c in completions_with_reason]
 
             async def verify_all():
@@ -788,11 +1096,44 @@ def main():
                     length_stats["incorrect_lengths"].append(num_tokens)
                     if sample_incorrect is None:
                         sample_incorrect = completion
+        elif is_ifeval:
+            # IFEval verification - check if completions satisfy constraints
+            completions_only = [c[0] for c in completions_with_reason]
+            ground_truth = problem.get("ground_truth", "")
+            scores = [ifeval_verifier.verify(c, ground_truth) for c in completions_only]
+
+            for idx, (completion, finish_reason, num_tokens) in enumerate(completions_with_reason):
+                is_correct = scores[idx] > 0
+                correctness_mask.append(is_correct)
+                completion_details.append({
+                    "length": num_tokens,
+                    "finish_reason": finish_reason,
+                    "correct": is_correct,
+                })
+
+                if finish_reason == "stop":
+                    finish_stats["stop_correct" if is_correct else "stop_incorrect"] += 1
+                    length_stats["stop_lengths"].append(num_tokens)
+                else:
+                    finish_stats["length_correct" if is_correct else "length_incorrect"] += 1
+                    length_stats["length_lengths"].append(num_tokens)
+
+                if is_correct:
+                    length_stats["correct_lengths"].append(num_tokens)
+                    correct_count += 1
+                    if sample_correct is None:
+                        sample_correct = completion
+                else:
+                    length_stats["incorrect_lengths"].append(num_tokens)
+                    if sample_incorrect is None:
+                        sample_incorrect = completion
         else:
-            # Math verification (synchronous)
-            for completion, finish_reason, num_tokens in completions_with_reason:
-                score = math_verifier.verify(completion, target)
-                is_correct = score > 0
+            # Math verification (parallel) - submit all completions at once
+            completions_only = [c[0] for c in completions_with_reason]
+            scores = math_verifier.verify_batch_parallel(completions_only, target)
+
+            for idx, (completion, finish_reason, num_tokens) in enumerate(completions_with_reason):
+                is_correct = scores[idx] > 0
                 correctness_mask.append(is_correct)
                 completion_details.append({
                     "length": num_tokens,
@@ -839,11 +1180,37 @@ def main():
         total_correct += correct_count
         total_completions_verified += len(completions_with_reason)
 
+        # Progress display
+        if (i + 1) % 100 == 0 or (i + 1) == len(rows):
+            elapsed = time.time() - verify_start
+            rate = (i + 1 - start_idx) / elapsed if elapsed > 0 else 0
+            remaining = (len(rows) - i - 1) / rate if rate > 0 else 0
+            print(f"[{i+1}/{len(rows)}] Verified {i+1-start_idx} prompts in {elapsed:.0f}s ({rate:.1f} prompts/s, ~{remaining/60:.0f}m remaining)")
+
+        # Save checkpoint every 50 prompts
+        if (i + 1) % 50 == 0:
+            checkpoint_data = {
+                "next_idx": i + 1,
+                "results": [asdict(r) for r in results],
+                "finish_stats": finish_stats,
+                "length_stats": length_stats,
+                "total_correct": total_correct,
+                "total_completions_verified": total_completions_verified,
+            }
+            with open(checkpoint_file, "w") as f:
+                json.dump(checkpoint_data, f)
+
         if args.verbose or (is_code and (i + 1) % 10 == 0):
             print(f"[{i+1}/{len(rows)}] {prompt_id}: {correct_count}/{len(completions_with_reason)} correct ({pass_rate*100:.1f}%)")
 
     verify_time = time.time() - verify_start
     print(f"\nVerification completed in {verify_time:.1f}s")
+
+    # Remove checkpoint file on successful completion
+    if checkpoint_file.exists():
+        checkpoint_file.unlink()
+        print("Checkpoint file removed.")
+
     if is_code:
         print(f"Verification throughput: {total_completions_verified / verify_time:.1f} completions/sec")
 

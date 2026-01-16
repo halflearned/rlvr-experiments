@@ -1,5 +1,5 @@
 run:
-  name: qwen3_1_7b_mixed_smoke
+  name: qwen3_1_7b_sequential
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,10 +9,10 @@ tokenizer:
   use_fast: false
 
 training:
-  max_steps: 10
+  num_epochs: 1
   max_staleness: 0
-  abort_in_flight: true
-  checkpoint_interval: 100  # No checkpointing during smoke test
+  abort_in_flight: false
+  checkpoint_interval: 100  
 
   # Fixed bucket sizes to avoid torch.compile recompilations
   # seq_len_buckets is TOTAL seq length (prompt + completion)
@@ -27,8 +27,13 @@ training:
   prompts_per_rollout_sync: 16
   prompts_per_reference_sync: 64
   prompts_per_optim_step: 16
-  prompts_per_forward_backward: 1
-  completions_per_micro_batch: 8
+  prompts_per_forward_backward: 2
+  # Micro-batch size varies by completion length bucket for better GPU utilization
+  # Shorter sequences can fit more samples per micro-batch
+  completions_per_micro_batch:
+    768: 64
+    1280: 16
+    2560: 8
   max_concurrent_tasks: 4
 
 verifier:
@@ -40,18 +45,19 @@ loss:
 
 data:
   dataset: mixed
+  mode: sequential
   datasets:
     - name: gsm8k
       split: train
-      weight: 0.2
+      count: 3200  # 200 steps
     - name: math
       split: train
-      weight: 0.2
+      count: 3200  # 200 steps
     - name: mbpp
       split: train
-      weight: 0.2
+      count: 374  # 27 steps
     - name: ifeval
-      weight: 0.4
+      count: 3200  # 200 steps
   seed: 42
 
 # Mixed datasets have different system prompts per sample, so leave empty here
@@ -95,7 +101,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.00001  
         eps: 0.0001
 
       lr_scheduler:

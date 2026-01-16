@@ -28,6 +28,14 @@ from rlvr_experiments.verifiers.math import MathVerifier
 
 
 @dataclass
+class CompletionDetail:
+    """Details for a single completion."""
+    length: int  # Token count
+    finish_reason: str  # "stop" or "length"
+    correct: bool
+
+
+@dataclass
 class PromptResult:
     """Results for a single prompt."""
     prompt_id: str
@@ -37,6 +45,7 @@ class PromptResult:
     num_correct: int
     pass_rate: float
     correctness_mask: list[bool]  # Per-completion correctness for pass@k computation
+    completion_details: list[dict]  # Per-completion length, finish_reason, correct
     sample_correct_completion: str | None = None
     sample_incorrect_completion: str | None = None
 
@@ -359,11 +368,17 @@ def main():
         sample_correct = None
         sample_incorrect = None
         correctness_mask = []
+        completion_details = []
 
         for completion, finish_reason, num_tokens in completions_with_reason:
             score = verifier.verify(completion, target)
             is_correct = score > 0
             correctness_mask.append(is_correct)
+            completion_details.append({
+                "length": num_tokens,
+                "finish_reason": finish_reason,
+                "correct": is_correct,
+            })
 
             # Track finish reason stats
             if finish_reason == "stop":
@@ -394,6 +409,7 @@ def main():
             num_correct=correct_count,
             pass_rate=pass_rate,
             correctness_mask=correctness_mask,
+            completion_details=completion_details,
             sample_correct_completion=sample_correct,
             sample_incorrect_completion=sample_incorrect,
         )
@@ -544,7 +560,7 @@ def main():
     }
 
     # Save results to JSON
-    output_dir = Path("assets/pass_rate")
+    output_dir = Path("experiments/qwen3-1.7B-base-pass-rate")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

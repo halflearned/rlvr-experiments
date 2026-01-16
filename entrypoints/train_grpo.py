@@ -34,6 +34,48 @@ DATASETS = {
 }
 
 
+def _compute_schedule(training_cfg: dict) -> dict:
+    """Derive schedule parameters and enforce consistency.
+
+    If weights are only synced every N steps, the system must tolerate at least
+    N-1 steps of staleness. Instead of silently bumping, we fail fast when the
+    configured max_staleness is too small so experiment configs remain explicit.
+    """
+    p_rollout = int(training_cfg.get("prompts_per_rollout_sync", 0))
+    p_reference = int(training_cfg.get("prompts_per_reference_sync", 0))
+    p_optim = int(training_cfg.get("prompts_per_optim_step", 0))
+    p_fwd_bwd = int(training_cfg.get("prompts_per_forward_backward", 0))
+
+    if p_optim <= 0 or p_fwd_bwd <= 0:
+        raise ValueError("prompts_per_optim_step and prompts_per_forward_backward must be positive")
+    if p_optim % p_fwd_bwd != 0:
+        raise ValueError("prompts_per_optim_step must be divisible by prompts_per_forward_backward")
+
+    accumulation_steps = p_optim // p_fwd_bwd
+
+    # Avoid zero intervals from integer division
+    sync_model_every = max(1, p_rollout // p_optim) if p_rollout else 1
+    sync_ref_every = max(1, p_reference // p_optim) if p_reference else 1
+
+    required_staleness = max(sync_model_every - 1, 0)
+    configured_staleness = int(training_cfg.get("max_staleness", 0))
+    if configured_staleness < required_staleness:
+        raise ValueError(
+            "max_staleness too small for rollout/reference sync cadence: "
+            f"got {configured_staleness}, need >= {required_staleness} "
+            f"(sync_model_every={sync_model_every}, prompts_per_rollout_sync={p_rollout}, "
+            f"prompts_per_optim_step={p_optim})"
+        )
+
+    return {
+        "accumulation_steps": accumulation_steps,
+        "sync_model_every": sync_model_every,
+        "sync_ref_every": sync_ref_every,
+        "max_staleness": configured_staleness,
+        "required_staleness": required_staleness,
+    }
+
+
 async def main():
     run_start_time = time.perf_counter()
 
@@ -85,22 +127,22 @@ async def main():
     # =========================================================================
     num_epochs = plan.training.get("num_epochs")
     max_steps = plan.training.get("max_steps")
-    max_staleness = plan.training.get("max_staleness", 0)
     abort_in_flight = plan.training.get("abort_in_flight", True)
     checkpoint_interval = plan.training.get("checkpoint_interval", 50)
     checkpoint_dir = os.environ.get("SM_MODEL_DIR", "/efs/rlvr-experiments/checkpoints")
 
     # Batching
+    schedule = _compute_schedule(plan.training)
+    accumulation_steps = schedule["accumulation_steps"]
+    sync_model_every = schedule["sync_model_every"]
+    sync_ref_every = schedule["sync_ref_every"]
+    max_staleness = schedule["max_staleness"]
     prompts_per_rollout_sync = plan.training.get("prompts_per_rollout_sync")
     prompts_per_reference_sync = plan.training.get("prompts_per_reference_sync")
     prompts_per_optim_step = plan.training.get("prompts_per_optim_step")
     prompts_per_forward_backward = plan.training.get("prompts_per_forward_backward")
     completions_per_micro_batch_cfg = plan.training.get("completions_per_micro_batch")
     completions_per_micro_batch_reference = plan.training.get("completions_per_micro_batch_reference")
-
-    accumulation_steps = prompts_per_optim_step // prompts_per_forward_backward
-    sync_model_every = prompts_per_rollout_sync // prompts_per_optim_step
-    sync_ref_every = prompts_per_reference_sync // prompts_per_optim_step
 
     # Sequence length limits
     max_completion_len = plan.sampling.get("max_tokens", 512)
@@ -258,13 +300,13 @@ async def main():
     # trainer.version increments at each optimizer step. Used for staleness checks.
     # A sample is stale if it was generated with weights from version < (trainer.version - max_staleness).
 
-    # Build micro-batch size lookup: can be int or dict {bucket: size}
-    def get_micro_batch_size(completion_len: int) -> int:
-        """Get micro-batch size for a given completion length bucket."""
+    # Build micro-batch size lookup: can be int or dict {seq_len_bucket: size}
+    def get_micro_batch_size(seq_len: int) -> int:
+        """Get micro-batch size for a given sequence length bucket."""
         if isinstance(completions_per_micro_batch_cfg, dict):
-            # Find the bucket that matches this completion length
+            # Find the bucket that matches this sequence length
             for bucket in sorted(completions_per_micro_batch_cfg.keys()):
-                if completion_len <= bucket:
+                if seq_len <= bucket:
                     return completions_per_micro_batch_cfg[bucket]
             # Fall back to largest bucket's size
             return completions_per_micro_batch_cfg[max(completions_per_micro_batch_cfg.keys())]
@@ -366,7 +408,7 @@ async def main():
                     loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages),
                     loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
                     scale_loss=1.0 / accumulation_steps,
-                    micro_batch_size=get_micro_batch_size(stats.padded_completion_len),
+                    micro_batch_size=get_micro_batch_size(stats.padded_seq_len),
                 )
             accum_loss += loss
             accum_ntokens += batch.input_ids.numel()

@@ -143,8 +143,8 @@ def submit_job(
 
     # Job name - sanitize to match SageMaker pattern: [a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}
     if job_name is None:
-        timestamp = datetime.now().strftime("%m%d-%H%M")
-        job_name = f"adhoc-{timestamp}"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        job_name = f"annotations-adhoc-{timestamp}"
 
     # Stage source
     source_dir = stage_source_dir(PROJECT_DIR)

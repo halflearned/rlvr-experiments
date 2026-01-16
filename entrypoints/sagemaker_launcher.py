@@ -82,20 +82,37 @@ def start_ray_worker(head_addr: str):
     run(cmd)
 
 
-def download_model_if_needed(config_path: str):
-    """Download model from S3 if config uses HF-style identifier (e.g., 'Qwen/Qwen3-1.7B-Base')."""
+def download_model_and_rewrite_config(config_path: str) -> str:
+    """Download model from S3 and rewrite config with local paths.
+
+    Returns path to the rewritten config file.
+    """
     import yaml
     import os
+    import re
 
     with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+        config_text = f.read()
+        config = yaml.safe_load(config_text)
 
-    # Check if model path looks like HF Hub identifier (contains /)
+    # Check if model path needs rewriting:
+    # 1. HF Hub identifier (contains / but not absolute path): "Qwen/Qwen3-1.7B-Base"
+    # 2. Local /efs/ path that won't exist on SageMaker: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
     model_path = config.get('model', {}).get('path', '')
-    if '/' in model_path and not os.path.exists(model_path):
-        # Map HF-style paths to S3 bucket paths
-        # e.g., "Qwen/Qwen3-1.7B-Base" -> "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/"
-        model_name = model_path.split('/')[-1]  # Get last part of path
+    needs_rewrite = False
+
+    if '/' in model_path and not model_path.startswith('/'):
+        # HF-style path: "Qwen/Qwen3-1.7B-Base"
+        needs_rewrite = True
+        model_name = model_path.split('/')[-1]
+    elif model_path.startswith('/efs/'):
+        # Local EFS path that won't exist on SageMaker
+        needs_rewrite = True
+        model_name = model_path.rstrip('/').split('/')[-1]
+
+    if needs_rewrite:
+        # Map to S3 bucket path
+        # e.g., "Qwen3-1.7B-Base" -> "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base/"
         s3_path = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/{model_name}/"
         local_path = f"/opt/ml/model/model_cache/{model_name}"
 
@@ -103,16 +120,27 @@ def download_model_if_needed(config_path: str):
         os.makedirs(local_path, exist_ok=True)
         run(["aws", "s3", "sync", s3_path, local_path, "--quiet"])
         print(f"[launcher] Model downloaded to: {local_path}", flush=True)
-        return local_path
-    return None
+
+        # Rewrite all occurrences of the original path to local path in the config
+        # This handles model.path, tokenizer.pretrained_model_name_or_path, roles[*].config.model, etc.
+        rewritten_config = config_text.replace(model_path, local_path)
+
+        # Write to a temporary config file
+        rewritten_path = "/opt/ml/model/config_rewritten.yaml"
+        with open(rewritten_path, 'w') as f:
+            f.write(rewritten_config)
+        print(f"[launcher] Rewrote config with local model path: {rewritten_path}", flush=True)
+        return rewritten_path
+
+    return config_path
 
 
 def run_training(config: str):
     """Run the actual training script."""
     import os
 
-    # Download model from S3 if needed and get local path
-    local_model_path = download_model_if_needed(config)
+    # Download model from S3 if needed and rewrite config with local paths
+    config = download_model_and_rewrite_config(config)
 
     # SageMaker copies source to /opt/ml/code
     # Ensure PYTHONPATH includes src directory for the subprocess
@@ -120,10 +148,6 @@ def run_training(config: str):
     src_path = "/opt/ml/code/src"
     pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{src_path}:{pythonpath}" if pythonpath else src_path
-
-    # If we downloaded the model, set env var to override config paths
-    if local_model_path:
-        env["RLVR_MODEL_PATH_OVERRIDE"] = local_model_path
 
     # Fix cuDNN version mismatch: PyTorch 2.9+cu128 bundles cuDNN 9.x, but the base
     # AWS DLC image has an older system cuDNN. Prepend the nvidia pip packages to

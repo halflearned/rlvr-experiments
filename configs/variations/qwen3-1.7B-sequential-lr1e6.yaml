@@ -1,5 +1,5 @@
 run:
-  name: gsm8k_s0_opt16_lr1e6
+  name: qwen3_1_7b_sequential
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -10,19 +10,31 @@ tokenizer:
 
 training:
   num_epochs: 1
-  max_steps: 100
   max_staleness: 0
-  abort_in_flight: true
-  checkpoint_interval: 50
+  abort_in_flight: false
+  checkpoint_interval: 100  
 
-  seq_len_buckets: [768]
-  completion_len_buckets: [512]
+  # Fixed bucket sizes to avoid torch.compile recompilations
+  # seq_len_buckets is TOTAL seq length (prompt + completion)
+  # Multiple buckets for mixed datasets:
+  # - GSM8K/MBPP: ~256 prompt + 512 completion = 768
+  # - MATH: ~256 prompt + 1024 completion = 1280
+  # - IFEval: ~512 prompt + 2048 completion = 2560
+  seq_len_buckets: [768, 1280, 2560]
+  completion_len_buckets: [512, 1024, 2048]
 
+  # Batching config
   prompts_per_rollout_sync: 16
   prompts_per_reference_sync: 64
   prompts_per_optim_step: 16
-  prompts_per_forward_backward: 1
-  completions_per_micro_batch: 64
+  prompts_per_forward_backward: 2
+  # Micro-batch size varies by completion length bucket for better GPU utilization
+  # Shorter sequences can fit more samples per micro-batch
+  completions_per_micro_batch:
+    768: 64
+    1280: 16
+    2560: 8
+  max_concurrent_tasks: 4
 
 verifier:
   num_workers: 4
@@ -32,19 +44,35 @@ loss:
   eps: 0.2
 
 data:
-  dataset: gsm8k
+  dataset: mixed
+  mode: sequential
+  datasets:
+    - name: gsm8k
+      split: train
+      count: 3200  # 200 steps
+    - name: math
+      split: train
+      count: 3200  # 200 steps
+    - name: mbpp
+      split: train
+      count: 374  # 27 steps
+    - name: ifeval
+      count: 3200  # 200 steps
+  seed: 42
 
+# Mixed datasets have different system prompts per sample, so leave empty here
 data_iter:
-  system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
-  assistant_prefix: "Let's think step by step."
+  system_prompt: ""
+  assistant_prefix: ""
 
 sampling:
   temperature: 0.6
   top_p: 0.95
   top_k: 20
-  max_tokens: 512
-  n: 64
+  max_tokens: 2048
+  n: 16
   logprobs: 0
+
 
 buffer:
   max_reads: 1
@@ -57,9 +85,9 @@ roles:
       trainable: true
 
       profiling:
-        enable_profiling: false
+        enable_profiling: true
         save_traces_folder: "profile_trace"
-        profile_freq: 100
+        profile_freq: 10
 
       metrics:
         log_freq: 1
@@ -73,7 +101,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001  # 1e-6
+        lr: 0.000001  
         eps: 0.0001
 
       lr_scheduler:
@@ -81,7 +109,7 @@ roles:
         decay_ratio: 0.0
 
       training:
-        seq_len: 1024
+        seq_len: 2560
         dtype: "bfloat16"
         mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
@@ -112,6 +140,8 @@ roles:
         components:
           - "model"
 
+
+  # Reference model as vLLM - much faster than Titan for logprobs-only workload
   - name: reference
     kind: vllm
     config:
@@ -120,28 +150,33 @@ roles:
       max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 1025
+      max_model_len: 2561  # seq_len_buckets[-1] + 1 for logprobs
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
-      enable_prefix_caching: false
+      enable_prefix_caching: false  # Prefix caching may interfere with prompt_logprobs
       enable_chunked_prefill: true
+
 
   - name: rollout
     kind: vllm
+
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
-      max_concurrent_per_replica: 8
-      max_num_seqs: 256
+      max_concurrent_per_replica: 10
+      max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 1
-      max_model_len: 1024
+      data_parallel_size: 5
+      max_model_len: 2560
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: true
       enable_chunked_prefill: true
+
+
 
 sync:
   chunk_mb: 100

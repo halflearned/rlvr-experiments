@@ -5,11 +5,30 @@ Compute pass@k for arbitrary k values from saved evaluation results.
 Usage:
     python scripts/compute_pass_at_k.py results.json --k 1,8,64,256,512
     python scripts/compute_pass_at_k.py results.json --k 1-512  # range
+    python scripts/compute_pass_at_k.py results.json --lookup math_algebra_42
+    python scripts/compute_pass_at_k.py results.json --lookup math_algebra_42 --k 1,8,32
 """
 
 import argparse
 import json
 from pathlib import Path
+
+
+def load_results(results_file: str | Path) -> dict:
+    """Load results from JSON file."""
+    with open(results_file) as f:
+        return json.load(f)
+
+
+def get_results_by_id(data: dict) -> dict[str, dict]:
+    """Build a lookup dict from prompt_id to result."""
+    return {p["prompt_id"]: p for p in data["per_prompt_results"]}
+
+
+def lookup_prompt(data: dict, prompt_id: str) -> dict | None:
+    """Look up a specific prompt by ID."""
+    by_id = get_results_by_id(data)
+    return by_id.get(prompt_id)
 
 
 def compute_pass_at_k(correctness_masks: list[list[bool]], k: int) -> float:
@@ -46,6 +65,54 @@ def parse_k_values(k_str: str) -> list[int]:
     return sorted(set(k_values))
 
 
+def compute_prompt_stats(result: dict, k_values: list[int] = None) -> dict:
+    """Compute statistics for a single prompt result."""
+    mask = result.get("correctness_mask", [])
+    details = result.get("completion_details", [])
+    n = len(mask)
+
+    stats = {
+        "prompt_id": result["prompt_id"],
+        "prompt": result["prompt"],
+        "target_answer": result["target_answer"],
+        "num_completions": result["num_completions"],
+        "num_correct": result["num_correct"],
+        "pass_rate": result["pass_rate"],
+    }
+
+    # Add optional fields
+    if result.get("level"):
+        stats["level"] = result["level"]
+    if result.get("subject"):
+        stats["subject"] = result["subject"]
+
+    # Compute pass@k for requested values
+    if k_values:
+        stats["pass_at_k"] = {}
+        for k in k_values:
+            if k <= n:
+                stats["pass_at_k"][k] = any(mask[:k])
+
+    # Compute length stats if completion_details available
+    if details:
+        lengths = [d["length"] for d in details]
+        correct_lengths = [d["length"] for d in details if d["correct"]]
+        incorrect_lengths = [d["length"] for d in details if not d["correct"]]
+
+        stats["length_stats"] = {
+            "all": {"avg": sum(lengths)/len(lengths) if lengths else 0, "min": min(lengths) if lengths else 0, "max": max(lengths) if lengths else 0},
+            "correct": {"avg": sum(correct_lengths)/len(correct_lengths) if correct_lengths else 0, "count": len(correct_lengths)},
+            "incorrect": {"avg": sum(incorrect_lengths)/len(incorrect_lengths) if incorrect_lengths else 0, "count": len(incorrect_lengths)},
+        }
+
+        # Finish reason breakdown
+        stop_count = sum(1 for d in details if d["finish_reason"] == "stop")
+        length_count = sum(1 for d in details if d["finish_reason"] == "length")
+        stats["finish_reasons"] = {"stop": stop_count, "length": length_count}
+
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compute pass@k from evaluation results")
     parser.add_argument("results_file", type=Path, help="Path to JSON results file")
@@ -60,14 +127,79 @@ def main():
         action="store_true",
         help="Also compute pass@k by level (for MATH results)",
     )
+    parser.add_argument(
+        "--lookup",
+        type=str,
+        default=None,
+        help="Look up a specific prompt by prompt_id",
+    )
+    parser.add_argument(
+        "--list-ids",
+        action="store_true",
+        help="List all prompt IDs in the results file",
+    )
     args = parser.parse_args()
 
     # Load results
     with open(args.results_file) as f:
         data = json.load(f)
 
-    # Extract correctness masks
     per_prompt = data["per_prompt_results"]
+
+    # Handle --list-ids
+    if args.list_ids:
+        print(f"Prompt IDs in {args.results_file.name}:")
+        print("-" * 40)
+        for p in per_prompt:
+            extra = ""
+            if p.get("level"):
+                extra = f" [{p['level']}] {p.get('subject', '')}"
+            print(f"  {p['prompt_id']}{extra} - {p['pass_rate']*100:.1f}% pass rate")
+        return
+
+    # Handle --lookup
+    if args.lookup:
+        result = lookup_prompt(data, args.lookup)
+        if result is None:
+            print(f"Error: prompt_id '{args.lookup}' not found.")
+            print(f"Use --list-ids to see available prompt IDs.")
+            return
+
+        k_values = parse_k_values(args.k)
+        stats = compute_prompt_stats(result, k_values)
+
+        print(f"Prompt: {stats['prompt_id']}")
+        print("=" * 60)
+        if stats.get("level"):
+            print(f"Level: {stats['level']}")
+        if stats.get("subject"):
+            print(f"Subject: {stats['subject']}")
+        print(f"Target answer: {stats['target_answer']}")
+        print(f"\nPrompt text:\n{stats['prompt'][:500]}{'...' if len(stats['prompt']) > 500 else ''}")
+        print()
+        print(f"Completions: {stats['num_completions']}")
+        print(f"Correct: {stats['num_correct']} ({stats['pass_rate']*100:.1f}%)")
+        print()
+
+        if stats.get("pass_at_k"):
+            print("Pass@k:")
+            for k, passed in stats["pass_at_k"].items():
+                print(f"  Pass@{k}: {'Yes' if passed else 'No'}")
+
+        if stats.get("length_stats"):
+            ls = stats["length_stats"]
+            print(f"\nCompletion lengths:")
+            print(f"  All: avg={ls['all']['avg']:.0f}, min={ls['all']['min']}, max={ls['all']['max']}")
+            print(f"  Correct ({ls['correct']['count']}): avg={ls['correct']['avg']:.0f}")
+            print(f"  Incorrect ({ls['incorrect']['count']}): avg={ls['incorrect']['avg']:.0f}")
+
+        if stats.get("finish_reasons"):
+            fr = stats["finish_reasons"]
+            print(f"\nFinish reasons: stop={fr['stop']}, length={fr['length']}")
+
+        return
+
+    # Default: compute pass@k for all prompts
 
     # Check if correctness_mask exists
     if not per_prompt or "correctness_mask" not in per_prompt[0]:

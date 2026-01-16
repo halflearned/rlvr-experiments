@@ -12,7 +12,7 @@ training:
   num_epochs: 1
   max_staleness: 0
   abort_in_flight: false
-  checkpoint_interval: 100  
+  checkpoint_interval: 50
 
   # Fixed bucket sizes to avoid torch.compile recompilations
   # seq_len_buckets is TOTAL seq length (prompt + completion)
