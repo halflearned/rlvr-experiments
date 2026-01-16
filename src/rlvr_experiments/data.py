@@ -44,8 +44,38 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     Returns dataset with columns: "prompt", "problem"
     where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
     """
-    hf_dataset = load_dataset("openai/gsm8k", "main", split=split)
-    ds = ray.data.from_huggingface(hf_dataset)
+    import os
+    import subprocess
+
+    # Check for S3 cache first (for SageMaker VPC environments without internet)
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/gsm8k_{split}/"
+    local_cache = f"/tmp/gsm8k_{split}_cache"
+
+    use_local_cache = False
+    if os.path.exists(local_cache):
+        print(f"[load_gsm8k] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_gsm8k] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            print(f"[load_gsm8k] Loaded from S3 cache")
+            use_local_cache = True
+        except Exception as e:
+            print(f"[load_gsm8k] S3 cache not available ({e}), loading from HuggingFace Hub")
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        ds = ray.data.from_items(list(hf_dataset))
+    else:
+        hf_dataset = load_dataset("openai/gsm8k", "main", split=split)
+        ds = ray.data.from_huggingface(hf_dataset)
 
     def preprocess(row):
         question = f"\n\nProblem:{row['question'].strip()}"
@@ -218,21 +248,51 @@ def load_math(
     Returns dataset with columns: "prompt", "problem"
     where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
     """
-    # Load all subjects and concatenate
-    subjects = [
-        "algebra",
-        "counting_and_probability",
-        "geometry",
-        "intermediate_algebra",
-        "number_theory",
-        "prealgebra",
-        "precalculus",
-    ]
+    import os
+    import subprocess
 
-    all_rows = []
-    for subject in subjects:
-        hf_dataset = load_dataset("EleutherAI/hendrycks_math", subject, split=split)
-        all_rows.extend(list(hf_dataset))
+    # Check for S3 cache first (for SageMaker VPC environments without internet)
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/math_{split}/"
+    local_cache = f"/tmp/math_{split}_cache"
+
+    use_local_cache = False
+    if os.path.exists(local_cache):
+        print(f"[load_math] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_math] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            print(f"[load_math] Loaded from S3 cache")
+            use_local_cache = True
+        except Exception as e:
+            print(f"[load_math] S3 cache not available ({e}), loading from HuggingFace Hub")
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        all_rows = list(hf_dataset)
+    else:
+        # Load all subjects and concatenate
+        subjects = [
+            "algebra",
+            "counting_and_probability",
+            "geometry",
+            "intermediate_algebra",
+            "number_theory",
+            "prealgebra",
+            "precalculus",
+        ]
+
+        all_rows = []
+        for subject in subjects:
+            hf_dataset = load_dataset("EleutherAI/hendrycks_math", subject, split=split)
+            all_rows.extend(list(hf_dataset))
 
     # Filter by level if specified
     if level is not None:
@@ -376,8 +436,38 @@ def load_ifeval(split: str = "train") -> ray.data.Dataset:
     Returns dataset with columns: "prompt", "problem"
     where "problem" is a dict containing ground_truth JSON for use with IFEvalVerifier.
     """
-    hf_dataset = load_dataset("allenai/RLVR-IFeval", split=split)
-    ds = ray.data.from_huggingface(hf_dataset)
+    import os
+    import subprocess
+
+    # Check for S3 cache first (for SageMaker VPC environments without internet)
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/ifeval_{split}/"
+    local_cache = f"/tmp/ifeval_{split}_cache"
+
+    use_local_cache = False
+    if os.path.exists(local_cache):
+        print(f"[load_ifeval] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_ifeval] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            print(f"[load_ifeval] Loaded from S3 cache")
+            use_local_cache = True
+        except Exception as e:
+            print(f"[load_ifeval] S3 cache not available ({e}), loading from HuggingFace Hub")
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        ds = ray.data.from_items(list(hf_dataset))
+    else:
+        hf_dataset = load_dataset("allenai/RLVR-IFeval", split=split)
+        ds = ray.data.from_huggingface(hf_dataset)
 
     def preprocess(row):
         # Extract user message content from messages list
@@ -451,59 +541,78 @@ DATASET_LOADERS = {
 
 def load_mixed(
     datasets: list[dict],
+    mode: str = "weighted",
     seed: int = 42,
 ) -> tuple[ray.data.Dataset, list[str]]:
     """
-    Load and combine multiple datasets with weighted interleaved ordering.
+    Load and combine multiple datasets with configurable ordering.
+
+    Supports two modes:
+    - "weighted": Probabilistic interleaving based on weights (default)
+    - "sequential": Concatenate datasets in config order with optional count limits
 
     Each dataset config can specify:
     - name: Dataset name (required, must be in DATASET_LOADERS)
     - split: Split to load (default: "train")
-    - weight: Sampling probability weight (default: 1.0, weights are normalized)
+    - weight: Sampling probability weight for weighted mode (default: 1.0)
+    - count: Number of samples to take for sequential mode (default: all)
     - order_file: Path to file with line-separated prompt_ids for priority ordering
     - **kwargs: Additional args passed to the loader (e.g., level for MATH)
 
-    The function builds an interleaved order by:
-    1. Loading each dataset and applying per-dataset ordering (from order_file) or shuffle
-    2. Drawing from datasets according to normalized weights
-    3. Within each dataset, taking items in order (priority order or shuffled)
-    4. When a dataset is exhausted, continuing with remaining datasets
-
     Args:
-        datasets: List of dataset configs, e.g.:
-            [
-                {"name": "gsm8k", "weight": 0.7},
-                {"name": "math", "weight": 0.3, "order_file": "/path/to/order.txt"},
-            ]
+        datasets: List of dataset configs
+        mode: "weighted" for probabilistic interleaving, "sequential" for concatenation
         seed: Random seed for shuffling and weighted sampling
 
     Returns:
         Tuple of (combined_dataset, order_list) where:
         - combined_dataset: Ray Dataset with all samples
-        - order_list: List of prompt_ids in the interleaved order
+        - order_list: List of prompt_ids in the final order
 
-    Example config:
+    Note: Each dataset type has its own namespaced prompt_ids (gsm8k_, math_, etc.),
+    so mixing different datasets won't cause ID collisions. If the same dataset is
+    used twice, duplicate prompt_ids may appear in the order list. DataIterator
+    handles duplicates by tracking status per prompt_id, so each unique prompt_id
+    is only processed once.
+
+    Example weighted config:
         data:
+          dataset: mixed
+          mode: weighted  # default
           datasets:
             - name: gsm8k
               weight: 0.7
             - name: math
               weight: 0.3
-              level: [3, 4, 5]
-              order_file: experiments/math_order.txt
+
+    Example sequential config:
+        data:
+          dataset: mixed
+          mode: sequential
+          datasets:
+            - name: gsm8k
+              count: 500
+            - name: math
+              count: 500
+            - name: mbpp
+              count: 200
     """
     import random
 
     if not datasets:
         raise ValueError("datasets list cannot be empty")
 
+    if mode not in ("weighted", "sequential"):
+        raise ValueError(f"mode must be 'weighted' or 'sequential', got '{mode}'")
+
     rng = random.Random(seed)
 
     # Step 1: Load all datasets and build per-dataset ordered prompt_id lists
     all_rows = []
-    per_dataset_queues: dict[str, list[str]] = {}  # name -> ordered list of prompt_ids
+    per_dataset_queues: list[tuple[str, list[str]]] = []  # preserve config order for sequential
     prompt_id_to_row: dict[str, dict] = {}
     weights: dict[str, float] = {}
+    counts: dict[str, int | None] = {}
 
     for ds_config in datasets:
         name = ds_config.get("name")
@@ -515,8 +624,9 @@ def load_mixed(
                 f"Unknown dataset: {name}. Available: {list(DATASET_LOADERS.keys())}"
             )
 
-        # Extract loader kwargs (everything except 'name', 'weight', 'order_file')
-        loader_kwargs = {k: v for k, v in ds_config.items() if k not in ("name", "weight", "order_file")}
+        # Extract loader kwargs (everything except our special keys)
+        special_keys = ("name", "weight", "count", "order_file")
+        loader_kwargs = {k: v for k, v in ds_config.items() if k not in special_keys}
 
         # Load the dataset
         loader = DATASET_LOADERS[name]
@@ -541,52 +651,72 @@ def load_mixed(
             ordered_ids = list(row_by_id.keys())
             rng.shuffle(ordered_ids)
 
-        per_dataset_queues[name] = ordered_ids
+        # Store config values
         weights[name] = ds_config.get("weight", 1.0)
+        counts[name] = ds_config.get("count")  # None means all
 
-        # Add rows and index
+        # Apply count limit for sequential mode
+        if mode == "sequential" and counts[name] is not None:
+            ordered_ids = ordered_ids[:counts[name]]
+
+        per_dataset_queues.append((name, ordered_ids))
+
+        # Add rows and index (only those in ordered_ids)
+        ordered_ids_set = set(ordered_ids)
         for row in rows:
             pid = row["problem"]["prompt_id"]
-            if pid in ordered_ids:  # Only include if in order
+            if pid in ordered_ids_set:
                 prompt_id_to_row[pid] = row
                 all_rows.append(row)
 
-        print(f"[load_mixed] Loaded {len(ordered_ids)} samples from {name} (weight={weights[name]})")
+        count_info = f"count={counts[name]}" if counts[name] else "all"
+        weight_info = f"weight={weights[name]}"
+        print(f"[load_mixed] Loaded {len(ordered_ids)} samples from {name} ({weight_info if mode == 'weighted' else count_info})")
 
-    # Step 2: Build interleaved order by weighted sampling
-    interleaved_order: list[str] = []
+    # Step 2: Build final order based on mode
+    final_order: list[str] = []
 
-    def get_active_datasets() -> list[str]:
-        return [n for n, q in per_dataset_queues.items() if q]
+    if mode == "sequential":
+        # Sequential: just concatenate in config order
+        for name, ordered_ids in per_dataset_queues:
+            final_order.extend(ordered_ids)
+        print(f"[load_mixed] Total: {len(final_order)} samples, sequential from {len(datasets)} datasets")
 
-    def sample_dataset() -> str | None:
-        active = get_active_datasets()
-        if not active:
-            return None
-        # Normalize weights for active datasets
-        active_weights = [weights[n] for n in active]
-        total = sum(active_weights)
-        probs = [w / total for w in active_weights]
-        # Weighted random choice
-        r = rng.random()
-        cumsum = 0.0
-        for n, p in zip(active, probs):
-            cumsum += p
-            if r <= cumsum:
-                return n
-        return active[-1]  # Fallback
+    else:  # weighted
+        # Convert to dict for weighted sampling
+        queues_dict = {name: list(ids) for name, ids in per_dataset_queues}
 
-    while True:
-        ds_name = sample_dataset()
-        if ds_name is None:
-            break
-        # Pop next item from this dataset's queue
-        prompt_id = per_dataset_queues[ds_name].pop(0)
-        interleaved_order.append(prompt_id)
+        def get_active_datasets() -> list[str]:
+            return [n for n, q in queues_dict.items() if q]
 
-    print(f"[load_mixed] Total: {len(interleaved_order)} samples, interleaved from {len(datasets)} datasets")
+        def sample_dataset() -> str | None:
+            active = get_active_datasets()
+            if not active:
+                return None
+            # Normalize weights for active datasets
+            active_weights = [weights[n] for n in active]
+            total = sum(active_weights)
+            probs = [w / total for w in active_weights]
+            # Weighted random choice
+            r = rng.random()
+            cumsum = 0.0
+            for n, p in zip(active, probs):
+                cumsum += p
+                if r <= cumsum:
+                    return n
+            return active[-1]  # Fallback
 
-    return ray.data.from_items(all_rows), interleaved_order
+        while True:
+            ds_name = sample_dataset()
+            if ds_name is None:
+                break
+            # Pop next item from this dataset's queue
+            prompt_id = queues_dict[ds_name].pop(0)
+            final_order.append(prompt_id)
+
+        print(f"[load_mixed] Total: {len(final_order)} samples, interleaved from {len(datasets)} datasets")
+
+    return ray.data.from_items(all_rows), final_order
 
 
 class DataIterator:
@@ -651,8 +781,11 @@ class DataIterator:
             self._order: list[str] = [pid for pid in order if pid in valid_ids]
             if not self._order:
                 raise ValueError("order contains no valid prompt_ids")
+            # Store explicit order to preserve across new_epoch calls
+            self._explicit_order: list[str] | None = list(self._order)
         else:
             self._order: list[str] = list(self._prompt_id_index.keys())
+            self._explicit_order = None
 
     def _build_index(self) -> None:
         """Build prompt_id -> row index."""
@@ -702,6 +835,8 @@ class DataIterator:
 
         Args:
             seed: Random seed for shuffling. If None and order is None, keeps current order.
+                  If an explicit order was provided at init time, seed is ignored to preserve
+                  the intended ordering (e.g., sequential dataset mode).
             order: Explicit ordering of prompt_ids. If provided, overrides seed-based shuffling.
                    Items not in order are appended at the end.
         """
@@ -716,6 +851,10 @@ class DataIterator:
             self._order = [pid for pid in order if pid in valid_ids]
             if not self._order:
                 raise ValueError("order contains no valid prompt_ids")
+        elif self._explicit_order is not None:
+            # Preserve explicit order from init (e.g., sequential dataset mode)
+            # Don't shuffle even if seed is provided
+            self._order = list(self._explicit_order)
         elif seed is not None:
             rng = random.Random(seed)
             rng.shuffle(self._order)

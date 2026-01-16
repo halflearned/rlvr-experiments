@@ -95,7 +95,7 @@ async def main():
     prompts_per_reference_sync = plan.training.get("prompts_per_reference_sync")
     prompts_per_optim_step = plan.training.get("prompts_per_optim_step")
     prompts_per_forward_backward = plan.training.get("prompts_per_forward_backward")
-    completions_per_micro_batch = plan.training.get("completions_per_micro_batch")
+    completions_per_micro_batch_cfg = plan.training.get("completions_per_micro_batch")
     completions_per_micro_batch_reference = plan.training.get("completions_per_micro_batch_reference")
 
     accumulation_steps = prompts_per_optim_step // prompts_per_forward_backward
@@ -258,6 +258,19 @@ async def main():
     # trainer.version increments at each optimizer step. Used for staleness checks.
     # A sample is stale if it was generated with weights from version < (trainer.version - max_staleness).
 
+    # Build micro-batch size lookup: can be int or dict {bucket: size}
+    def get_micro_batch_size(completion_len: int) -> int:
+        """Get micro-batch size for a given completion length bucket."""
+        if isinstance(completions_per_micro_batch_cfg, dict):
+            # Find the bucket that matches this completion length
+            for bucket in sorted(completions_per_micro_batch_cfg.keys()):
+                if completion_len <= bucket:
+                    return completions_per_micro_batch_cfg[bucket]
+            # Fall back to largest bucket's size
+            return completions_per_micro_batch_cfg[max(completions_per_micro_batch_cfg.keys())]
+        return completions_per_micro_batch_cfg
+
+
     async def batches(producer_task):
         """Yield batches from buffer, handling staleness eviction."""
         samples = []
@@ -353,7 +366,7 @@ async def main():
                     loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages),
                     loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
                     scale_loss=1.0 / accumulation_steps,
-                    micro_batch_size=completions_per_micro_batch,
+                    micro_batch_size=get_micro_batch_size(stats.padded_completion_len),
                 )
             accum_loss += loss
             accum_ntokens += batch.input_ids.numel()

@@ -439,6 +439,107 @@ class TestLoadMixedWeights:
         assert ds.count() == 25  # all rows, including duplicates
 
 
+class TestLoadMixedSequential:
+    """Tests for sequential mode in load_mixed."""
+
+    def test_sequential_concatenates_in_order(self, ray_context):
+        """Test that sequential mode concatenates datasets in config order."""
+        from rlvr_experiments.data import load_mixed
+
+        ds, order = load_mixed([
+            {"name": "dummy", "num_samples": 5},
+            {"name": "dummy", "num_samples": 10},
+        ], mode="sequential", seed=42)
+
+        # Sequential mode concatenates orders from each dataset
+        # Total = 5 + 10 = 15 samples (duplicates allowed in order list)
+        assert len(order) == 15
+
+    def test_sequential_with_count(self, ray_context):
+        """Test that count limits samples in sequential mode."""
+        from rlvr_experiments.data import load_mixed
+
+        ds, order = load_mixed([
+            {"name": "dummy", "num_samples": 20, "count": 5},
+            {"name": "dummy", "num_samples": 20, "count": 3},
+        ], mode="sequential", seed=42)
+
+        # First dataset: 5 samples, second: 3 samples
+        # Total = 5 + 3 = 8 samples
+        assert len(order) == 8
+
+    def test_sequential_count_limits_per_dataset(self, ray_context):
+        """Test that count is applied per-dataset independently."""
+        from rlvr_experiments.data import load_mixed
+
+        ds, order = load_mixed([
+            {"name": "dummy", "num_samples": 100, "count": 10},
+            {"name": "dummy", "num_samples": 100, "count": 5},
+        ], mode="sequential", seed=42)
+
+        # Count limits are applied per dataset
+        # Total = 10 + 5 = 15 samples
+        assert len(order) == 15
+
+    def test_sequential_preserves_config_order(self, ray_context):
+        """Test that sequential mode preserves the order from config."""
+        from rlvr_experiments.data import load_mixed
+
+        # Create two datasets with non-overlapping ranges by using order files
+        # For simplicity, just verify the order is deterministic
+        ds1, order1 = load_mixed([
+            {"name": "dummy", "num_samples": 10, "count": 3},
+            {"name": "dummy", "num_samples": 10, "count": 2},
+        ], mode="sequential", seed=42)
+
+        ds2, order2 = load_mixed([
+            {"name": "dummy", "num_samples": 10, "count": 3},
+            {"name": "dummy", "num_samples": 10, "count": 2},
+        ], mode="sequential", seed=42)
+
+        # Same config should produce same order
+        assert order1 == order2
+
+    def test_sequential_no_count_takes_all(self, ray_context):
+        """Test that omitting count takes all samples from dataset."""
+        from rlvr_experiments.data import load_mixed
+
+        ds, order = load_mixed([
+            {"name": "dummy", "num_samples": 15},  # no count = all 15
+        ], mode="sequential", seed=42)
+
+        assert len(order) == 15
+
+    def test_invalid_mode_raises(self, ray_context):
+        """Test that invalid mode raises error."""
+        from rlvr_experiments.data import load_mixed
+
+        with pytest.raises(ValueError, match="mode must be"):
+            load_mixed([{"name": "dummy", "num_samples": 5}], mode="invalid")
+
+    def test_sequential_with_order_file(self, ray_context, tmp_path):
+        """Test that sequential mode respects order_file per dataset."""
+        from rlvr_experiments.data import load_mixed, load_dummy
+
+        # Get real IDs
+        dummy_ds = load_dummy(num_samples=10)
+        rows = list(dummy_ds.iter_rows())
+        all_ids = [row["problem"]["prompt_id"] for row in rows]
+
+        # Create order file with specific IDs in reverse order
+        order_file = tmp_path / "order.txt"
+        selected_ids = list(reversed(all_ids[5:10]))  # dummy_9, dummy_8, ..., dummy_5
+        order_file.write_text("\n".join(selected_ids))
+
+        ds, order = load_mixed([
+            {"name": "dummy", "num_samples": 10, "order_file": str(order_file), "count": 3},
+        ], mode="sequential", seed=42)
+
+        # Should take first 3 from the order file: dummy_9, dummy_8, dummy_7
+        assert len(order) == 3
+        assert order == selected_ids[:3]
+
+
 class TestDatasetMetadata:
     """Test that all dataset loaders include required metadata."""
 
@@ -618,7 +719,7 @@ class TestDataIteratorOrder:
         assert item["problem"]["prompt_id"] == "id_1"
 
     def test_order_preserved_across_epoch(self, simple_dataset, mock_tokenizer):
-        """Test that order with retries is preserved when starting new epoch without new order."""
+        """Test that explicit order is preserved across new_epoch calls."""
         from rlvr_experiments.data import DataIterator
 
         order = ["id_0", "id_1", "id_2"]
@@ -629,15 +730,12 @@ class TestDataIteratorOrder:
         data_iter.get_next()  # id_0
         data_iter.get_next()  # id_1
 
-        # Retry id_1 (moves to front)
-        data_iter.mark_pending("id_1")
-
-        # Start new epoch without seed or order - should keep current order
+        # Start new epoch - explicit order should be restored
         data_iter.new_epoch()
 
-        # id_1 should still be first
+        # id_0 should be first again (explicit order restored)
         item = data_iter.get_next()
-        assert item["problem"]["prompt_id"] == "id_1"
+        assert item["problem"]["prompt_id"] == "id_0"
 
     def test_seed_shuffles_order(self, simple_dataset, mock_tokenizer):
         """Test that seed parameter shuffles the order."""
