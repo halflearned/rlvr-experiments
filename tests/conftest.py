@@ -12,6 +12,20 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "gpu: mark test as requiring GPU")
     config.addinivalue_line("markers", "nightly: mark test as nightly (slow, full pipeline)")
     config.addinivalue_line("markers", "integration: mark test as integration test")
+    config.addinivalue_line("markers", "slow: mark test as slow (requires network/downloads)")
+
+
+# --- Skips for unavailable hardware ---
+
+def pytest_collection_modifyitems(config, items):
+    """Skip GPU-marked tests when CUDA is unavailable."""
+    import torch
+    if torch.cuda.is_available():
+        return
+    skip_gpu = pytest.mark.skip(reason="GPU not available in test environment")
+    for item in items:
+        if "gpu" in item.keywords:
+            item.add_marker(skip_gpu)
 
 
 # --- Event loop fixture for async tests ---

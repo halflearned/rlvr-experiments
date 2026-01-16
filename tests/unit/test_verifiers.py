@@ -127,7 +127,9 @@ class TestMathVerifierAsync:
         ]
         scores, durations = await verifier.verify_batch(problems, completions)
         assert scores == [1.0, 0.0, 1.0]
-        assert all(d == 0.0 for d in durations)
+        # Durations should be non-negative (actual timing values)
+        assert all(d >= 0.0 for d in durations)
+        assert len(durations) == 3
 
     @pytest.mark.asyncio
     async def test_verify_batch_with_timing(self, verifier):
@@ -137,5 +139,9 @@ class TestMathVerifierAsync:
             problems, completions
         )
         assert scores == [1.0]
-        assert durations == [0.0]
-        assert timing_spans == [(0.0, 0.0)]
+        # Durations should be non-negative (actual timing values)
+        assert len(durations) == 1
+        assert durations[0] >= 0.0
+        # Timing spans should be valid (start <= end)
+        assert len(timing_spans) == 1
+        assert timing_spans[0][0] <= timing_spans[0][1]

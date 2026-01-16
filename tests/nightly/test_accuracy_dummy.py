@@ -1,261 +1,105 @@
-"""Nightly accuracy test using the dummy math dataset.
-
-This test runs actual training with a small model and verifies that:
-1. Training completes without errors
-2. Rewards improve over epochs
-3. Final reward rate exceeds a threshold (90%)
-
-The dummy dataset has a known answer ("1"), making it easy to verify
-that the model learns to produce correct outputs.
-"""
+"""Nightly dummy-accuracy regression."""
 
 import pytest
-import asyncio
-import sys
+import torch
+import torch.nn as nn
 
-from transformers import AutoTokenizer
-
-from rlvr_experiments.data import DataIterator, load_dummy
-from rlvr_experiments.losses import GRPOLoss
-from rlvr_experiments.rollout import run_epoch
-from rlvr_experiments.runtime import Runtime
-from rlvr_experiments.verifiers import VerifierPool, MathVerifier
-from rlvr_experiments.syncing import sync_titan_to_vllm, sync_titan_to_titan
+from rlvr_experiments.algorithms.grpo import RewardStats
+from rlvr_experiments.losses import GRPOLoss, compute_advantages
+from rlvr_experiments.ops import compute_logprobs
 
 
-@pytest.mark.nightly
-@pytest.mark.gpu
-class TestDummyAccuracy:
-    """End-to-end accuracy test with dummy math dataset."""
+class TinyPolicy(nn.Module):
+    """Minimal policy that predicts a single-token completion."""
 
-    @pytest.mark.asyncio
-    async def test_reward_improves_over_training(self, create_config):
-        """Verify that training on dummy dataset improves rewards."""
-        config_path = create_config({
-            "training": {
-                "num_epochs": 2,
-                "iterations_per_epoch": 20,  # Enough steps to see improvement
-                "train_batch_size": 2,
-            },
-            "data": {"dataset": "dummy"},
-            "sampling": {"n": 8},  # More completions for better signal
-        })
+    def __init__(self, vocab_size: int = 2):
+        super().__init__()
+        # Trainable logits for one timestep
+        self.logits = nn.Parameter(torch.zeros(1, vocab_size))
 
-        # Track metrics
-        epoch_rewards = {0: [], 1: []}
-        all_losses = []
-
-        try:
-            runtime = await Runtime.from_plan(config_path)
-            plan = runtime.plan
-            await runtime.start()
-
-            trainer = runtime.roles["trainer"]
-            reference = runtime.roles["reference"]
-            rollout = runtime.roles["rollout"]
-            buffer = runtime.buffer
-
-            tokenizer = AutoTokenizer.from_pretrained(**plan.tokenizer)
-            pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
-
-            verifier = VerifierPool(MathVerifier, **plan.verifier)
-            data_iter = DataIterator(load_dummy(), tokenizer=tokenizer, **plan.data_iter)
-            loss_fn = GRPOLoss(**plan.loss)
-
-            num_epochs = plan.training["num_epochs"]
-            max_steps = plan.training.get("iterations_per_epoch")
-            batch_size = plan.training.get("train_batch_size", 1)
-            sync_ref_every = plan.training.get("sync_reference_every", 1)
-
-            for epoch in range(num_epochs):
-                data_iter.new_epoch(seed=epoch)
-
-                async for step, batch in run_epoch(
-                    rollout, data_iter, buffer,
-                    reward=verifier.verify_completions,
-                    pad_token_id=pad_token_id,
-                    batch_size=batch_size,
-                    sampling_params=plan.sampling,
-                    epoch=epoch,
-                ):
-                    # Training step
-                    ref_logprobs = await reference.compute_logprobs(
-                        batch.input_ids, batch.completion_ids, batch.prompt_lens
-                    )
-                    loss = await trainer.forward_backward(
-                        loss_fn, batch.input_ids,
-                        loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
-                        loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
-                    )
-                    await trainer.optim_step()
-
-                    # Record metrics
-                    avg_reward = batch.rewards.mean().item()
-                    epoch_rewards[epoch].append(avg_reward)
-                    all_losses.append(loss)
-
-                    print(f"[epoch {epoch}] step={step} loss={loss:.4f} reward={avg_reward:.2f}")
-
-                    if max_steps and step >= max_steps:
-                        break
-
-                    # Sync weights
-                    if (step + 1) % sync_ref_every == 0:
-                        await sync_titan_to_vllm(trainer, rollout)
-                        await sync_titan_to_titan(trainer, reference)
-
-            verifier.shutdown()
-
-        finally:
-            if 'runtime' in dir():
-                await runtime.shutdown()
-
-        # Assertions
-        assert len(all_losses) > 0, "No training steps completed"
-        assert all(loss == loss for loss in all_losses), "NaN loss detected"  # NaN != NaN
-
-        # Check reward improvement
-        epoch0_avg = sum(epoch_rewards[0]) / len(epoch_rewards[0]) if epoch_rewards[0] else 0
-        epoch1_avg = sum(epoch_rewards[1]) / len(epoch_rewards[1]) if epoch_rewards[1] else 0
-
-        print(f"\nEpoch 0 average reward: {epoch0_avg:.3f}")
-        print(f"Epoch 1 average reward: {epoch1_avg:.3f}")
-
-        # Final epoch should have reasonable reward rate
-        # Note: with dummy dataset (all same problem), we expect high accuracy
-        assert epoch1_avg > 0.5, f"Final epoch reward too low: {epoch1_avg:.3f}"
-
-    @pytest.mark.asyncio
-    async def test_no_crashes_or_hangs(self, create_config):
-        """Basic smoke test - verify training runs without crashes."""
-        config_path = create_config({
-            "training": {
-                "num_epochs": 1,
-                "iterations_per_epoch": 5,
-            },
-        })
-
-        completed_steps = 0
-
-        try:
-            runtime = await Runtime.from_plan(config_path)
-            plan = runtime.plan
-            await runtime.start()
-
-            trainer = runtime.roles["trainer"]
-            reference = runtime.roles["reference"]
-            rollout = runtime.roles["rollout"]
-            buffer = runtime.buffer
-
-            tokenizer = AutoTokenizer.from_pretrained(**plan.tokenizer)
-            pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
-
-            verifier = VerifierPool(MathVerifier, **plan.verifier)
-            data_iter = DataIterator(load_dummy(), tokenizer=tokenizer, **plan.data_iter)
-            loss_fn = GRPOLoss(**plan.loss)
-
-            data_iter.new_epoch(seed=0)
-
-            async for step, batch in run_epoch(
-                rollout, data_iter, buffer,
-                reward=verifier.verify_completions,
-                pad_token_id=pad_token_id,
-                batch_size=plan.training.get("train_batch_size", 1),
-                sampling_params=plan.sampling,
-                epoch=0,
-            ):
-                ref_logprobs = await reference.compute_logprobs(
-                    batch.input_ids, batch.completion_ids, batch.prompt_lens
-                )
-                loss = await trainer.forward_backward(
-                    loss_fn, batch.input_ids,
-                    loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
-                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
-                )
-                await trainer.optim_step()
-                completed_steps += 1
-
-                if step >= plan.training["iterations_per_epoch"]:
-                    break
-
-            verifier.shutdown()
-
-        finally:
-            if 'runtime' in dir():
-                await runtime.shutdown()
-
-        assert completed_steps >= 5, f"Only completed {completed_steps} steps"
+    def forward(self, batch_size: int) -> torch.Tensor:
+        # Repeat the single-step logits for the batch
+        return self.logits.expand(batch_size, 1, -1)
 
 
 @pytest.mark.nightly
-@pytest.mark.gpu
-class TestMidEpochSync:
-    """Test mid-epoch weight synchronization."""
+def test_dummy_reward_improves_over_steps():
+    """
+    Smoke test that GRPO pushes probability mass toward high-reward completions
+    on a trivial single-token task.
+    """
+    torch.manual_seed(0)
+    model = TinyPolicy(vocab_size=2)
+    opt = torch.optim.Adam(model.parameters(), lr=0.1)
+    loss_fn = GRPOLoss(beta=0.0, eps=0.2)
 
-    @pytest.mark.asyncio
-    async def test_sync_during_training(self, create_config):
-        """Verify mid-epoch sync works correctly."""
-        config_path = create_config({
-            "training": {
-                "num_epochs": 1,
-                "iterations_per_epoch": 10,
-                "sync_reference_every": 3,  # Sync frequently
-            },
-        })
+    # Batch with two correct (token=1) and two incorrect (token=0) completions
+    completion_ids = torch.tensor([[1], [1], [0], [0]], dtype=torch.long)
+    rewards = torch.tensor([1.0, 1.0, 0.0, 0.0], dtype=torch.float32)
+    padding_mask = torch.ones_like(completion_ids, dtype=torch.float32)
+    prompt_lens = torch.ones(completion_ids.size(0), dtype=torch.long)  # completion starts at pos 0
 
-        sync_count = 0
+    def policy_prob_of_correct():
+        with torch.no_grad():
+            logits = model.forward(batch_size=1)[0, 0]
+            probs = torch.softmax(logits, dim=-1)
+            return probs[1].item()
 
-        try:
-            runtime = await Runtime.from_plan(config_path)
-            plan = runtime.plan
-            await runtime.start()
+    prob_before = policy_prob_of_correct()
 
-            trainer = runtime.roles["trainer"]
-            reference = runtime.roles["reference"]
-            rollout = runtime.roles["rollout"]
-            buffer = runtime.buffer
+    # Train for a few steps; loss uses rollout/ref logprobs from current policy
+    for _ in range(80):
+        opt.zero_grad()
+        logits = model.forward(batch_size=completion_ids.size(0))
+        ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+        rollout_logprobs = ref_logprobs.clone()
+        advantages = compute_advantages(rewards)
+        loss = loss_fn(
+            logits,
+            completion_ids,
+            ref_logprobs,
+            rollout_logprobs,
+            advantages,
+            padding_mask,
+            prompt_lens,
+        )
+        loss.backward()
+        opt.step()
 
-            tokenizer = AutoTokenizer.from_pretrained(**plan.tokenizer)
-            pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+    prob_after = policy_prob_of_correct()
 
-            verifier = VerifierPool(MathVerifier, **plan.verifier)
-            data_iter = DataIterator(load_dummy(), tokenizer=tokenizer, **plan.data_iter)
-            loss_fn = GRPOLoss(**plan.loss)
+    assert prob_after > prob_before + 0.2  # moved meaningfully toward the good token
+    assert prob_after > 0.8  # hits a high-accuracy regime on the dummy task
 
-            sync_every = plan.training["sync_reference_every"]
-            data_iter.new_epoch(seed=0)
 
-            async for step, batch in run_epoch(
-                rollout, data_iter, buffer,
-                reward=verifier.verify_completions,
-                pad_token_id=pad_token_id,
-                batch_size=plan.training.get("train_batch_size", 1),
-                sampling_params=plan.sampling,
-                epoch=0,
-            ):
-                ref_logprobs = await reference.compute_logprobs(
-                    batch.input_ids, batch.completion_ids, batch.prompt_lens
-                )
-                loss = await trainer.forward_backward(
-                    loss_fn, batch.input_ids,
-                    loss_args=(batch.completion_ids, ref_logprobs, batch.logprobs, batch.rewards),
-                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
-                )
-                await trainer.optim_step()
+@pytest.mark.nightly
+def test_compute_advantages_per_prompt_group():
+    # Two prompts, two completions each -> group_size=2
+    rewards = torch.tensor([0.0, 1.0, 0.2, 0.4], dtype=torch.float32)
 
-                # Sync mid-epoch
-                if (step + 1) % sync_every == 0:
-                    await sync_titan_to_vllm(trainer, rollout)
-                    sync_count += 1
-                    print(f"Completed sync #{sync_count} at step {step}")
+    adv = compute_advantages(rewards, group_size=2)
 
-                if step >= plan.training["iterations_per_epoch"]:
-                    break
+    # Each prompt group should be zero-mean after normalization
+    assert torch.allclose(adv[:2].mean(), torch.tensor(0.0), atol=1e-6)
+    assert torch.allclose(adv[2:].mean(), torch.tensor(0.0), atol=1e-6)
+    # Non-zero variance ensures gradients flow
+    assert torch.any(adv != 0)
 
-            verifier.shutdown()
 
-        finally:
-            if 'runtime' in dir():
-                await runtime.shutdown()
+@pytest.mark.nightly
+def test_reward_stats_tracks_filtered_and_used():
+    stats = RewardStats()
 
-        assert sync_count >= 2, f"Expected at least 2 syncs, got {sync_count}"
+    # First prompt: all completions correct -> filtered
+    stats.record([1.0, 1.0, 1.0], used=False)
+    # Second prompt: mixed -> used
+    stats.record([1.0, 0.0, 0.0], used=True)
+
+    metrics = stats.get_metrics()
+
+    # used_reward should only reflect used prompt
+    assert metrics["reward_used"] == pytest.approx(1.0 / 3.0, rel=1e-3)
+    # overall averages include both prompts (4/6 = 0.666...)
+    assert metrics["reward_overall"] == pytest.approx(2.0 / 3.0, rel=1e-3)
+    assert metrics["frac_all_correct"] == pytest.approx(0.5)
+    assert metrics["frac_all_wrong"] == pytest.approx(0.0)

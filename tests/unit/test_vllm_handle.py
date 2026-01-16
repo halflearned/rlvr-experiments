@@ -29,39 +29,40 @@ class TestLoadAwareRouter:
         router = LoadAwareRouter(num_replicas=3, max_concurrent_per_replica=10)
 
         # Acquire slots and verify they go to least loaded
-        idx0 = await router.acquire_slot()
-        assert idx0 == 0  # All equal, picks first
+        # acquire_slot returns (replica_idx, slot_idx)
+        replica_idx0, slot_idx0 = await router.acquire_slot()
+        assert replica_idx0 == 0  # All equal, picks first
         assert router.get_load() == [1, 0, 0]
 
-        idx1 = await router.acquire_slot()
-        assert idx1 == 1  # replica 1 has 0 load
+        replica_idx1, slot_idx1 = await router.acquire_slot()
+        assert replica_idx1 == 1  # replica 1 has 0 load
         assert router.get_load() == [1, 1, 0]
 
-        idx2 = await router.acquire_slot()
-        assert idx2 == 2  # replica 2 has 0 load
+        replica_idx2, slot_idx2 = await router.acquire_slot()
+        assert replica_idx2 == 2  # replica 2 has 0 load
         assert router.get_load() == [1, 1, 1]
 
-        idx3 = await router.acquire_slot()
-        assert idx3 == 0  # All equal again, picks first
+        replica_idx3, slot_idx3 = await router.acquire_slot()
+        assert replica_idx3 == 0  # All equal again, picks first
         assert router.get_load() == [2, 1, 1]
 
     @pytest.mark.asyncio
     async def test_release_slot(self):
         router = LoadAwareRouter(num_replicas=2, max_concurrent_per_replica=10)
 
-        idx = await router.acquire_slot()
-        assert router.get_load()[idx] == 1
+        replica_idx, slot_idx = await router.acquire_slot()
+        assert router.get_load()[replica_idx] == 1
 
-        await router.release_slot(idx)
-        assert router.get_load()[idx] == 0
+        await router.release_slot(replica_idx, slot_idx)
+        assert router.get_load()[replica_idx] == 0
 
     @pytest.mark.asyncio
     async def test_respects_capacity_limit(self):
         router = LoadAwareRouter(num_replicas=1, max_concurrent_per_replica=2)
 
         # Fill to capacity
-        await router.acquire_slot()
-        await router.acquire_slot()
+        slot1 = await router.acquire_slot()
+        slot2 = await router.acquire_slot()
         assert router.get_load() == [2]
 
         # Next acquire should block until we release
@@ -70,11 +71,11 @@ class TestLoadAwareRouter:
         assert not acquire_task.done()
 
         # Release one slot
-        await router.release_slot(0)
+        await router.release_slot(slot1[0], slot1[1])
 
         # Now acquire should complete
-        idx = await asyncio.wait_for(acquire_task, timeout=1.0)
-        assert idx == 0
+        replica_idx, slot_idx = await asyncio.wait_for(acquire_task, timeout=1.0)
+        assert replica_idx == 0
 
     @pytest.mark.asyncio
     async def test_balances_across_replicas(self):

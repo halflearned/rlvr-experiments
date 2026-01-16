@@ -12,7 +12,7 @@ def make_train_sample(rollout: RolloutSample, rewards: list[float]) -> TrainSamp
     n = rollout.input_ids.size(0)
     comp_len = rollout.completion_ids.size(1)
     ref_logprobs = torch.zeros((n, comp_len), dtype=torch.float32)
-    return TrainSample(rollout, rewards, ref_logprobs)
+    return TrainSample(rollout, rewards, ref_logprobs, item_id="test", trainer_version=0)
 
 
 class TestRolloutSampleFromVllm:
@@ -129,8 +129,10 @@ class TestMakeBatch:
 
         batch, stats = make_batch([sample1, sample2], pad_token_id=0)
 
-        # All completions padded to max length (4)
-        assert batch.completion_ids.shape[1] == 4
+        # All completions padded to at least max actual length (4)
+        # Note: bucketing may round up to the nearest bucket, so check >= 4
+        assert batch.completion_ids.shape[1] >= 4
+        assert stats.padded_completion_len >= 4
 
     def test_mask_matches_non_padding(self, mock_vllm_output, mock_vllm_response):
         outputs = [mock_vllm_output([10, 11], "ab"), mock_vllm_output([20], "c")]
@@ -188,13 +190,13 @@ class TestMakeBatch:
         response1 = mock_vllm_response([1], outputs1)
         rollout1 = RolloutSample.from_vllm(response1, pad_token_id=0)
         ref1 = torch.tensor([[0.1], [0.2]])
-        sample1 = TrainSample(rollout1, [1.0, 0.0], ref1)
+        sample1 = TrainSample(rollout1, [1.0, 0.0], ref1, item_id="test1", trainer_version=0)
 
         outputs2 = [mock_vllm_output([20], "c"), mock_vllm_output([21], "d")]
         response2 = mock_vllm_response([2], outputs2)
         rollout2 = RolloutSample.from_vllm(response2, pad_token_id=0)
         ref2 = torch.tensor([[0.3], [0.4]])
-        sample2 = TrainSample(rollout2, [0.8, 0.2], ref2)
+        sample2 = TrainSample(rollout2, [0.8, 0.2], ref2, item_id="test2", trainer_version=0)
 
         batch, stats = make_batch([sample1, sample2], pad_token_id=0)
 
