@@ -538,8 +538,16 @@ def generate_with_vllm(
     tp_size: int,
     max_model_len: int,
     cuda_visible_devices: str | None = None,
+    save_interval: int = 0,
+    output_file: str | None = None,
+    rows_for_replica: list[dict] | None = None,
+    gpu_id: str | None = None,
 ) -> list[list[tuple[str, str, int]]]:
-    """Generate completions with vLLM and return a JSON-serializable structure."""
+    """Generate completions with vLLM and return a JSON-serializable structure.
+
+    If save_interval > 0 and output_file is provided, saves results incrementally
+    every save_interval prompts to a JSONL file (one JSON object per line).
+    """
     if cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     # vLLM spawns its own EngineCore subprocesses; forcing spawn avoids
@@ -559,17 +567,64 @@ def generate_with_vllm(
         trust_remote_code=True,
     )
 
-    outputs = llm.generate(prompts, sp)
+    # If save_interval is set, process in chunks and save incrementally
+    if save_interval > 0 and output_file and rows_for_replica:
+        import json
+        results: list[list[tuple[str, str, int]]] = []
+        jsonl_file = output_file.replace('.json', '.jsonl')
 
-    results: list[list[tuple[str, str, int]]] = []
-    for output in outputs:
-        completions = [(o.text, o.finish_reason, len(o.token_ids)) for o in output.outputs]
-        results.append(completions)
-    return results
+        # Clear/create the output file
+        with open(jsonl_file, 'w') as f:
+            pass
+
+        for chunk_start in range(0, len(prompts), save_interval):
+            chunk_end = min(chunk_start + save_interval, len(prompts))
+            chunk_prompts = prompts[chunk_start:chunk_end]
+            chunk_rows = rows_for_replica[chunk_start:chunk_end]
+
+            print(f"  Replica {gpu_id}: generating prompts {chunk_start+1}-{chunk_end}/{len(prompts)}...")
+            chunk_outputs = llm.generate(chunk_prompts, sp)
+
+            chunk_results = []
+            with open(jsonl_file, 'a') as f:
+                for row, output in zip(chunk_rows, chunk_outputs):
+                    completions = [(o.text, o.finish_reason, len(o.token_ids)) for o in output.outputs]
+                    chunk_results.append(completions)
+
+                    # Write each prompt's results as a JSON line
+                    line = json.dumps({
+                        "prompt_id": row["problem"]["prompt_id"],
+                        "completions": [
+                            {"text": c[0], "finish_reason": c[1], "num_tokens": c[2]}
+                            for c in completions
+                        ]
+                    })
+                    f.write(line + '\n')
+
+            results.extend(chunk_results)
+            print(f"  Replica {gpu_id}: saved {chunk_end} prompts to {jsonl_file}")
+
+        return results
+    else:
+        # Original behavior: process all at once
+        outputs = llm.generate(prompts, sp)
+
+        results: list[list[tuple[str, str, int]]] = []
+        for output in outputs:
+            completions = [(o.text, o.finish_reason, len(o.token_ids)) for o in output.outputs]
+            results.append(completions)
+        return results
 
 
-def worker(gpu_id, prompts, model_path, sampling_params_dict, tp_size, max_model_len, result_queue):
-    """Worker function for each GPU."""
+def worker(gpu_id, prompts, model_path, sampling_params_dict, tp_size, max_model_len, result_queue,
+            output_file=None, rows_for_replica=None, save_interval=0):
+    """Worker function for each GPU.
+
+    If output_file is provided, saves results to disk immediately upon completion
+    (streaming save for crash recovery).
+
+    If save_interval > 0, saves incrementally every save_interval prompts to a JSONL file.
+    """
     results = generate_with_vllm(
         prompts,
         model_path=model_path,
@@ -577,7 +632,36 @@ def worker(gpu_id, prompts, model_path, sampling_params_dict, tp_size, max_model
         tp_size=tp_size,
         max_model_len=max_model_len,
         cuda_visible_devices=str(gpu_id),
+        save_interval=save_interval,
+        output_file=output_file,
+        rows_for_replica=rows_for_replica,
+        gpu_id=gpu_id,
     )
+
+    # Save final JSON file (for backwards compatibility and final summary)
+    if output_file and rows_for_replica:
+        try:
+            import json
+            replica_data = {
+                "gpu_id": gpu_id,
+                "num_prompts": len(prompts),
+                "prompts": [
+                    {
+                        "prompt_id": row["problem"]["prompt_id"],
+                        "completions": [
+                            {"text": c[0], "finish_reason": c[1], "num_tokens": c[2]}
+                            for c in completions
+                        ]
+                    }
+                    for row, completions in zip(rows_for_replica, results)
+                ]
+            }
+            with open(output_file, "w") as f:
+                json.dump(replica_data, f)
+            print(f"  Replica {gpu_id}: saved final {len(results)} prompts to {output_file}")
+        except Exception as e:
+            print(f"  WARNING: Failed to save replica {gpu_id} results: {e}")
+
     result_queue.put((gpu_id, results))
 
 
@@ -704,6 +788,13 @@ def parse_args():
         default=None,
         help="Optional wall-clock timeout for generation (multiprocess backend only).",
     )
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=0,
+        help="Save results every N prompts within each replica (0 = save only at end). "
+             "Useful for very long runs to get intermediate results.",
+    )
 
     # Output
     parser.add_argument(
@@ -722,6 +813,12 @@ def parse_args():
         type=str,
         default=None,
         help="Load completions from file instead of generating (for recovery)",
+    )
+    parser.add_argument(
+        "--completions-dir",
+        type=str,
+        default=None,
+        help="Load completions from replica files in directory (for recovery from crashed runs)",
     )
 
     return parser.parse_args()
@@ -827,6 +924,67 @@ def main():
         total_completions = sum(len(c) for c in outputs_by_idx.values())
         print(f"Loaded {total_completions:,} completions from disk (aligned by prompt_id)")
 
+    elif args.completions_dir:
+        # Load from replica files (crash recovery)
+        # Supports both JSON (full replica) and JSONL (incremental) formats
+        import glob
+        replica_json_files = sorted(glob.glob(f"{args.completions_dir}/*_replica_*.json"))
+        replica_jsonl_files = sorted(glob.glob(f"{args.completions_dir}/*_replica_*.jsonl"))
+
+        if not replica_json_files and not replica_jsonl_files:
+            raise ValueError(f"No replica files found in {args.completions_dir}")
+
+        # Build lookup by prompt_id from all replica files
+        completions_by_prompt_id = {}
+
+        # Load JSON files (full replica format)
+        if replica_json_files:
+            print(f"\nLoading completions from {len(replica_json_files)} JSON replica files...")
+            for replica_file in replica_json_files:
+                print(f"  Loading {replica_file}...")
+                with open(replica_file) as f:
+                    replica_data = json.load(f)
+                for prompt_data in replica_data["prompts"]:
+                    completions_by_prompt_id[prompt_data["prompt_id"]] = [
+                        (c["text"], c["finish_reason"], c["num_tokens"])
+                        for c in prompt_data["completions"]
+                    ]
+
+        # Load JSONL files (incremental format) - may have partial data
+        if replica_jsonl_files:
+            print(f"\nLoading completions from {len(replica_jsonl_files)} JSONL replica files (incremental)...")
+            for replica_file in replica_jsonl_files:
+                print(f"  Loading {replica_file}...")
+                with open(replica_file) as f:
+                    for line in f:
+                        if line.strip():
+                            prompt_data = json.loads(line)
+                            # JSONL may have more recent data, so overwrite
+                            completions_by_prompt_id[prompt_data["prompt_id"]] = [
+                                (c["text"], c["finish_reason"], c["num_tokens"])
+                                for c in prompt_data["completions"]
+                            ]
+
+        # Build outputs_by_idx aligned with rows
+        outputs_by_idx = {}
+        missing_prompts = []
+        for i, row in enumerate(rows):
+            prompt_id = row["problem"]["prompt_id"]
+            if prompt_id in completions_by_prompt_id:
+                outputs_by_idx[i] = completions_by_prompt_id[prompt_id]
+            else:
+                missing_prompts.append(prompt_id)
+                outputs_by_idx[i] = []
+
+        if missing_prompts:
+            print(f"WARNING: {len(missing_prompts)} prompts not found in replica files")
+            print(f"  Missing: {missing_prompts[:5]}{'...' if len(missing_prompts) > 5 else ''}")
+
+        gen_time = 0  # Unknown for recovered files
+        total_completions = sum(len(c) for c in outputs_by_idx.values())
+        num_files = len(replica_json_files) + len(replica_jsonl_files)
+        print(f"Loaded {total_completions:,} completions for {len(completions_by_prompt_id)} prompts from {num_files} replica files")
+
     else:
         # Generate completions
         print("\nFormatting prompts...")
@@ -893,6 +1051,16 @@ def main():
             result_queue = ctx.Queue()
             processes = []
 
+            # Set up output directory for streaming saves (crash recovery)
+            if args.output_dir:
+                streaming_dir = Path(args.output_dir)
+            else:
+                model_name = Path(args.model_path).name.lower()
+                streaming_dir = Path(f"experiments/{model_name}-pass-rate")
+            streaming_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            streaming_prefix = streaming_dir / f"{loader.get_output_prefix()}_{Path(args.model_path).name}_replica"
+
             def _kill_worker_tree(p) -> None:
                 if p.pid is None:
                     return
@@ -919,6 +1087,9 @@ def main():
                 else:
                     gpu_ids = ",".join(str(gpu_id + j) for j in range(tp_size))
 
+                # Each replica saves to its own file immediately on completion
+                replica_output_file = f"{streaming_prefix}_{replica_idx}_{timestamp}.json"
+
                 p = ctx.Process(
                     target=worker,
                     args=(
@@ -929,6 +1100,9 @@ def main():
                         tp_size,
                         args.max_model_len,
                         result_queue,
+                        replica_output_file,
+                        rows_per_replica[replica_idx],
+                        args.save_interval,
                     ),
                 )
                 processes.append(p)
@@ -1444,7 +1618,8 @@ def main():
 
     print("\n" + "=" * 60)
     print(f"Generation time: {gen_time:.1f}s")
-    print(f"Throughput: {total_completions_verified / gen_time:.1f} completions/sec")
+    if gen_time > 0:
+        print(f"Throughput: {total_completions_verified / gen_time:.1f} completions/sec")
     print("=" * 60)
 
     # Prepare output
