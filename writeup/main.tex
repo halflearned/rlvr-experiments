@@ -1,0 +1,229 @@
+\documentclass[11pt]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+% Custom commands
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\loss}{\mathcal{L}}
+
+\title{Reinforcement Learning with Verifiable Rewards:\\
+A Distributed Framework for Multi-Task LLM Fine-Tuning}
+\author{TODO: Authors}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a distributed reinforcement learning framework for fine-tuning large language models using verifiable rewards. Our system implements Group Relative Policy Optimization (GRPO) for training on tasks with automatic verification signals, including mathematical reasoning, code generation, and instruction following. The framework is designed to scale across multi-GPU clusters using PyTorch Titan for distributed training and vLLM for efficient inference. We investigate multi-task training with mixed datasets, staleness tolerance in asynchronous weight synchronization, and learning rate sensitivity across different task types.
+\end{abstract}
+
+%------------------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+%------------------------------------------------------------------------------
+
+Reinforcement learning from human feedback (RLHF) has become a standard approach for aligning large language models with human preferences. However, RLHF relies on learned reward models that can be expensive to train and may introduce biases or reward hacking. An alternative approach is reinforcement learning with verifiable rewards (RLVR), where reward signals come from automatic verification of model outputs.
+
+In this work, we describe a distributed training framework that supports multi-task RLVR training across these domains. Our contributions include:
+\begin{enumerate}
+    \item A scalable distributed architecture separating training, inference, and verification
+    \item Support for mixed-dataset training with variable sequence lengths
+    \item Investigation of staleness tolerance in asynchronous weight synchronization
+    \item Empirical analysis of learning rate sensitivity across task types
+\end{enumerate}
+
+
+%------------------------------------------------------------------------------
+\section{System Architecture}
+\label{sec:architecture}
+%------------------------------------------------------------------------------
+
+Our framework consists of three primary components running as distributed Ray actors, plus a verification system. % TODO: Add architecture diagram
+
+\subsection{Trainer}
+
+The trainer wraps a TorchTitan model and performs gradient updates using GRPO loss. It uses tensor parallelism (TP=2) with activation checkpointing and torch.compile for performance.
+
+\subsection{Inference Models}
+
+We maintain two vLLM instances: a \emph{rollout model} that generates $N$ completions per prompt, and a \emph{reference model} that computes log probabilities for KL divergence. Both sync weights from the trainer asynchronously.
+
+\subsection{Verifiers}
+
+Task-specific verifiers provide binary rewards: \textbf{MathVerifier} extracts boxed answers, \textbf{CodeVerifier} executes against test cases, and \textbf{IFEvalVerifier} checks instruction-following constraints. Verifiers run as a distributed worker pool.
+
+\subsection{Weight Synchronization}
+\label{sec:weight-sync}
+
+A key design decision is how frequently to synchronize weights from the trainer to the inference models. Synchronization is expensive---it requires serializing model state and loading into vLLM---so we allow configurable \emph{staleness}: the inference models may lag behind the trainer by up to $k$ optimization steps.
+
+This creates a tradeoff: fresher weights produce higher-quality rollouts (closer to on-policy), but frequent syncing adds overhead. We parameterize this with \texttt{sync\_frequency} (sync every $n$ steps) and investigate the effect of staleness on training dynamics in \Cref{sec:staleness}.
+
+\paragraph{Dynamic Batching.} To handle variable sequence lengths across tasks (512 tokens for GSM8K, 2048 for IFEval), we bucket sequences by length and use per-bucket micro-batch sizes (64 for short, 8 for long sequences) to maximize GPU utilization without OOM.
+
+
+%------------------------------------------------------------------------------
+\section{Experiments}
+\label{sec:experiments}
+%------------------------------------------------------------------------------
+
+It is often said that the main bottleneck for RLVR is generation. This arises from two sources:
+\begin{enumerate}
+    \item \textbf{On-policy requirement}: Standard policy gradient methods require fresh samples from the current policy, forcing a sequential generate-then-train loop.
+    \item \textbf{Constant-reward waste}: With GRPO, samples with zero reward variance (all correct or all incorrect) provide no gradient signal and are filtered out, wasting generation compute.
+\end{enumerate}ds
+
+We investigate the first bottleneck through a staleness analysis (\Cref{sec:staleness}), and outline future work on the second (\Cref{sec:curriculum}).
+
+When generation is fast relative to training, we can have a lot of build up between optim steps. In this case, staleness can increase training speed.
+When generation is slow relative to training (a more typical case), a major source of waste is filtering.
+
+With a base model, no SFT cold start, the filtering problem can be difficult to overcome.
+
+\subsection{Setup}
+
+We train Qwen3-1.7B-Base on a mixture of GSM8K, MATH, MBPP, and IFEval (see \Cref{app:hyperparams} for dataset details and hyperparameters). We first run a learning rate sweep across $\{10^{-6}, 5 \times 10^{-6}, 10^{-5}\}$ under strict on-policy training (staleness $k=0$) to establish a baseline.
+
+\subsection{Staleness Tolerance}
+\label{sec:staleness}
+
+Allowing staleness improves throughput by letting generation run ahead of training, but may hurt performance by training on off-policy samples. We quantify this tradeoff.
+
+\paragraph{Experimental design.} We vary two parameters: \texttt{max\_staleness} $k \in \{0, 1, 2, 4\}$ (how many optimization steps the rollout model may lag behind the trainer) and \texttt{prompts\_per\_step} $p \in \{4, 8, 16\}$ (batch size per optimization step). We test configurations: $(k, p) \in \{(0, 16), (1, 16), (1, 8), (1, 4), (2, 4), (4, 4)\}$, adjusting learning rate proportionally for smaller batch sizes.
+
+\paragraph{Metrics.} For each configuration, we track:
+\begin{itemize}
+    \item Training dynamics: mean reward, KL divergence from reference, probability ratio $\pi_\theta / \pi_{\text{old}}$, fraction of clipped samples
+    \item Final performance: pass@1 on held-out evaluation sets (GSM8K, MATH, MBPP)
+    \item Throughput: wall-clock time per optimization step
+\end{itemize}
+% TODO: Discuss entropy (policy entropy over training - does it collapse? relationship to exploration/exploitation, entropy bonus in loss?)
+
+\paragraph{Results.}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l|ccccc}
+\toprule
+Configuration & GSM8K & MATH & HumanEval & MBPP & IFEval \\
+$(k, p)$ & (pass@1) & (pass@1) & (pass@1) & (pass@1) & (strict) \\
+\midrule
+Base model & -- & -- & -- & -- & -- \\
+\midrule
+$(0, 16)$ & -- & -- & -- & -- & -- \\
+$(1, 16)$ & -- & -- & -- & -- & -- \\
+$(1, 8)$ & -- & -- & -- & -- & -- \\
+$(1, 4)$ & -- & -- & -- & -- & -- \\
+$(2, 4)$ & -- & -- & -- & -- & -- \\
+$(4, 4)$ & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\caption{Benchmark performance across staleness configurations. $k$: max staleness (optimization steps), $p$: prompts per step.}
+\label{tab:staleness-results}
+\end{table}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=\textwidth]{figures/training_dynamics.pdf}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{2cm}TODO: Training dynamics (reward, KL, clip fraction) over steps\vspace{2cm}}}
+\caption{Training dynamics across staleness configurations. Left: mean reward. Center: KL divergence from reference. Right: fraction of clipped probability ratios.}
+\label{fig:training-dynamics}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=\textwidth]{figures/throughput_mfu.pdf}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1.5cm}TODO: Left: Throughput vs staleness. Right: MFU vs staleness.\vspace{1.5cm}}}
+\caption{Left: Wall-clock time per optimization step as a function of staleness. Higher staleness allows generation to run ahead, improving throughput. Right: Model FLOPs utilization (MFU) for the training step.}
+\label{fig:throughput}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=\textwidth]{figures/output_length.pdf}
+\fbox{\parbox{0.9\textwidth}{\centering\vspace{1.5cm}TODO: Average output length per dataset over training steps\vspace{1.5cm}}}
+\caption{Average completion length over training, broken down by dataset. Longer outputs may indicate more detailed reasoning or verbosity drift.}
+\label{fig:output-length}
+\end{figure}
+
+% TODO: If time, repeat reduced analysis for Qwen3-14B
+
+\subsection{Curriculum Learning (Future Work)}
+\label{sec:curriculum}
+
+A significant fraction of generated samples are filtered due to constant rewards---the prompt is either too easy (all completions correct) or too hard (all incorrect). This represents wasted compute.
+
+One approach is curriculum learning: order training samples by difficulty or ambiguity. We consider two orderings:
+\begin{itemize}
+    \item \textbf{Easy-to-hard}: Sort by pass@$K$ for large $K$ (e.g., $K=512$), training first on prompts the model can sometimes solve.
+    \item \textbf{Ambiguity-first}: Sort by proximity to 50\% pass rate, maximizing expected reward variance and thus gradient signal per sample.
+\end{itemize}
+
+The ambiguity-first ordering is motivated by the observation that GRPO's advantage normalization yields zero gradient when rewards have zero variance. By prioritizing samples near the decision boundary, we minimize filtering waste.
+
+TODO: Preliminary results if time permits.
+
+
+%------------------------------------------------------------------------------
+% References
+%------------------------------------------------------------------------------
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+
+\section{Hyperparameters}
+\label{app:hyperparams}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llcc}
+\toprule
+Dataset & Task Type & Max Length & Weight \\
+\midrule
+GSM8K & Math reasoning & 512 & 0.25 \\
+MATH & Competition math & 1024 & 0.25 \\
+MBPP & Code generation & 512 & 0.10 \\
+IFEval & Instruction following & 2048 & 0.40 \\
+\bottomrule
+\end{tabular}
+\caption{Datasets used in multi-task training.}
+\label{tab:datasets}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+KL coefficient ($\beta$) & 0.05 \\
+Clip coefficient ($\epsilon$) & 0.2 \\
+Completions per prompt ($N$) & 8 \\
+Temperature & 0.6 \\
+Top-p & 0.95 \\
+Top-k & 20 \\
+\bottomrule
+\end{tabular}
+\caption{Training hyperparameters.}
+\label{tab:hyperparams}
+\end{table}
+
+\end{document}

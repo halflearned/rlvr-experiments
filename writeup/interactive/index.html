@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RLVR</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <article>
+        <header>
+            <h1>RLVR Experiments</h1>
+            <p class="subtitle">Subtitle</p>
+        </header>
+
+        <section class="intro">
+            <p> text text </p>
+        </section>
+
+        <section id="system-architecture">
+            <h2>1. System Architecture</h2>
+            <p>TODO: Description of the system architecture.</p>
+        </section>
+
+        <details class="visualization-details" open>
+            <summary>Pipeline animation</summary>
+            <section class="visualization">
+                <div class="controls">
+                    <button id="prev-btn" title="Previous step">&larr;</button>
+                    <input type="range" id="time-slider" min="0" max="100" value="0">
+                    <button id="next-btn" title="Next step">&rarr;</button>
+                    <span id="time-display">0.0s</span>
+                    <button id="play-btn" title="Play/Pause">&#9654;</button>
+                </div>
+
+                <div class="graphs">
+                    <div class="graph-container">
+                        <h3>Pipeline Timeline</h3>
+                        <canvas id="timeline-canvas"></canvas>
+                    </div>
+
+                    <div class="graph-container">
+                        <h3>Buffer Dynamics</h3>
+                        <canvas id="buffer-canvas"></canvas>
+                    </div>
+
+                    <div class="graph-container">
+                        <h3>Sample Fates</h3>
+                        <canvas id="fates-canvas"></canvas>
+                    </div>
+                </div>
+
+                <div class="legend">
+                    <div class="legend-item"><span class="color-box" style="background: #3fb950;"></span> Generation</div>
+                    <div class="legend-item"><span class="color-box" style="background: #58a6ff;"></span> Reference</div>
+                    <div class="legend-item"><span class="color-box" style="background: #a371f7;"></span> Training</div>
+                    <div class="legend-item"><span class="color-box" style="background: #f0883e;"></span> Verifier</div>
+                    <div class="legend-item"><span class="color-box" style="background: #f85149;"></span> Sync Event</div>
+                </div>
+            </section>
+        </details>
+
+
+        <section id="experiments">
+            <h2>2. Experiments</h2>
+
+            <section id="staleness">
+                <h3>2.1 Staleness</h3>
+                <p> text text </p>
+                <!-- Combined staleness diagrams (collapsible) -->
+                <details class="staleness-details" open>
+                    <summary>Staleness diagrams</summary>
+                    <div class="staleness-diagrams-combined">
+                        <div class="diagrams-stack">
+                        <svg viewBox="0 0 380 330" xmlns="http://www.w3.org/2000/svg">
+                            <!-- Background -->
+                            <rect width="380" height="330" fill="#fafafa"/>
+
+                            <!-- Shared row labels (left side) -->
+                            <text x="8" y="52" font-family="Roboto, sans-serif" font-size="9" fill="#666">Trainer</text>
+                            <text x="8" y="72" font-family="Roboto, sans-serif" font-size="9" fill="#666">Rollout</text>
+                            <text x="8" y="92" font-family="Roboto, sans-serif" font-size="9" fill="#666">Accepts</text>
+
+                            <!-- ===== DIAGRAM 1: Strict on-policy ===== -->
+                            <g transform="translate(0, 10)">
+                                <!-- Grid lines -->
+                                <g stroke="#e0e0e0" stroke-width="0.5">
+                                    <line x1="55" y1="30" x2="55" y2="95"/>
+                                    <line x1="165" y1="30" x2="165" y2="95"/>
+                                    <line x1="275" y1="30" x2="275" y2="95"/>
+                                </g>
+
+                                <!-- Trainer row: v0, v1 -->
+                                <rect x="55" y="40" width="110" height="16" rx="2" fill="#a371f7"/>
+                                <text x="110" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="165" y="40" width="110" height="16" rx="2" fill="#8b5cf6"/>
+                                <text x="220" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v1</text>
+
+                                <!-- Rollout row -->
+                                <rect x="55" y="58" width="110" height="16" rx="2" fill="#3fb950"/>
+                                <text x="110" y="69" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="165" y="58" width="110" height="16" rx="2" fill="#22c55e"/>
+                                <text x="220" y="69" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v1</text>
+
+                                <!-- Accepts row -->
+                                <rect x="55" y="76" width="110" height="16" rx="2" fill="#58a6ff"/>
+                                <text x="110" y="87" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="165" y="76" width="110" height="16" rx="2" fill="#3b82f6"/>
+                                <text x="220" y="87" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v1</text>
+
+                                <!-- Sync annotation -->
+                                <line x1="165" y1="35" x2="165" y2="95" stroke="#22c55e" stroke-width="1.5"/>
+                                <text x="165" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#22c55e" text-anchor="middle">sync+optim</text>
+                            </g>
+
+                            <!-- ===== DIAGRAM 2: With staleness=1 ===== -->
+                            <g transform="translate(0, 115)">
+                                <!-- Grid lines -->
+                                <g stroke="#e0e0e0" stroke-width="0.5">
+                                    <line x1="55" y1="30" x2="55" y2="95"/>
+                                    <line x1="110" y1="30" x2="110" y2="95"/>
+                                    <line x1="165" y1="30" x2="165" y2="95"/>
+                                    <line x1="220" y1="30" x2="220" y2="95"/>
+                                    <line x1="275" y1="30" x2="275" y2="95"/>
+                                </g>
+
+                                <!-- Trainer row: v0, v1, v2, v3 -->
+                                <rect x="55" y="40" width="55" height="16" rx="2" fill="#a371f7"/>
+                                <text x="82" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="110" y="40" width="55" height="16" rx="2" fill="#8b5cf6"/>
+                                <text x="137" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v1</text>
+                                <rect x="165" y="40" width="55" height="16" rx="2" fill="#7c3aed"/>
+                                <text x="192" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v2</text>
+                                <rect x="220" y="40" width="55" height="16" rx="2" fill="#6d28d9"/>
+                                <text x="247" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v3</text>
+
+                                <!-- Rollout row: v0, v2 -->
+                                <rect x="55" y="58" width="110" height="16" rx="2" fill="#3fb950"/>
+                                <text x="110" y="69" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="165" y="58" width="110" height="16" rx="2" fill="#22c55e"/>
+                                <text x="220" y="69" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v2</text>
+
+                                <!-- Accepts row -->
+                                <rect x="55" y="76" width="55" height="16" rx="2" fill="#58a6ff"/>
+                                <text x="82" y="87" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="110" y="76" width="55" height="16" rx="2" fill="#3b82f6"/>
+                                <text x="137" y="87" font-family="Roboto, sans-serif" font-size="7" fill="white" text-anchor="middle" font-weight="500">v0,v1</text>
+                                <rect x="165" y="76" width="55" height="16" rx="2" fill="#2563eb"/>
+                                <text x="192" y="87" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v2</text>
+                                <rect x="220" y="76" width="55" height="16" rx="2" fill="#1d4ed8"/>
+                                <text x="247" y="87" font-family="Roboto, sans-serif" font-size="7" fill="white" text-anchor="middle" font-weight="500">v2,v3</text>
+
+                                <!-- Annotations -->
+                                <line x1="110" y1="35" x2="110" y2="95" stroke="#a371f7" stroke-width="1.5"/>
+                                <text x="110" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#a371f7" text-anchor="middle">optim</text>
+                                <line x1="165" y1="35" x2="165" y2="95" stroke="#22c55e" stroke-width="1.5"/>
+                                <text x="165" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#22c55e" text-anchor="middle">sync+optim</text>
+                                <line x1="220" y1="35" x2="220" y2="95" stroke="#a371f7" stroke-width="1.5"/>
+                                <text x="220" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#a371f7" text-anchor="middle">optim</text>
+                                <line x1="275" y1="35" x2="275" y2="95" stroke="#22c55e" stroke-width="1.5"/>
+                                <text x="275" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#22c55e" text-anchor="middle">sync+optim</text>
+                            </g>
+
+                            <!-- ===== DIAGRAM 3: Starvation ===== -->
+                            <g transform="translate(0, 220)">
+                                <!-- Grid lines -->
+                                <g stroke="#e0e0e0" stroke-width="0.5">
+                                    <line x1="55" y1="30" x2="55" y2="95"/>
+                                    <line x1="110" y1="30" x2="110" y2="95"/>
+                                    <line x1="165" y1="30" x2="165" y2="95"/>
+                                    <line x1="220" y1="30" x2="220" y2="95"/>
+                                    <line x1="275" y1="30" x2="275" y2="95"/>
+                                </g>
+
+                                <!-- Trainer row: v0, v1 then nothing -->
+                                <rect x="55" y="40" width="55" height="16" rx="2" fill="#a371f7"/>
+                                <text x="82" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="110" y="40" width="55" height="16" rx="2" fill="#8b5cf6"/>
+                                <text x="137" y="51" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v1</text>
+
+                                <!-- Rollout row: v0 then nothing -->
+                                <rect x="55" y="58" width="110" height="16" rx="2" fill="#3fb950"/>
+                                <text x="110" y="69" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+
+                                <!-- Accepts row: v0, then DEADLOCK -->
+                                <rect x="55" y="76" width="55" height="16" rx="2" fill="#58a6ff"/>
+                                <text x="82" y="87" font-family="Roboto, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="500">v0</text>
+                                <rect x="110" y="76" width="55" height="16" rx="2" fill="#f85149" fill-opacity="0.2" stroke="#f85149" stroke-width="1.5" stroke-dasharray="3,2"/>
+                                <text x="137" y="87" font-family="Roboto, sans-serif" font-size="7" fill="#f85149" text-anchor="middle" font-weight="500">DEAD</text>
+
+                                <!-- Annotation -->
+                                <line x1="110" y1="35" x2="110" y2="95" stroke="#f85149" stroke-width="1.5"/>
+                                <text x="110" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#f85149" text-anchor="middle">optim→deadlock</text>
+
+                                <!-- Time axis (only on bottom diagram) -->
+                                <line x1="40" y1="100" x2="285" y2="100" stroke="#999" stroke-width="0.5"/>
+                                <text x="55" y="108" font-family="Roboto, sans-serif" font-size="7" fill="#999" text-anchor="middle">0</text>
+                                <text x="110" y="108" font-family="Roboto, sans-serif" font-size="7" fill="#999" text-anchor="middle">8</text>
+                                <text x="165" y="108" font-family="Roboto, sans-serif" font-size="7" fill="#999" text-anchor="middle">16</text>
+                                <text x="220" y="108" font-family="Roboto, sans-serif" font-size="7" fill="#999" text-anchor="middle">24</text>
+                                <text x="275" y="108" font-family="Roboto, sans-serif" font-size="7" fill="#999" text-anchor="middle">32</text>
+                            </g>
+                        </svg>
+                    </div>
+                    <div class="diagrams-captions">
+                        <div class="diagram-caption-item">
+                            <strong>Strict on-policy</strong><br>
+                            <code>staleness=0, optim=16, sync=16</code><br>
+                            All advance together. No starvation, but no parallelism.
+                        </div>
+                        <div class="diagram-caption-item">
+                            <strong>With staleness</strong><br>
+                            <code>staleness=1, optim=8, sync=16</code><br>
+                            Trainer advances every 8. Rollout syncs to v2 at t=16. No v1 data, but no starvation.
+                        </div>
+                        <div class="diagram-caption-item">
+                            <strong>Starvation</strong><br>
+                            <code>staleness=0, optim=8, sync=16</code><br>
+                            At t=8, trainer needs v1 but rollout is at v0 → deadlock.
+                        </div>
+                    </div>
+                </details>
+
+                <h4>Results</h4>
+                <div class="results-table-container">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th>prompts_per_optim_step</th>
+                                <th>max_staleness</th>
+                                <th>GSM8K</th>
+                                <th>MATH</th>
+                                <th>MBPP</th>
+                                <th>IFEval</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="baseline-row">
+                                <td colspan="2" class="row-label">Base model</td>
+                                <td>64.6</td>
+                                <td>17.7</td>
+                                <td>55.8</td>
+                                <td>22.0</td>
+                            </tr>
+                            <tr>
+                                <td>16</td>
+                                <td>0</td>
+                                <td>68.7</td>
+                                <td>17.2</td>
+                                <td>55.0</td>
+                                <td>25.9</td>
+                            </tr>
+                            <tr>
+                                <td>16</td>
+                                <td>1</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                            </tr>
+                            <tr>
+                                <td>8</td>
+                                <td>1</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p class="table-caption"><strong>Table 1.</strong> Benchmark performance across staleness configurations. Model: Qwen3-1.7B-Base.</p>
+                </div>
+            </section>
+
+            <section id="curriculum">
+                <h3>2.2 Curriculum Learning</h3>
+                <p>
+                    A significant fraction of generated samples are filtered due to constant rewards&mdash;the prompt
+                    is either too easy (all completions correct) or too hard (all incorrect). This represents wasted
+                    compute. Curriculum learning addresses this by ordering training samples by difficulty.
+                </p>
+
+                <h4>Measuring Difficulty via Pass@k</h4>
+                <p>
+                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
+                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
+                    solves it), while high pass@k indicates an "easy" prompt.
+                </p>
+
+                <div class="results-table-container">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th>Dataset</th>
+                                <th>Prompts</th>
+                                <th>pass@1</th>
+                                <th>pass@8</th>
+                                <th>pass@64</th>
+                                <th>pass@256</th>
+                                <th>pass@512</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>GSM8K</td>
+                                <td>7,473</td>
+                                <td>75.0%</td>
+                                <td>95.6%</td>
+                                <td>99.2%</td>
+                                <td>99.7%</td>
+                                <td>99.8%</td>
+                            </tr>
+                            <tr>
+                                <td>MATH (L3-5)</td>
+                                <td>5,584</td>
+                                <td>29.7%</td>
+                                <td>57.4%</td>
+                                <td>76.5%</td>
+                                <td>82.3%</td>
+                                <td>84.0%</td>
+                            </tr>
+                            <tr>
+                                <td>MBPP</td>
+                                <td>374</td>
+                                <td>26.6%</td>
+                                <td>54.8%</td>
+                                <td>78.6%</td>
+                                <td>87.2%</td>
+                                <td>89.6%</td>
+                            </tr>
+                            <tr>
+                                <td>IFEval</td>
+                                <td>3,200</td>
+                                <td>7.6%</td>
+                                <td>16.5%</td>
+                                <td>23.4%</td>
+                                <td>26.0%</td>
+                                <td>27.0%</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
+                </div>
+
+                <p>
+                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
+                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
+                    in ascending order (hard-to-easy).
+                </p>
+
+                <h4>Results</h4>
+                <p>TODO: Curriculum vs random ordering comparison.</p>
+            </section>
+        </section>
+    </article>
+
+    <script src="viewer.js"></script>
+</body>
+</html>
