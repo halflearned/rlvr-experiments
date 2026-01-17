@@ -2,6 +2,23 @@
 
 Notes for AI agents working on this codebase.
 
+## General Guidelines
+
+### Long-Running Commands
+When running commands that take minutes (evals, training, etc.), always:
+1. **Log to a temp file** - Use `tee /tmp/<descriptive_name>.log` to capture stdout/stderr
+2. **Let the user monitor progress** - They can `tail -f` the log file
+3. **Avoid losing output** - Don't rely on small `tail -N` values that might miss results
+
+Example:
+```bash
+lm_eval --model vllm ... 2>&1 | tee /tmp/eval_gsm8k_base.log
+```
+
+### Package Management
+- Use `uv add <package>` to add dependencies (updates pyproject.toml)
+- Do NOT use `uv pip install` for persistent dependencies
+
 ## SageMaker Job Submission
 
 ### Required IAM Permissions
@@ -141,6 +158,31 @@ The launcher maps HF-style paths to S3:
 
 Note: The current `sagemaker_launcher.py` always tries S3 first for paths with `/`. To use HF Hub directly, either use the full HF path or modify the launcher.
 
+### Checkpoints and Traces
+
+On SageMaker, checkpoints and trace files are uploaded directly to S3 as training progresses (not saved to MODEL_DIR). This avoids waiting for job completion to access results.
+
+**S3 checkpoint location:**
+```
+s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/{job_name}/{run_name}_step{N}/
+s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/{job_name}/{run_name}_final/
+```
+
+**S3 traces location:**
+```
+s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/{job_name}/traces/
+```
+
+**To download a checkpoint:**
+```bash
+# List available checkpoints for a job
+aws s3 ls s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/annotations-adhoc-20260117-041250/
+
+# Download a specific checkpoint
+aws s3 sync s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/annotations-adhoc-20260117-041250/mixed_lr1e5_curriculum_final/ \
+    /efs/rlvr-experiments/checkpoints/mixed_lr1e5_curriculum_final/
+```
+
 ### Datasets
 
 SageMaker instances in the VPC cannot access HuggingFace Hub. Datasets are pre-cached to S3 and the data loaders (`src/rlvr_experiments/data.py`) automatically load from S3 first, falling back to HuggingFace Hub if S3 is unavailable.
@@ -168,6 +210,34 @@ aws s3 sync /tmp/dataset_train_cache s3://sagemaker-us-west-2-503561457547/rlvr-
 ```
 
 Then update the loader in `data.py` to check S3 first (see existing loaders for pattern).
+
+### Curriculum / Order Files
+
+For curriculum learning, you can specify an `order` file in the data config that lists prompt IDs in the desired order. These files must be accessible from SageMaker, so use S3 paths:
+
+**Config example:**
+```yaml
+data:
+  dataset: mixed
+  datasets:
+    - name: gsm8k
+      weight: 0.25
+      order: "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/gsm8k_curriculum.txt"
+```
+
+**S3 curriculum location:**
+```
+s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/
+```
+
+**To upload curriculum files:**
+```bash
+# Upload from local experiments directory
+aws s3 sync /efs/rlvr-experiments/experiments/curricula/ \
+    s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/
+```
+
+The `load_mixed` function in `data.py` handles S3 paths automatically by downloading to a temp file before reading.
 
 ### Common Issues
 
@@ -290,3 +360,84 @@ lm_eval --model vllm \
    mv model.safetensors model-00001-of-00001.safetensors
    ```
 
+## Qwen3-1.7B-Base Evaluation Baselines
+
+Reference scores for comparing trained checkpoints. All evals: seed=42, temperature=0, greedy decoding, vLLM backend.
+
+**Commands used to generate these baselines:**
+```bash
+# GSM8K 0-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks gsm8k --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 0
+
+# GSM8K 4-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks gsm8k --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 4
+
+# GSM8K 8-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks gsm8k --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 8
+
+# hendrycks_math 4-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks hendrycks_math --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 4
+
+# IFEval 0-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks ifeval --batch_size auto --seed 42 --gen_kwargs temperature=0
+
+# MBPP 3-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks mbpp --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 3 --confirm_run_unsafe_code
+
+# HumanEval 0-shot
+lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks humaneval --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 0 --confirm_run_unsafe_code
+```
+
+### GSM8K (Math Reasoning)
+
+| Setting | flexible-extract | strict-match |
+|---------|------------------|--------------|
+| 0-shot  | 14.71%           | 0.00%        |
+| 4-shot  | 67.48%           | 59.14%       |
+| 8-shot  | 69.60%           | 68.92%       |
+
+### MATH (hendrycks_math, 4-shot)
+
+| Metric | Value |
+|--------|-------|
+| Overall exact_match | **17.68%** |
+
+### IFEval (Instruction Following, 0-shot)
+
+| Metric | Value |
+|--------|-------|
+| prompt_level_strict_acc | 22.00% |
+| inst_level_strict_acc | 33.81% |
+
+### Code Generation
+
+| Benchmark | Setting | pass@1 |
+|-----------|---------|--------|
+| MBPP      | 3-shot  | 55.8%  |
+| HumanEval | 0-shot  | 48.78% |
+
+## MBPP Training Notes
+
+### Prompt Format
+Uses lm_eval-compatible format:
+```
+You are an expert Python programmer, and here is your task: {problem_description} Your code should pass these tests:
+
+{test_case_1}
+{test_case_2}
+{test_case_3}
+[BEGIN]
+```
+
+Model generates code, stops at `[DONE]` token.
+
+### Code Extraction
+The verifier (`extract_code_from_markdown()`) handles:
+- Markdown code blocks (```python ... ```)
+- Trailing ``` from incomplete blocks
+- [DONE] markers
+
+### Verifier
+- Runs generated code + test assertions in isolated subprocess
+- 5 second timeout per verification
+- Binary reward: 1.0 if all tests pass, 0.0 otherwise

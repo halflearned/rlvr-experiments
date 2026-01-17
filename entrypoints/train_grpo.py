@@ -19,7 +19,7 @@ from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
-from rlvr_experiments.utils import set_seed
+from rlvr_experiments.utils import set_seed, get_checkpoint_dir, upload_checkpoint_to_s3, cleanup_local_checkpoint
 from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier, IFEvalVerifier, MultiVerifier
 
 DATASETS = {
@@ -130,7 +130,7 @@ async def main():
     max_steps = plan.training.get("max_steps")
     abort_in_flight = plan.training.get("abort_in_flight", True)
     checkpoint_interval = plan.training.get("checkpoint_interval", 50)
-    checkpoint_dir = os.environ.get("SM_MODEL_DIR", "/efs/rlvr-experiments/checkpoints")
+    checkpoint_dir, use_s3_checkpoints = get_checkpoint_dir()
 
     # Batching
     schedule = _compute_schedule(plan.training)
@@ -472,6 +472,9 @@ async def main():
                 ckpt_path = os.path.join(checkpoint_dir, f"{run_name}_step{trainer.version}")
                 print(f"[step {trainer.version}] Saving checkpoint to {ckpt_path}")
                 await trainer.export_to_hf(ckpt_path)
+                if use_s3_checkpoints:
+                    upload_checkpoint_to_s3(ckpt_path, run_name, f"step{trainer.version}", runtime.trace_dir)
+                    cleanup_local_checkpoint(ckpt_path)
 
             # Reset accumulation
             accum_count = 0
@@ -497,6 +500,9 @@ async def main():
     final_ckpt_path = os.path.join(checkpoint_dir, f"{run_name}_final")
     print(f"Saving final checkpoint to {final_ckpt_path}")
     await trainer.export_to_hf(final_ckpt_path)
+    if use_s3_checkpoints:
+        upload_checkpoint_to_s3(final_ckpt_path, run_name, "final", runtime.trace_dir)
+        cleanup_local_checkpoint(checkpoint_dir)
 
     # Run summary
     run_elapsed = time.perf_counter() - run_start_time

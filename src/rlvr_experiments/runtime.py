@@ -61,17 +61,28 @@ class Runtime:
         """Access the global tracer (if configured)."""
         return get_tracer()
 
+    @property
+    def trace_dir(self) -> str:
+        """Get directory containing trace files."""
+        tracer = self.tracer
+        if tracer and tracer.path:
+            return os.path.dirname(tracer.path) or "."
+        return ""
+
     @classmethod
     async def from_plan(cls, plan_path: str) -> "Runtime":
         import os
 
         plan = load_plan(plan_path)
 
-        # Initialize tracing - use SM_MODEL_DIR for SageMaker, otherwise config or default
-        # On SageMaker, SM_MODEL_DIR is /opt/ml/model which gets uploaded to S3 after training
+        # Initialize tracing - use temp dir for SageMaker (will be uploaded to S3 by train script)
+        # otherwise use config or default local path
+        import tempfile
         model_dir = os.environ.get("SM_MODEL_DIR")
         if model_dir:
-            default_trace_path = os.path.join(model_dir, "traces", "trace.jsonl")
+            # SageMaker: use temp directory, traces will be uploaded to S3 alongside checkpoints
+            trace_base = tempfile.mkdtemp(prefix="traces_")
+            default_trace_path = os.path.join(trace_base, "trace.jsonl")
         else:
             default_trace_path = "traces/trace.jsonl"
         trace_path = getattr(plan, "trace_path", None) or default_trace_path
