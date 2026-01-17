@@ -13,12 +13,15 @@ def extract_code_from_markdown(text: str) -> str:
 
     Also handles:
     - Trailing ``` (model closing a code block started by assistant_prefix)
+    - ``` followed by text (model adding explanation after code)
     - [DONE] markers (lm_eval MBPP format)
     """
     for pattern in [r'```(?:python|py)\s*\n(.*?)```', r'```\s*\n(.*?)```']:
         blocks = re.findall(pattern, text, re.DOTALL)
         if blocks:
             return '\n\n'.join(b.strip() for b in blocks)
+    # Strip ``` and anything after it (model closing code block, possibly with explanation)
+    text = re.sub(r'\n```[\s\S]*$', '', text)
     # Strip trailing ``` if present (model closing a code block started by assistant_prefix)
     text = re.sub(r'\s*```\s*$', '', text)
     # Strip [DONE] marker (lm_eval MBPP format)
