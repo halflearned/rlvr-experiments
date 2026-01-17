@@ -17,13 +17,16 @@ def _hash_prompt(prompt: str) -> str:
 # These can be overridden by config, but provide sensible defaults for mixed training.
 
 # GSM8K: Grade school math, shorter reasoning chains
-GSM8K_SYSTEM_PROMPT = "Solve the following math problem and provide the final answer inside \\boxed{}"
-GSM8K_ASSISTANT_PREFIX = "Let's think step by step."
+# Format: "Q: ... A:" to match lm-evaluation-harness (no system prompt, no \boxed{})
+# Model should output reasoning then "The answer is X."
+GSM8K_SYSTEM_PROMPT = ""
+GSM8K_ASSISTANT_PREFIX = ""
 GSM8K_MAX_COMPLETION_LEN = 512
 
 # MATH: Competition math, longer reasoning needed
-MATH_SYSTEM_PROMPT = "Solve the following math problem and provide the final answer inside \\boxed{}"
-MATH_ASSISTANT_PREFIX = "Let's think step by step."
+# Format: "Problem: ... Solution:" to match lm-evaluation-harness (uses \boxed{})
+MATH_SYSTEM_PROMPT = ""
+MATH_ASSISTANT_PREFIX = ""
 MATH_MAX_COMPLETION_LEN = 1024
 
 # Code datasets
@@ -72,16 +75,21 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     if use_local_cache:
         from datasets import Dataset
         hf_dataset = Dataset.load_from_disk(local_cache)
-        ds = ray.data.from_items(list(hf_dataset))
+        items = list(hf_dataset)
     else:
         hf_dataset = load_dataset("openai/gsm8k", "main", split=split)
-        ds = ray.data.from_huggingface(hf_dataset)
+        items = list(hf_dataset)
+
+    # Add index to each item for deterministic prompt_id
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
 
     def preprocess(row):
-        question = f"\n\nProblem:{row['question'].strip()}"
+        # Format: "Q: ... A:" to match lm-evaluation-harness GSM8K format
+        question = f"Q: {row['question'].strip()}\nA:"
         answer = row["answer"].split("####")[-1].strip()
-        # GSM8K doesn't have task_id, so use hash of question
-        prompt_id = f"gsm8k_{_hash_prompt(question)}"
+        # Use numeric index for prompt_id
+        prompt_id = f"gsm8k_{row['_idx']}"
         return {
             "prompt": question,
             "problem": {
@@ -299,12 +307,27 @@ def load_math(
         level_strs = {f"Level {l}" for l in level}
         all_rows = [row for row in all_rows if row["level"] in level_strs]
 
-    ds = ray.data.from_items(all_rows)
+    # Add index to each item for deterministic prompt_id
+    # Group by subject for more interpretable IDs
+    subject_counters = {}
+    indexed_rows = []
+    for row in all_rows:
+        subject = row["type"].lower()
+        if subject not in subject_counters:
+            subject_counters[subject] = 0
+        row["_subject"] = subject
+        row["_subject_idx"] = subject_counters[subject]
+        subject_counters[subject] += 1
+        indexed_rows.append(row)
+
+    ds = ray.data.from_items(indexed_rows)
 
     def preprocess(row):
-        question = f"\n\nProblem:{row['problem'].strip()}"
-        # Store full solution - math_verify extracts from \boxed{} automatically
-        prompt_id = f"math_{row['type']}_{_hash_prompt(question)}"
+        # Format: "Problem: ... Solution:" to match lm-evaluation-harness MATH format
+        # Model should output reasoning with final answer in \boxed{}
+        question = f"Problem: {row['problem'].strip()}\nSolution:"
+        # Use subject + index for prompt_id (e.g., math_algebra_0)
+        prompt_id = f"math_{row['_subject']}_{row['_subject_idx']}"
         return {
             "prompt": question,
             "problem": {
@@ -464,10 +487,14 @@ def load_ifeval(split: str = "train") -> ray.data.Dataset:
     if use_local_cache:
         from datasets import Dataset
         hf_dataset = Dataset.load_from_disk(local_cache)
-        ds = ray.data.from_items(list(hf_dataset))
+        items = list(hf_dataset)
     else:
         hf_dataset = load_dataset("allenai/RLVR-IFeval", split=split)
-        ds = ray.data.from_huggingface(hf_dataset)
+        items = list(hf_dataset)
+
+    # Add index to each item for deterministic prompt_id
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
 
     def preprocess(row):
         # Extract user message content from messages list
@@ -478,8 +505,8 @@ def load_ifeval(split: str = "train") -> ray.data.Dataset:
                 user_content = msg["content"]
                 break
 
-        # Use hash of prompt as ID since dataset doesn't have explicit IDs
-        prompt_id = f"ifeval_{_hash_prompt(user_content)}"
+        # Use numeric index for prompt_id
+        prompt_id = f"ifeval_{row['_idx']}"
 
         return {
             "prompt": user_content,
@@ -556,7 +583,7 @@ def load_mixed(
     - split: Split to load (default: "train")
     - weight: Sampling probability weight for weighted mode (default: 1.0)
     - count: Number of samples to take for sequential mode (default: all)
-    - order_file: Path to file with line-separated prompt_ids for priority ordering
+    - order: Path to file with line-separated prompt_ids for priority ordering
     - **kwargs: Additional args passed to the loader (e.g., level for MATH)
 
     Args:
@@ -597,6 +624,7 @@ def load_mixed(
             - name: mbpp
               count: 200
     """
+    import os
     import random
 
     if not datasets:
@@ -625,7 +653,7 @@ def load_mixed(
             )
 
         # Extract loader kwargs (everything except our special keys)
-        special_keys = ("name", "weight", "count", "order_file")
+        special_keys = ("name", "weight", "count", "order")
         loader_kwargs = {k: v for k, v in ds_config.items() if k not in special_keys}
 
         # Load the dataset
@@ -637,14 +665,25 @@ def load_mixed(
         row_by_id = {row["problem"]["prompt_id"]: row for row in rows}
 
         # Build ordered prompt_id list for this dataset
-        order_file = ds_config.get("order_file")
-        if order_file:
+        order = ds_config.get("order")
+        if order:
             # Use explicit order from file, filtering to valid IDs
-            with open(order_file, "r") as f:
-                file_order = [line.strip() for line in f if line.strip()]
+            # Handle S3 paths
+            if order.startswith("s3://"):
+                import subprocess
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tmp:
+                    tmp_path = tmp.name
+                subprocess.run(["aws", "s3", "cp", order, tmp_path, "--quiet"], check=True)
+                with open(tmp_path, "r") as f:
+                    file_order = [line.strip() for line in f if line.strip()]
+                os.remove(tmp_path)
+            else:
+                with open(order, "r") as f:
+                    file_order = [line.strip() for line in f if line.strip()]
             ordered_ids = [pid for pid in file_order if pid in row_by_id]
             if not ordered_ids:
-                raise ValueError(f"Order file {order_file} has no valid prompt_ids for {name}")
+                raise ValueError(f"Order file {order} has no valid prompt_ids for {name}")
             print(f"[load_mixed] {name}: using order file with {len(ordered_ids)}/{len(file_order)} valid IDs")
         else:
             # No order file -> shuffle
@@ -760,7 +799,7 @@ class DataIterator:
         tokenizer,
         system_prompt: str = "",
         assistant_prefix: str = "",
-        order: list[str] | None = None,
+        order: list[str] | str | None = None,
     ):
         self.ds = ds
         self.tokenizer = tokenizer
@@ -772,6 +811,14 @@ class DataIterator:
         self._epoch_started = False
         # Status tracking: prompt_id -> "pending" | "in_flight" | "done" | "failed"
         self._status: dict[str, str] = {}
+
+        # Load order from file if it's a string path
+        if isinstance(order, str):
+            print(f"[DataIterator] Loading prompt order from: {order}")
+            with open(order, "r") as f:
+                order = [line.strip() for line in f if line.strip()]
+            print(f"[DataIterator] Loaded {len(order)} prompt_ids from order file")
+
         # Ordered list of prompt_ids for iteration (determines priority)
         # Items at the front are processed first
         # Items not in order are ignored (not processed)
@@ -783,6 +830,9 @@ class DataIterator:
                 raise ValueError("order contains no valid prompt_ids")
             # Store explicit order to preserve across new_epoch calls
             self._explicit_order: list[str] | None = list(self._order)
+            skipped = len(order) - len(self._order)
+            if skipped > 0:
+                print(f"[DataIterator] Note: {skipped} prompt_ids from order not found in dataset")
         else:
             self._order: list[str] = list(self._prompt_id_index.keys())
             self._explicit_order = None

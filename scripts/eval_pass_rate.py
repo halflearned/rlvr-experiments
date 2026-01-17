@@ -29,7 +29,7 @@ from datasets import load_dataset
 from vllm import LLM, SamplingParams
 
 from rlvr_experiments.verifiers.math import MathVerifier
-from rlvr_experiments.verifiers.code import MBPPVerifier
+from rlvr_experiments.verifiers.code import MBPPVerifier, APPSStdinVerifier, APPSFunctionVerifier
 from rlvr_experiments.verifiers.code_executor import CodeExecutor, ExecutorConfig
 from rlvr_experiments.verifiers.ifeval import IFEvalVerifier
 
@@ -88,6 +88,10 @@ class DatasetLoader(ABC):
 
     def is_code_dataset(self) -> bool:
         """Return True if this is a code dataset requiring execution-based verification."""
+        return False
+
+    def is_apps_dataset(self) -> bool:
+        """Return True if this is the APPS dataset."""
         return False
 
 
@@ -300,8 +304,15 @@ class APPSLoader(DatasetLoader):
         self.split = split
         self.difficulty = difficulty  # None means all, or "introductory", "interview", "competition"
 
+    def is_apps_dataset(self) -> bool:
+        return True
+
     def load_and_sample(self, num_prompts: int, seed: int, **kwargs) -> list[dict]:
         print(f"Loading APPS {self.split} split (using parquet revision)...")
+        # Increase int string conversion limit for APPS (some test cases have very large numbers)
+        import sys
+        sys.set_int_max_str_digits(0)  # Remove limit
+
         # Load from parquet revision to avoid script-based loader issues
         hf_dataset = load_dataset(
             "codeparrot/apps",
@@ -310,6 +321,8 @@ class APPSLoader(DatasetLoader):
         )
 
         all_rows = []
+        format_counts = {"stdin": 0, "function_call": 0, "skipped": 0}
+
         for i, row in enumerate(hf_dataset):
             # Filter by difficulty if specified
             if self.difficulty and row['difficulty'] != self.difficulty:
@@ -319,8 +332,29 @@ class APPSLoader(DatasetLoader):
             try:
                 input_output = json.loads(row['input_output']) if row['input_output'] else {}
                 solutions = json.loads(row['solutions']) if row['solutions'] else []
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError):
+                # Skip problems with malformed JSON or large number issues
+                format_counts["skipped"] += 1
                 continue
+
+            inputs = input_output.get('inputs', [])
+            outputs = input_output.get('outputs', [])
+            if not inputs or not outputs:
+                format_counts["skipped"] += 1
+                continue  # No test cases
+
+            # Determine format: stdin (string inputs) vs function-call (list inputs)
+            if isinstance(inputs[0], str):
+                problem_format = "stdin"
+                format_counts["stdin"] += 1
+            else:
+                # Function-call format requires fn_name
+                fn_name = input_output.get('fn_name', '')
+                if not fn_name:
+                    format_counts["skipped"] += 1
+                    continue
+                problem_format = "function_call"
+                format_counts["function_call"] += 1
 
             prompt_id = f"apps_{row['problem_id']}"
 
@@ -334,6 +368,7 @@ class APPSLoader(DatasetLoader):
                     "difficulty": row['difficulty'],
                     "starter_code": row.get('starter_code', ''),
                     "url": row.get('url', ''),
+                    "format": problem_format,  # Track format for verification
                 },
             })
 
@@ -341,6 +376,8 @@ class APPSLoader(DatasetLoader):
             print(f"Loaded {len(all_rows)} {self.difficulty} problems from APPS {self.split}")
         else:
             print(f"Loaded {len(all_rows)} problems from APPS {self.split}")
+
+        print(f"Format distribution: {format_counts}")
 
         # Count by difficulty
         difficulty_counts = {}
@@ -363,15 +400,39 @@ class APPSLoader(DatasetLoader):
     def format_prompt(self, row: dict) -> str:
         """Format APPS problem as plain text prompt.
 
-        APPS problems are more complex than MBPP - they involve stdin/stdout
-        rather than function definitions. We format the prompt to ask for
-        a complete program.
+        APPS has two problem formats:
+        1. stdin: Competitive programming style - read from stdin, write to stdout
+        2. function_call: LeetCode style - implement a Solution class method
         """
         question = row["prompt"]
         starter_code = row["problem"].get("starter_code", "")
+        problem_format = row["problem"].get("format", "stdin")
 
-        if starter_code:
-            return f"""Write a Python program to solve the following problem. The program should read from stdin and write to stdout.
+        if problem_format == "function_call":
+            # LeetCode style: implement a Solution class
+            if starter_code:
+                return f"""Solve the following problem by implementing the Solution class method.
+
+Problem:
+{question}
+
+Complete the following code:
+```python
+{starter_code}"""
+            else:
+                # No starter code - ask for Solution class anyway
+                return f"""Solve the following problem by implementing a Solution class with the required method.
+
+Problem:
+{question}
+
+```python
+class Solution:
+"""
+        else:
+            # stdin format: competitive programming style
+            if starter_code:
+                return f"""Write a Python program to solve the following problem. The program should read from stdin and write to stdout.
 
 Problem:
 {question}
@@ -381,8 +442,8 @@ You must use this starter code:
 
 ```python
 {starter_code}"""
-        else:
-            return f"""Write a Python program to solve the following problem. The program should read from stdin and write to stdout.
+            else:
+                return f"""Write a Python program to solve the following problem. The program should read from stdin and write to stdout.
 
 Problem:
 {question}
@@ -551,6 +612,15 @@ def parse_args():
         help="Comma-separated list of MATH levels (default: 3,4,5)",
     )
 
+    # APPS-specific options
+    parser.add_argument(
+        "--difficulty",
+        type=str,
+        default=None,
+        choices=["introductory", "interview", "competition"],
+        help="APPS difficulty filter (default: all difficulties)",
+    )
+
     # Model and generation
     parser.add_argument(
         "--model-path",
@@ -675,6 +745,8 @@ def main():
             args.max_tokens = 2048
         elif args.dataset == "mbpp":
             args.max_tokens = 512  # Code completions are usually shorter
+        elif args.dataset == "apps":
+            args.max_tokens = 1024  # APPS problems need more tokens
         else:
             args.max_tokens = 512
     if args.max_model_len is None:
@@ -682,6 +754,8 @@ def main():
             args.max_model_len = 4096
         elif args.dataset == "mbpp":
             args.max_model_len = 2048
+        elif args.dataset == "apps":
+            args.max_model_len = 4096  # APPS has longer prompts
         else:
             args.max_model_len = 1024
 
@@ -689,6 +763,8 @@ def main():
     if args.dataset == "math":
         levels = [int(l.strip()) for l in args.levels.split(",")]
         loader = MATHLoader(split=args.split, levels=levels)
+    elif args.dataset == "apps":
+        loader = APPSLoader(split=args.split, difficulty=args.difficulty)
     else:
         loader = DATASET_REGISTRY[args.dataset](split=args.split)
 
@@ -700,6 +776,8 @@ def main():
     print(f"Dataset: {args.dataset} ({args.split})")
     if args.dataset == "math":
         print(f"Levels: {levels}")
+    if args.dataset == "apps" and args.difficulty:
+        print(f"Difficulty: {args.difficulty}")
     print(f"Prompts: {args.num_prompts if args.num_prompts > 0 else 'all'}")
     print(f"Completions per prompt: {args.n}")
     print(f"Max tokens: {args.max_tokens}")
@@ -1061,11 +1139,32 @@ def main():
             # NOTE: Create a new executor for each prompt to avoid asyncio.Semaphore issues
             # when calling asyncio.run() multiple times (each call creates/destroys an event loop)
             executor = CodeExecutor(ExecutorConfig(timeout=10.0), max_concurrent=32)
-            code_verifier = MBPPVerifier(executor=executor)
+            # Use appropriate verifier based on dataset and problem format
+            is_apps = hasattr(loader, 'is_apps_dataset') and loader.is_apps_dataset()
+            if is_apps:
+                # APPS: choose verifier based on problem format
+                problem_format = problem.get("format", "stdin")
+                input_output = problem.get("input_output", {})
+                if problem_format == "function_call":
+                    code_verifier = APPSFunctionVerifier(executor=executor)
+                    verify_problem = {
+                        "inputs": input_output.get("inputs", []),
+                        "outputs": input_output.get("outputs", []),
+                        "fn_name": input_output.get("fn_name", ""),
+                    }
+                else:
+                    code_verifier = APPSStdinVerifier(executor=executor)
+                    verify_problem = {
+                        "inputs": input_output.get("inputs", []),
+                        "outputs": input_output.get("outputs", []),
+                    }
+            else:
+                code_verifier = MBPPVerifier(executor=executor)
+                verify_problem = problem
             completions_only = [c[0] for c in completions_with_reason]
 
             async def verify_all():
-                tasks = [code_verifier.verify(problem, c) for c in completions_only]
+                tasks = [code_verifier.verify(verify_problem, c) for c in completions_only]
                 return await asyncio.gather(*tasks)
 
             test_results = asyncio.run(verify_all())

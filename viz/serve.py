@@ -22,7 +22,7 @@ from urllib.parse import urlparse, parse_qs
 
 def find_latest_trace(traces_dir="traces"):
     """Find the most recently modified trace file."""
-    pattern = os.path.join(traces_dir, "*.jsonl")
+    pattern = os.path.join(traces_dir, "trace_*.jsonl")
     files = glob.glob(pattern)
     if not files:
         return None

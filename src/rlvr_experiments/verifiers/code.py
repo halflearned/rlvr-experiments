@@ -152,15 +152,13 @@ class SimpleCodeVerifier(CodeVerifier):
         return max(len(re.findall(r"^\s*assert\s+", problem.get("tests", ""), re.MULTILINE)), 1)
 
 
-class APPSVerifier(CodeVerifier):
-    """APPS: competitive programming problems with stdin/stdout testing.
+class APPSStdinVerifier(CodeVerifier):
+    """APPS verifier for stdin/stdout format problems.
 
-    APPS problems provide:
-    - question: Problem description
-    - input_output: Dict with "inputs" and "outputs" lists for test cases
-    - starter_code: Optional starter code
-
-    The model generates a complete program that reads from stdin and writes to stdout.
+    These are competitive programming style problems where:
+    - inputs are strings (simulating stdin)
+    - outputs are strings (expected stdout)
+    - The model generates a complete program that reads from stdin and writes to stdout.
     """
 
     def assemble_code(self, problem: dict, completion: str) -> str:
@@ -256,3 +254,113 @@ sys.stdin = StringIO(_INPUT)
         actual_tokens = actual.split()
         expected_tokens = expected.split()
         return actual_tokens == expected_tokens
+
+
+class APPSFunctionVerifier(CodeVerifier):
+    """APPS verifier for function-call format problems (LeetCode style).
+
+    These are LeetCode-style problems where:
+    - inputs are lists of arguments (e.g., [[1, 2, 3], 3] for two arguments)
+    - outputs are expected return values
+    - fn_name specifies the method name to call
+    - starter_code contains a class Solution with method signature
+
+    The model generates code that should include the class definition.
+    """
+
+    def assemble_code(self, problem: dict, completion: str) -> str:
+        """Extract and clean code from completion."""
+        return extract_code_from_markdown(completion)
+
+    def count_tests(self, problem: dict) -> int:
+        """Count number of test cases."""
+        inputs = problem.get("inputs", [])
+        return max(len(inputs), 1)
+
+    async def verify(self, problem: dict, completion: str) -> TestResult:
+        """Verify completion by calling the function with test inputs."""
+        code = self.assemble_code(problem, completion)
+        inputs = problem.get("inputs", [])
+        outputs = problem.get("outputs", [])
+        fn_name = problem.get("fn_name", "")
+
+        if not inputs or not outputs or not fn_name:
+            return TestResult(
+                passed=0,
+                total=1,
+                execution_result=ExecutionResult(
+                    stdout="", stderr="Missing inputs, outputs, or fn_name",
+                    exit_code=-1, timed_out=False, duration_ms=0.0
+                )
+            )
+
+        # Build test code that calls the function
+        test_code = self._build_test_code(code, inputs, outputs, fn_name)
+        result = await self.executor.execute(test_code)
+
+        # Parse result - we print passed/total at the end
+        if result.success:
+            # Extract pass count from stdout (we print "PASSED: X/Y")
+            try:
+                for line in result.stdout.strip().split('\n'):
+                    if line.startswith('PASSED:'):
+                        parts = line.split(':')[1].strip().split('/')
+                        passed = int(parts[0])
+                        total = int(parts[1])
+                        return TestResult(
+                            passed=passed,
+                            total=total,
+                            execution_result=result
+                        )
+            except (ValueError, IndexError):
+                pass
+            # If we can't parse, assume all passed if no error
+            return TestResult(passed=len(inputs), total=len(inputs), execution_result=result)
+        else:
+            return TestResult(passed=0, total=len(inputs), execution_result=result)
+
+    def _build_test_code(self, code: str, inputs: list, outputs: list, fn_name: str) -> str:
+        """Build executable test code that calls the function."""
+        # APPS function-call inputs are wrapped in an extra list:
+        # inputs = [[[1, 2, 3], 3]] means test case 0 has args [1,2,3] and 3
+        test_cases = []
+        for i, (inp, expected) in enumerate(zip(inputs, outputs)):
+            # inp is a list of arguments, expected is the return value
+            test_cases.append({
+                "args": inp,  # This is already a list of arguments
+                "expected": expected
+            })
+
+        test_cases_repr = repr(test_cases)
+
+        return f'''{code}
+
+# Test runner
+_test_cases = {test_cases_repr}
+_passed = 0
+_total = len(_test_cases)
+
+_sol = Solution()
+for _i, _tc in enumerate(_test_cases):
+    _args = _tc["args"]
+    _expected = _tc["expected"]
+    try:
+        _result = _sol.{fn_name}(*_args)
+        # Flexible comparison: handle lists, floats, etc.
+        if _result == _expected:
+            _passed += 1
+        elif isinstance(_result, float) and isinstance(_expected, float):
+            if abs(_result - _expected) < 1e-6:
+                _passed += 1
+        elif isinstance(_result, list) and isinstance(_expected, list):
+            if sorted(_result) == sorted(_expected):
+                _passed += 1
+    except Exception as e:
+        pass  # Test failed
+
+print(f"PASSED: {{_passed}}/{{_total}}")
+'''
+
+
+# Backwards compatibility alias
+APPSVerifier = APPSStdinVerifier

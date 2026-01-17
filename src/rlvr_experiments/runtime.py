@@ -91,7 +91,7 @@ class Runtime:
         os.makedirs(trace_dir, exist_ok=True)
 
         init_global_tracer(trace_path)
-        sample_path = os.path.join(trace_dir, "samples.jsonl")
+        sample_path = os.path.join(trace_dir, f"samples_{timestamp}.jsonl")
         init_sample_logger(sample_path)
         rollout_path = os.path.join(trace_dir, f"rollouts_{timestamp}.jsonl")
         init_rollout_logger(rollout_path)

@@ -526,6 +526,14 @@ def create_titan_group(config: dict, name: str, world_size: int, port: int) -> D
     cfg = dict(config)
     cfg.pop("trainable", None)
 
+    # RLVR always needs to load weights - ensure checkpoint.enable is true
+    # (torchtitan silently skips loading HF weights when enable=false)
+    if "checkpoint" not in cfg:
+        cfg["checkpoint"] = {}
+    if not cfg["checkpoint"].get("enable", False):
+        cfg["checkpoint"]["enable"] = True
+        logger.info("Forcing checkpoint.enable=true (required for HF weight loading)")
+
     # On SageMaker, use SM_MODEL_DIR for checkpoints so they get uploaded to S3
     model_dir = os.environ.get("SM_MODEL_DIR")
     if model_dir:

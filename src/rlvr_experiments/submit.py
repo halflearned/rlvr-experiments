@@ -167,7 +167,7 @@ def submit_job(
     # Job name
     if job_name is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        job_name = f"grpo-adhoc-{timestamp}"
+        job_name = f"annotations-adhoc-{timestamp}"
 
     # Stage and upload source
     source_dir = stage_source_dir(PROJECT_DIR)

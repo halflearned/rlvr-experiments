@@ -45,6 +45,8 @@ def main():
                         help="Model path")
     parser.add_argument("--prompt-offset", type=int, default=0,
                         help="Start from this prompt index (for parallel runs)")
+    parser.add_argument("--shuffle-seed", type=int, default=None,
+                        help="Seed for random prompt selection (deterministic shuffle)")
     parser.add_argument("--save-completions", action="store_true",
                         help="Save full completion texts (larger files)")
     args = parser.parse_args()
@@ -83,6 +85,12 @@ def main():
         })
 
     print(f"Total prompts in dataset: {len(all_rows)}")
+
+    # Shuffle if requested (deterministic based on shuffle_seed)
+    if args.shuffle_seed is not None:
+        random.seed(args.shuffle_seed)
+        random.shuffle(all_rows)
+        print(f"Shuffled prompts with seed {args.shuffle_seed}")
 
     # Select prompts
     if args.num_prompts > 0:
@@ -123,7 +131,7 @@ def main():
     llm = LLM(
         model=args.model,
         tensor_parallel_size=1,
-        max_model_len=4096,
+        max_model_len=8192,  # Some IFEval prompts are long
         gpu_memory_utilization=0.90,
         dtype="bfloat16",
         enable_prefix_caching=True,

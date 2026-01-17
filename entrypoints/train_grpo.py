@@ -113,6 +113,7 @@ async def main():
     verifier = VerifierPool(verifier_cls, **plan.verifier)
 
     # load_mixed returns (dataset, order), other loaders return just dataset
+    # order_file in data_iter config takes precedence over mixed dataset's order
     if dataset_name == "mixed":
         ds, order = load_fn(**data_cfg)
         data_iter = DataIterator(ds, tokenizer=tokenizer, order=order, **plan.data_iter)
@@ -263,7 +264,7 @@ async def main():
         # --- Worker pool ---
         # Use a fixed pool of long-lived workers that repeatedly pulls from the iterator.
         # This avoids subtle busy-spin edge cases in manual task-dispatch loops.
-        max_concurrent_tasks = plan.training.get("max_concurrent_tasks", 64)
+        max_concurrent_tasks = plan.training.get("max_concurrent_tasks", 32)
 
         async def safe_process_one(item):
             prompt_id = item["problem"].get("prompt_id", "unknown")
