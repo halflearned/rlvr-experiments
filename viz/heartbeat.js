@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 31');
+console.log('[heartbeat.js] Script loaded, version 33');
 
 class HeartbeatViz {
     constructor() {
@@ -2741,31 +2741,52 @@ class HeartbeatViz {
         const data = this.rewardVsLen;
         if (data.length === 0) {
             ctx.fillStyle = '#8b949e';
-            ctx.font = '14px -apple-system, sans-serif';
+            ctx.font = '11px -apple-system, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('Reward vs Completion Length scatter will appear here', width / 2, height / 2);
+            ctx.fillText('Waiting...', width / 2, height / 2);
             return;
         }
 
-        const padding = { left: 50, right: 20, top: 20, bottom: 40 };
+        // Compact padding for narrow layout
+        const padding = { left: 30, right: 8, top: 40, bottom: 25 };
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
-        // Find data ranges
-        const lens = data.map(d => d.len);
-        const rewards = data.map(d => d.reward);
-        const minLen = Math.min(...lens);
-        const maxLen = Math.max(...lens);
-        const minReward = Math.min(...rewards);
-        const maxReward = Math.max(...rewards);
+        // Separate data into correct (reward > 0) and incorrect (reward = 0)
+        const correctLens = data.filter(d => d.reward > 0).map(d => d.len);
+        const incorrectLens = data.filter(d => d.reward === 0).map(d => d.len);
 
-        // Add padding to ranges
-        const lenRange = maxLen - minLen || 1;
-        const rewardRange = maxReward - minReward || 1;
+        // Build histograms - use larger bins for narrow view
+        const binSize = 100;
+        const allLens = data.map(d => d.len);
+        const minLen = 0;
+        const maxLen = Math.max(...allLens, 100);
+        const numBins = Math.ceil(maxLen / binSize) + 1;
+
+        const correctHist = new Array(numBins).fill(0);
+        const incorrectHist = new Array(numBins).fill(0);
+
+        for (const len of correctLens) {
+            const bin = Math.min(Math.floor(len / binSize), numBins - 1);
+            correctHist[bin]++;
+        }
+        for (const len of incorrectLens) {
+            const bin = Math.min(Math.floor(len / binSize), numBins - 1);
+            incorrectHist[bin]++;
+        }
+
+        // Normalize to show percentages within each group
+        const correctTotal = correctLens.length || 1;
+        const incorrectTotal = incorrectLens.length || 1;
+        const correctPct = correctHist.map(c => 100 * c / correctTotal);
+        const incorrectPct = incorrectHist.map(c => 100 * c / incorrectTotal);
+
+        const maxPct = Math.max(...correctPct, ...incorrectPct, 1);
 
         // Coordinate transforms
-        const lenToX = (len) => padding.left + ((len - minLen) / lenRange) * plotWidth;
-        const rewardToY = (reward) => height - padding.bottom - ((reward - minReward) / rewardRange) * plotHeight;
+        const binToX = (bin) => padding.left + (bin / numBins) * plotWidth;
+        const pctToY = (pct) => height - padding.bottom - (pct / maxPct) * plotHeight;
+        const barWidth = Math.max(2, plotWidth / numBins - 1);
 
         // Draw axes
         ctx.strokeStyle = '#30363d';
@@ -2776,65 +2797,68 @@ class HeartbeatViz {
         ctx.lineTo(width - padding.right, height - padding.bottom);
         ctx.stroke();
 
-        // Y-axis labels
+        // Y-axis labels (percentages) - compact
         ctx.fillStyle = '#6e7681';
-        ctx.font = '10px SF Mono, Monaco, monospace';
+        ctx.font = '9px SF Mono, Monaco, monospace';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(maxReward.toFixed(1), padding.left - 5, padding.top);
-        ctx.fillText(minReward.toFixed(1), padding.left - 5, height - padding.bottom);
+        ctx.fillText(maxPct.toFixed(0) + '%', padding.left - 3, padding.top);
+        ctx.fillText('0', padding.left - 3, height - padding.bottom);
 
-        // X-axis labels
+        // X-axis labels - just min and max
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillText(minLen.toString(), padding.left, height - padding.bottom + 5);
-        ctx.fillText(maxLen.toString(), width - padding.right, height - padding.bottom + 5);
-        ctx.fillText('Completion Length', width / 2, height - 15);
+        ctx.fillText('0', padding.left, height - padding.bottom + 3);
+        ctx.fillText(maxLen.toString(), width - padding.right, height - padding.bottom + 3);
 
-        // Y-axis label
-        ctx.save();
-        ctx.translate(12, height / 2);
-        ctx.rotate(-Math.PI / 2);
-        ctx.textAlign = 'center';
-        ctx.fillText('Reward', 0, 0);
-        ctx.restore();
-
-        // Draw points - use transparency for overlap visualization
-        // Color by reward: red for 0, green for 1
-        const maxPoints = 5000;  // Limit points for performance
-        const step = Math.max(1, Math.floor(data.length / maxPoints));
-
-        for (let i = 0; i < data.length; i += step) {
-            const d = data[i];
-            const x = lenToX(d.len);
-            const y = rewardToY(d.reward);
-
-            // Color gradient: red (0) -> yellow (0.5) -> green (1)
-            let r, g, b;
-            if (d.reward <= 0.5) {
-                const t = d.reward * 2;  // 0-1 for first half
-                r = 248;  // red to yellow
-                g = Math.round(81 + (210 - 81) * t);
-                b = Math.round(73 + (34 - 73) * t);
-            } else {
-                const t = (d.reward - 0.5) * 2;  // 0-1 for second half
-                r = Math.round(210 + (63 - 210) * t);  // yellow to green
-                g = Math.round(153 + (185 - 153) * t);
-                b = Math.round(34 + (80 - 34) * t);
+        // Draw incorrect bars (red, behind)
+        ctx.fillStyle = 'rgba(248, 81, 73, 0.6)';
+        for (let i = 0; i < numBins; i++) {
+            if (incorrectPct[i] > 0) {
+                const x = binToX(i);
+                const y = pctToY(incorrectPct[i]);
+                const h = height - padding.bottom - y;
+                ctx.fillRect(x, y, barWidth, h);
             }
-
-            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.5)`;
-            ctx.beginPath();
-            ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-            ctx.fill();
         }
 
-        // Show point count
-        ctx.fillStyle = '#8b949e';
+        // Draw correct bars (green, in front with offset)
+        ctx.fillStyle = 'rgba(63, 185, 80, 0.7)';
+        for (let i = 0; i < numBins; i++) {
+            if (correctPct[i] > 0) {
+                const x = binToX(i) + barWidth * 0.15;
+                const y = pctToY(correctPct[i]);
+                const h = height - padding.bottom - y;
+                ctx.fillRect(x, y, barWidth * 0.85, h);
+            }
+        }
+
+        // Compact legend at top
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+
+        const legendY1 = 10;
+        const legendY2 = 22;
+
+        // Correct - line 1
+        ctx.fillStyle = 'rgba(63, 185, 80, 0.8)';
+        ctx.fillRect(4, legendY1 - 4, 8, 8);
+        ctx.fillStyle = '#c9d1d9';
+        ctx.fillText(`✓ ${correctLens.length}`, 15, legendY1);
+
+        // Incorrect - line 2
+        ctx.fillStyle = 'rgba(248, 81, 73, 0.8)';
+        ctx.fillRect(4, legendY2 - 4, 8, 8);
+        ctx.fillStyle = '#c9d1d9';
+        ctx.fillText(`✗ ${incorrectLens.length}`, 15, legendY2);
+
+        // Accuracy on right
+        const accuracy = 100 * correctLens.length / data.length;
+        ctx.fillStyle = '#58a6ff';
         ctx.font = '10px SF Mono, Monaco, monospace';
         ctx.textAlign = 'right';
-        ctx.textBaseline = 'top';
-        ctx.fillText(`n=${data.length.toLocaleString()}`, width - padding.right, padding.top);
+        ctx.fillText(`${accuracy.toFixed(0)}%`, width - 4, 16);
     }
 
     async showRolloutModal(promptId, version) {
