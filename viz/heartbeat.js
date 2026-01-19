@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 27');
+console.log('[heartbeat.js] Script loaded, version 28');
 
 class HeartbeatViz {
     constructor() {
@@ -10,6 +10,13 @@ class HeartbeatViz {
 
         // Lazy loading state
         this.spansLoaded = false;
+        this.spansOffset = 0;
+        this.hasMoreSpans = true;
+
+        // Buffer lazy loading state
+        this.bufferLoaded = false;
+        this.bufferOffset = 0;
+        this.hasMoreBuffer = true;
 
         // Canvas contexts
         this.timelineCtx = null;
@@ -169,17 +176,35 @@ class HeartbeatViz {
         }
 
         if (bufferToggle) {
-            bufferToggle.addEventListener('click', () => {
+            bufferToggle.addEventListener('click', async () => {
                 this.bufferEnabled = !this.bufferEnabled;
                 bufferToggle.textContent = this.bufferEnabled ? '⏸ Pause' : '▶ Enable';
                 bufferToggle.classList.toggle('active', this.bufferEnabled);
                 if (bufferPanel) bufferPanel.classList.toggle('panel-disabled', !this.bufferEnabled);
                 if (this.bufferEnabled) {
+                    // Load buffer data on-demand when first enabled
+                    await this.loadBuffer();
                     this.renderBuffer();
                     this.renderFates();
                 }
             });
         }
+
+        // Keyboard shortcuts: 'M' to load more spans, 'B' to load more buffer data
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'm' || e.key === 'M') {
+                if (this.timelineEnabled && this.hasMoreSpans) {
+                    console.log('[keyboard] Loading more spans...');
+                    this.loadMoreSpans();
+                }
+            }
+            if (e.key === 'b' || e.key === 'B') {
+                if (this.bufferEnabled && this.hasMoreBuffer) {
+                    console.log('[keyboard] Loading more buffer data...');
+                    this.loadMoreBuffer();
+                }
+            }
+        });
 
         // Try to load default trace
         this.loadDefaultTrace();
@@ -428,19 +453,24 @@ class HeartbeatViz {
         console.log('No trace loaded. Use: python viz/serve.py <trace_file.jsonl>');
     }
 
-    async loadSpans() {
+    async loadSpans(loadMore = false) {
         // Load span events for timeline visualization (on-demand)
-        if (this.spansLoaded) return;
-        this.spansLoaded = true;
+        // loadMore=true fetches the next batch instead of initial
+        if (!loadMore && this.spansLoaded) return;
+        if (!loadMore) this.spansLoaded = true;
+
+        const limit = 50000;
+        const offset = loadMore ? this.spansOffset : 0;
 
         try {
-            console.log('[loadSpans] Loading span events...');
-            const response = await fetch('/trace?filter=spans');
+            console.log(`[loadSpans] Loading spans offset=${offset} limit=${limit}...`);
+            const response = await fetch(`/trace?filter=spans&offset=${offset}&limit=${limit}`);
             if (response.ok) {
                 const text = await response.text();
                 console.log(`[loadSpans] Received ${text.length} bytes`);
                 // Parse and merge spans into existing events
                 const lines = text.split('\n');
+                let addedCount = 0;
                 for (const line of lines) {
                     if (line && line.trim()) {
                         try {
@@ -448,12 +478,15 @@ class HeartbeatViz {
                             this.events.push(event);
                             // Also process span for timeline data structures
                             this.processSpanEvent(event);
+                            addedCount++;
                         } catch (e) {
                             // Skip invalid lines
                         }
                     }
                 }
-                console.log(`[loadSpans] Added span events, total now ${this.events.length}`);
+                this.spansOffset = (this.spansOffset || 0) + addedCount;
+                this.hasMoreSpans = addedCount >= limit;  // Probably more if we hit the limit
+                console.log(`[loadSpans] Added ${addedCount} spans, total offset now ${this.spansOffset}, hasMore=${this.hasMoreSpans}`);
                 // Update timeline height and re-render
                 this.updateTimelinePanelHeight();
                 if (this.timelineEnabled) this.renderTimeline();
@@ -461,6 +494,78 @@ class HeartbeatViz {
         } catch (e) {
             console.error('Failed to load spans:', e);
         }
+    }
+
+    async loadMoreSpans() {
+        // Called from UI to fetch next batch of spans
+        await this.loadSpans(true);
+    }
+
+    async loadBuffer(loadMore = false) {
+        // Load buffer events for buffer dynamics visualization (on-demand)
+        // loadMore=true fetches the next batch instead of initial
+        if (!loadMore && this.bufferLoaded) return;
+        if (!loadMore) this.bufferLoaded = true;
+
+        const limit = 5000;  // Buffer events are ~15KB each, so 5000 = ~75MB max
+        const offset = loadMore ? this.bufferOffset : 0;
+
+        try {
+            console.log(`[loadBuffer] Loading buffer offset=${offset} limit=${limit}...`);
+            const response = await fetch(`/trace?filter=buffer&offset=${offset}&limit=${limit}`);
+            if (response.ok) {
+                const text = await response.text();
+                console.log(`[loadBuffer] Received ${text.length} bytes`);
+                // Parse and process buffer events
+                const lines = text.split('\n');
+                let addedCount = 0;
+                for (const line of lines) {
+                    if (line && line.trim()) {
+                        try {
+                            const event = JSON.parse(line);
+                            this.events.push(event);
+                            // Process buffer event
+                            this.processBufferEvent(event);
+                            addedCount++;
+                        } catch (e) {
+                            // Skip invalid lines
+                        }
+                    }
+                }
+                this.bufferOffset = (this.bufferOffset || 0) + addedCount;
+                this.hasMoreBuffer = addedCount >= limit;  // Probably more if we hit the limit
+                console.log(`[loadBuffer] Added ${addedCount} buffer events, total offset now ${this.bufferOffset}, hasMore=${this.hasMoreBuffer}`);
+                // Re-render buffer visualization
+                if (this.bufferEnabled) {
+                    this.renderBuffer();
+                    this.renderFates();
+                }
+            }
+        } catch (e) {
+            console.error('Failed to load buffer:', e);
+        }
+    }
+
+    async loadMoreBuffer() {
+        // Called from UI to fetch next batch of buffer events
+        await this.loadBuffer(true);
+    }
+
+    processBufferEvent(event) {
+        // Process a single buffer event (used when loading buffer on-demand)
+        if (event.type !== 'buffer') return;
+
+        const ts = event.ts;
+        this.bufferEvents.push({
+            ts,
+            size: event.size,
+            byVersion: event.by_version || {},
+            fates: event.fates || { used: {}, wasted: {}, partial: {} },
+            version: 0  // Version tracking would need more context
+        });
+
+        // Update maxTs if needed
+        if (ts > this.maxTs) this.maxTs = ts;
     }
 
     processSpanEvent(event) {
@@ -633,6 +738,9 @@ class HeartbeatViz {
             reward_overall: [], reward_used: [], frac_all_correct: [], frac_all_wrong: []
         };
         this.bufferEvents = [];
+        this.bufferLoaded = false;  // Reset lazy loading state
+        this.bufferOffset = 0;
+        this.hasMoreBuffer = true;
         this.syncEvents = [];
 
         // Reset cumulative histograms
@@ -1380,7 +1488,25 @@ class HeartbeatViz {
             return;
         }
 
-        const duration = this.maxTs;  // Already in seconds
+        // Compute timeline duration from span data specifically (not global maxTs which includes metrics)
+        let spanMaxTs = 0;
+        for (const s of this.vllmSpans) {
+            const end = s.ts + s.dur;
+            if (end > spanMaxTs) spanMaxTs = end;
+        }
+        for (const s of this.trainerSpans) {
+            const end = s.ts + s.dur;
+            if (end > spanMaxTs) spanMaxTs = end;
+        }
+        for (const s of this.verifierSpans) {
+            const end = s.ts + s.dur;
+            if (end > spanMaxTs) spanMaxTs = end;
+        }
+        for (const s of this.syncEvents) {
+            if (s.ts > spanMaxTs) spanMaxTs = s.ts;
+        }
+        const duration = spanMaxTs || this.maxTs;  // Fallback to global if no spans
+
         const padding = { left: 100, right: 20, top: 20, bottom: 30 };
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
@@ -1577,7 +1703,9 @@ class HeartbeatViz {
             return;
         }
 
-        const duration = this.maxTs;  // Already in seconds
+        // Compute duration from buffer events specifically (not global maxTs which includes metrics)
+        const bufferMaxTs = Math.max(...this.bufferEvents.map(e => e.ts));
+        const duration = bufferMaxTs || this.maxTs;
         const padding = { left: 50, right: 20, top: 20, bottom: 30 };
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;

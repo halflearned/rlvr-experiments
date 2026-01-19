@@ -130,55 +130,56 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
 
                 if filter_type == "metrics":
-                    # Fast path: only send counter, meta events, and downsampled buffer
-                    # Buffer events are huge (can be 700MB), so we downsample them
-                    # We also keep the last buffer event for accurate fates display
-                    buffer_count = 0
-                    buffer_sample_rate = 100  # Keep every 100th buffer event
-                    last_buffer_line = None
-                    output_lines = []
-
+                    # Send counter and meta events (small), skip spans and buffer
+                    # Buffer events are fetched separately with ?filter=buffer
                     with open(TRACE_FILE, "r") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
                                 continue
-                            # Quick check without full JSON parse
-                            is_span = '"type":"span"' in line or '"type": "span"' in line
-                            is_buffer = '"type":"buffer"' in line or '"type": "buffer"' in line
-
-                            if is_span:
-                                continue  # Skip all spans
-                            elif is_buffer:
-                                buffer_count += 1
-                                last_buffer_line = line  # Track last buffer for fates
-                                # Downsample buffer events (they're huge due to fates accumulation)
-                                if buffer_count % buffer_sample_rate == 0:
+                            # Skip span and buffer events
+                            if '"type":"span"' in line or '"type": "span"' in line:
+                                continue
+                            if '"type":"buffer"' in line or '"type": "buffer"' in line:
+                                continue
+                            self.wfile.write((line + "\n").encode())
+                elif filter_type == "buffer":
+                    # Paginated buffer events: ?filter=buffer&offset=0&limit=5000
+                    offset = int(query.get("offset", [0])[0])
+                    limit = int(query.get("limit", [5000])[0])
+                    buffer_count = 0
+                    sent_count = 0
+                    with open(TRACE_FILE, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if '"type":"buffer"' in line or '"type": "buffer"' in line:
+                                if buffer_count >= offset:
                                     self.wfile.write((line + "\n").encode())
-                            else:
-                                # Counter, meta events - keep all
-                                self.wfile.write((line + "\n").encode())
-
-                    # Always include the last buffer event for accurate final fates
-                    if last_buffer_line and buffer_count % buffer_sample_rate != 0:
-                        self.wfile.write((last_buffer_line + "\n").encode())
+                                    sent_count += 1
+                                    if sent_count >= limit:
+                                        break
+                                buffer_count += 1
                 elif filter_type == "spans":
                     # Only send span events (for timeline visualization)
-                    # Downsample if too many
+                    # Supports pagination: ?filter=spans&offset=0&limit=50000
+                    offset = int(query.get("offset", [0])[0])
+                    limit = int(query.get("limit", [50000])[0])
                     span_count = 0
-                    max_spans = 50000  # Limit to 50k spans
+                    sent_count = 0
                     with open(TRACE_FILE, "r") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
                                 continue
                             if '"type":"span"' in line or '"type": "span"' in line:
+                                if span_count >= offset:
+                                    self.wfile.write((line + "\n").encode())
+                                    sent_count += 1
+                                    if sent_count >= limit:
+                                        break
                                 span_count += 1
-                                # Simple downsampling: keep every Nth span if too many
-                                # We don't know total count upfront, so use reservoir-style
-                                self.wfile.write((line + "\n").encode())
-                                if span_count >= max_spans:
-                                    break
                 else:
                     # Full trace (legacy)
                     with open(TRACE_FILE, "rb") as f:
