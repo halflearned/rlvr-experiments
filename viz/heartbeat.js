@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 28');
+console.log('[heartbeat.js] Script loaded, version 31');
 
 class HeartbeatViz {
     constructor() {
@@ -161,6 +161,10 @@ class HeartbeatViz {
         if (timelinePanel) timelinePanel.classList.add('panel-disabled');
         if (bufferPanel) bufferPanel.classList.add('panel-disabled');
 
+        // Load More buttons
+        const timelineLoadMore = document.getElementById('timeline-load-more');
+        const bufferLoadMore = document.getElementById('buffer-load-more');
+
         if (timelineToggle) {
             timelineToggle.addEventListener('click', async () => {
                 this.timelineEnabled = !this.timelineEnabled;
@@ -171,7 +175,19 @@ class HeartbeatViz {
                     // Load spans on-demand when timeline is first enabled
                     await this.loadSpans();
                     this.renderTimeline();
+                    this.updateLoadMoreButtons();
                 }
+            });
+        }
+
+        if (timelineLoadMore) {
+            timelineLoadMore.addEventListener('click', async () => {
+                timelineLoadMore.textContent = 'Loading...';
+                timelineLoadMore.disabled = true;
+                await this.loadMoreSpans();
+                timelineLoadMore.textContent = 'Load More';
+                timelineLoadMore.disabled = false;
+                this.updateLoadMoreButtons();
             });
         }
 
@@ -186,25 +202,21 @@ class HeartbeatViz {
                     await this.loadBuffer();
                     this.renderBuffer();
                     this.renderFates();
+                    this.updateLoadMoreButtons();
                 }
             });
         }
 
-        // Keyboard shortcuts: 'M' to load more spans, 'B' to load more buffer data
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'm' || e.key === 'M') {
-                if (this.timelineEnabled && this.hasMoreSpans) {
-                    console.log('[keyboard] Loading more spans...');
-                    this.loadMoreSpans();
-                }
-            }
-            if (e.key === 'b' || e.key === 'B') {
-                if (this.bufferEnabled && this.hasMoreBuffer) {
-                    console.log('[keyboard] Loading more buffer data...');
-                    this.loadMoreBuffer();
-                }
-            }
-        });
+        if (bufferLoadMore) {
+            bufferLoadMore.addEventListener('click', async () => {
+                bufferLoadMore.textContent = 'Loading...';
+                bufferLoadMore.disabled = true;
+                await this.loadMoreBuffer();
+                bufferLoadMore.textContent = 'Load More';
+                bufferLoadMore.disabled = false;
+                this.updateLoadMoreButtons();
+            });
+        }
 
         // Try to load default trace
         this.loadDefaultTrace();
@@ -1113,13 +1125,27 @@ class HeartbeatViz {
         const epochs = this.events.filter(e => e.type === 'counter' && e.name === 'epoch');
         const lastEpoch = epochs[epochs.length - 1];
 
-        const steps = this.events.filter(e => e.type === 'span' && e.name === 'forward_backward');
+        // Count metrics events - one is emitted per optimizer step
+        const metricsEvents = this.events.filter(e => e.type === 'counter' && e.name === 'metrics');
 
-        document.getElementById('current-step').textContent = steps.length || '-';
+        document.getElementById('current-step').textContent = metricsEvents.length || '-';
         document.getElementById('current-epoch').textContent = lastEpoch?.epoch ?? '-';
         document.getElementById('current-version').textContent = this.syncEvents.length || '0';
         const lastBuffer = this.bufferEvents[this.bufferEvents.length - 1];
         document.getElementById('buffer-size').textContent = lastBuffer?.size ?? '-';
+    }
+
+    updateLoadMoreButtons() {
+        // Show/hide "Load More" buttons based on whether there's more data
+        const timelineLoadMore = document.getElementById('timeline-load-more');
+        const bufferLoadMore = document.getElementById('buffer-load-more');
+
+        if (timelineLoadMore) {
+            timelineLoadMore.style.display = (this.timelineEnabled && this.hasMoreSpans) ? 'inline-block' : 'none';
+        }
+        if (bufferLoadMore) {
+            bufferLoadMore.style.display = (this.bufferEnabled && this.hasMoreBuffer) ? 'inline-block' : 'none';
+        }
     }
 
     render() {
@@ -2511,10 +2537,11 @@ class HeartbeatViz {
             ctx.arc(x, y, 3, 0, Math.PI * 2);
             ctx.fill();
 
-            // Value label with background
+            // Value label with background - show "step N: value"
             const value = this.formatMetricValue(metric, data[idx].value);
+            const stepLabel = `step ${idx + 1}: ${value}`;
             ctx.font = '10px SF Mono, Monaco, monospace';
-            const textWidth = ctx.measureText(value).width;
+            const textWidth = ctx.measureText(stepLabel).width;
             const labelX = x > width / 2 ? x - textWidth - 8 : x + 6;
 
             ctx.fillStyle = '#161b22';
@@ -2523,7 +2550,7 @@ class HeartbeatViz {
             ctx.fillStyle = '#f0f6fc';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'top';
-            ctx.fillText(value, labelX, 3);
+            ctx.fillText(stepLabel, labelX, 3);
         }
     }
 
