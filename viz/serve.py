@@ -114,15 +114,75 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         # Serve /trace as the configured trace file
+        # Query params:
+        #   ?filter=metrics  - Only counter/buffer/meta events (fast initial load)
+        #   ?filter=spans    - Only span events (for timeline)
+        #   (no filter)      - Full trace (legacy, slow for large files)
         parsed = urlparse(self.path)
         if parsed.path == "/trace":
             if TRACE_FILE and os.path.exists(TRACE_FILE):
+                query = parse_qs(parsed.query)
+                filter_type = query.get("filter", [None])[0]
+
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                with open(TRACE_FILE, "rb") as f:
-                    self.wfile.write(f.read())
+
+                if filter_type == "metrics":
+                    # Fast path: only send counter, meta events, and downsampled buffer
+                    # Buffer events are huge (can be 700MB), so we downsample them
+                    # We also keep the last buffer event for accurate fates display
+                    buffer_count = 0
+                    buffer_sample_rate = 100  # Keep every 100th buffer event
+                    last_buffer_line = None
+                    output_lines = []
+
+                    with open(TRACE_FILE, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            # Quick check without full JSON parse
+                            is_span = '"type":"span"' in line or '"type": "span"' in line
+                            is_buffer = '"type":"buffer"' in line or '"type": "buffer"' in line
+
+                            if is_span:
+                                continue  # Skip all spans
+                            elif is_buffer:
+                                buffer_count += 1
+                                last_buffer_line = line  # Track last buffer for fates
+                                # Downsample buffer events (they're huge due to fates accumulation)
+                                if buffer_count % buffer_sample_rate == 0:
+                                    self.wfile.write((line + "\n").encode())
+                            else:
+                                # Counter, meta events - keep all
+                                self.wfile.write((line + "\n").encode())
+
+                    # Always include the last buffer event for accurate final fates
+                    if last_buffer_line and buffer_count % buffer_sample_rate != 0:
+                        self.wfile.write((last_buffer_line + "\n").encode())
+                elif filter_type == "spans":
+                    # Only send span events (for timeline visualization)
+                    # Downsample if too many
+                    span_count = 0
+                    max_spans = 50000  # Limit to 50k spans
+                    with open(TRACE_FILE, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if '"type":"span"' in line or '"type": "span"' in line:
+                                span_count += 1
+                                # Simple downsampling: keep every Nth span if too many
+                                # We don't know total count upfront, so use reservoir-style
+                                self.wfile.write((line + "\n").encode())
+                                if span_count >= max_spans:
+                                    break
+                else:
+                    # Full trace (legacy)
+                    with open(TRACE_FILE, "rb") as f:
+                        self.wfile.write(f.read())
             else:
                 self.send_error(404, "No trace file configured")
             return

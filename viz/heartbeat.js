@@ -8,6 +8,9 @@ class HeartbeatViz {
         this.minTs = 0;
         this.maxTs = 0;
 
+        // Lazy loading state
+        this.spansLoaded = false;
+
         // Canvas contexts
         this.timelineCtx = null;
         this.bufferCtx = null;
@@ -152,12 +155,16 @@ class HeartbeatViz {
         if (bufferPanel) bufferPanel.classList.add('panel-disabled');
 
         if (timelineToggle) {
-            timelineToggle.addEventListener('click', () => {
+            timelineToggle.addEventListener('click', async () => {
                 this.timelineEnabled = !this.timelineEnabled;
                 timelineToggle.textContent = this.timelineEnabled ? '⏸ Pause' : '▶ Enable';
                 timelineToggle.classList.toggle('active', this.timelineEnabled);
                 if (timelinePanel) timelinePanel.classList.toggle('panel-disabled', !this.timelineEnabled);
-                if (this.timelineEnabled) this.renderTimeline();
+                if (this.timelineEnabled) {
+                    // Load spans on-demand when timeline is first enabled
+                    await this.loadSpans();
+                    this.renderTimeline();
+                }
             });
         }
 
@@ -285,17 +292,17 @@ class HeartbeatViz {
             this.updateTimelineTooltip();
         });
 
-        // Timeline click handling for rollout inspection
-        timelineCanvas.addEventListener('click', (e) => {
-            if (this.hoveredSpan && this.hoveredSpan.event.name === 'verify') {
-                const event = this.hoveredSpan.event;
-                const promptId = event.prompt_id;
-                const version = event.version;
-                if (promptId && promptId !== 'unknown') {
-                    this.showRolloutModal(promptId, version);
-                }
-            }
-        });
+        // Timeline click handling for rollout inspection (disabled for performance)
+        // timelineCanvas.addEventListener('click', (e) => {
+        //     if (this.hoveredSpan && this.hoveredSpan.event.name === 'verify') {
+        //         const event = this.hoveredSpan.event;
+        //         const promptId = event.prompt_id;
+        //         const version = event.version;
+        //         if (promptId && promptId !== 'unknown') {
+        //             this.showRolloutModal(promptId, version);
+        //         }
+        //     }
+        // });
 
         // Setup metric mini-charts with hover handling
         const metricNames = Object.keys(this.metrics);
@@ -403,19 +410,110 @@ class HeartbeatViz {
     }
 
     async loadDefaultTrace() {
-        // Load from /trace endpoint (serve.py serves the configured trace file there)
+        // Load metrics data first (fast: counter/buffer/meta events only)
+        // Spans are loaded on-demand when timeline is enabled
         try {
-            const response = await fetch('/trace');
+            console.log('[loadDefaultTrace] Loading metrics (filtered)...');
+            const response = await fetch('/trace?filter=metrics');
             if (response.ok) {
                 const text = await response.text();
-                this.processJSONL(text);
-                console.log(`Loaded trace: ${text.length} bytes, ${this.events.length} events`);
+                console.log(`[loadDefaultTrace] Received ${text.length} bytes`);
+                await this.processJSONL(text);
+                console.log(`[loadDefaultTrace] Loaded ${this.events.length} events`);
                 return;
             }
         } catch (e) {
             console.error('Failed to load trace from /trace:', e);
         }
         console.log('No trace loaded. Use: python viz/serve.py <trace_file.jsonl>');
+    }
+
+    async loadSpans() {
+        // Load span events for timeline visualization (on-demand)
+        if (this.spansLoaded) return;
+        this.spansLoaded = true;
+
+        try {
+            console.log('[loadSpans] Loading span events...');
+            const response = await fetch('/trace?filter=spans');
+            if (response.ok) {
+                const text = await response.text();
+                console.log(`[loadSpans] Received ${text.length} bytes`);
+                // Parse and merge spans into existing events
+                const lines = text.split('\n');
+                for (const line of lines) {
+                    if (line && line.trim()) {
+                        try {
+                            const event = JSON.parse(line);
+                            this.events.push(event);
+                            // Also process span for timeline data structures
+                            this.processSpanEvent(event);
+                        } catch (e) {
+                            // Skip invalid lines
+                        }
+                    }
+                }
+                console.log(`[loadSpans] Added span events, total now ${this.events.length}`);
+                // Update timeline height and re-render
+                this.updateTimelinePanelHeight();
+                if (this.timelineEnabled) this.renderTimeline();
+            }
+        } catch (e) {
+            console.error('Failed to load spans:', e);
+        }
+    }
+
+    processSpanEvent(event) {
+        // Process a single span event (used when loading spans on-demand)
+        if (event.type !== 'span') return;
+
+        const ts = event.ts;
+
+        if (event.name === 'sync.titan_to_vllm') {
+            this.syncEvents.push({ ts, version: this.syncEvents.length + 1 });
+        }
+
+        if (event.name === 'vllm.generate_single' || event.name === 'vllm.generate' ||
+            (event.name === 'generate' && event.replica !== undefined)) {
+            this.vllmSpans.push({
+                replica: event.replica || 0,
+                slot: event.slot !== undefined ? event.slot : 0,
+                ts: event.ts,
+                dur: event.dur || 0
+            });
+        }
+
+        if (event.name === 'forward_backward') {
+            this.trainerSpans.push({ ts: event.ts, dur: event.dur || 0 });
+        }
+
+        if (event.name === 'verify') {
+            this.verifierSpans.push({
+                worker: event.worker,
+                slot: event.slot !== undefined ? event.slot : 0,
+                ts: event.ts,
+                dur: event.dur || 0,
+                passed: event.passed || 0
+            });
+        }
+
+        // Update maxTs
+        const end = ts + (event.dur || 0);
+        if (end > this.maxTs) this.maxTs = end;
+
+        // Update replica/worker counts
+        if (event.replica !== undefined) {
+            this.numVllmReplicas = Math.max(this.numVllmReplicas, event.replica + 1);
+        }
+        if (event.slot !== undefined && (event.name === 'vllm.generate_single' || event.name === 'vllm.generate')) {
+            this.vllmMaxConcurrent = Math.max(this.vllmMaxConcurrent, event.slot + 1);
+        }
+        if (event.worker !== undefined) {
+            this.numVerifierWorkers = Math.max(this.numVerifierWorkers, event.worker + 1);
+        }
+        if (event.slot !== undefined && event.name === 'verify') {
+            this.verifierMaxConcurrent = Math.max(this.verifierMaxConcurrent, event.slot + 1);
+        }
     }
 
     loadFile(file) {
@@ -438,29 +536,58 @@ class HeartbeatViz {
         reader.readAsText(file);
     }
 
-    processJSONL(text) {
+    async processJSONL(text) {
         console.log('[processJSONL] Parsing', text.length, 'chars');
-        // Parse JSONL format
+        // Parse JSONL format with chunking for large files
+        const lines = text.split('\n');
+        console.log('[processJSONL]', lines.length, 'lines');
+
         this.events = [];
-        for (const line of text.split('\n')) {
-            if (line.trim()) {
-                try {
-                    this.events.push(JSON.parse(line));
-                } catch (e) {
-                    console.warn('Skipping invalid JSON line:', line);
+
+        // Parse in chunks to avoid blocking UI
+        const chunkSize = 10000;
+        let lineIndex = 0;
+
+        const parseChunk = () => {
+            const endIndex = Math.min(lineIndex + chunkSize, lines.length);
+            for (; lineIndex < endIndex; lineIndex++) {
+                const line = lines[lineIndex];
+                if (line && line.trim()) {
+                    try {
+                        this.events.push(JSON.parse(line));
+                    } catch (e) {
+                        // Skip invalid lines silently for performance
+                    }
                 }
             }
+        };
+
+        // Process chunks with yielding
+        while (lineIndex < lines.length) {
+            parseChunk();
+            if (lineIndex < lines.length) {
+                // Yield to UI every chunk
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
         }
+
+        console.log('[processJSONL] Parsed', this.events.length, 'events');
 
         if (this.events.length === 0) return;
 
         // Find time range (ts is already in seconds)
-        const tsEvents = this.events.filter(e => e.ts !== undefined);
+        let maxTs = 0;
+        for (const e of this.events) {
+            if (e.ts !== undefined) {
+                const end = e.ts + (e.dur || 0);
+                if (end > maxTs) maxTs = end;
+            }
+        }
         this.minTs = 0; // JSONL timestamps are relative to start
-        this.maxTs = Math.max(...tsEvents.map(e => e.ts + (e.dur || 0)));
+        this.maxTs = maxTs;
 
         // Extract metrics
-        this.extractMetrics();
+        await this.extractMetrics();
         this.updateHeaderStats();
         this.render();
     }
@@ -493,7 +620,7 @@ class HeartbeatViz {
         this.render();
     }
 
-    extractMetrics() {
+    async extractMetrics() {
         this.metrics = {
             kl_mean: [], loss: [], grad_norm: [],
             mfu: [], train_tps: [], memory_pct: [],
@@ -532,7 +659,14 @@ class HeartbeatViz {
 
         let currentVersion = 0;
 
-        for (const event of this.events) {
+        // Process events in chunks to avoid blocking UI
+        const chunkSize = 10000;
+        let eventIndex = 0;
+
+        const processChunk = () => {
+            const endIndex = Math.min(eventIndex + chunkSize, this.events.length);
+            for (; eventIndex < endIndex; eventIndex++) {
+                const event = this.events[eventIndex];
             const ts = event.ts;  // Already in seconds in new format
 
             // Counter events (new format: type='counter')
@@ -773,6 +907,15 @@ class HeartbeatViz {
                     fates: event.fates || { used: {}, wasted: {}, partial: {} },
                     version: currentVersion
                 });
+            }
+            }  // end inner for loop
+        };  // end processChunk
+
+        // Process all events in chunks with yielding
+        while (eventIndex < this.events.length) {
+            processChunk();
+            if (eventIndex < this.events.length) {
+                await new Promise(resolve => setTimeout(resolve, 0));
             }
         }
 
@@ -2817,29 +2960,22 @@ class HeartbeatViz {
         };
         const defaultColor = '#8b949e';
 
-        const padding = { left: 35, right: 10, top: 10, bottom: 20 };
+        const padding = { left: 30, right: 10, top: 10, bottom: 20 };
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
-        // Limit to recent steps
-        const maxVisible = 15;
-        const recentData = this.datasetBreakdown.slice(-maxVisible);
+        const data = this.datasetBreakdown;
 
-        const barHeight = Math.min(16, (plotHeight - 10) / recentData.length - 2);
-        const barSpacing = (plotHeight - recentData.length * barHeight) / (recentData.length + 1);
-
-        // Find max total for scaling and collect all dataset names
+        // Collect all dataset names and find max value
         const allDatasets = new Set();
-        let maxTotal = 0;
-        for (const d of recentData) {
-            let sum = 0;
+        let maxVal = 0;
+        for (const d of data) {
             for (const [key, val] of Object.entries(d)) {
                 if (key !== 'step') {
                     allDatasets.add(key);
-                    sum += val;
+                    maxVal = Math.max(maxVal, val);
                 }
             }
-            maxTotal = Math.max(maxTotal, sum);
         }
 
         // Sort datasets for consistent ordering
@@ -2853,38 +2989,37 @@ class HeartbeatViz {
             return ai - bi;
         });
 
-        for (let i = 0; i < recentData.length; i++) {
-            const d = recentData[i];
-            const y = padding.top + barSpacing + i * (barHeight + barSpacing);
+        // X scale: step index
+        const stepToX = (i) => padding.left + (i / Math.max(1, data.length - 1)) * plotWidth;
+        // Y scale: value
+        const valToY = (v) => padding.top + plotHeight - (v / Math.max(1, maxVal)) * plotHeight;
 
-            // Step label
-            ctx.fillStyle = '#8b949e';
-            ctx.font = '10px -apple-system, sans-serif';
-            ctx.textAlign = 'right';
-            ctx.fillText('s' + d.step, padding.left - 5, y + barHeight / 2 + 3);
-
-            // Calculate total
-            let total = 0;
-            for (const [key, val] of Object.entries(d)) {
-                if (key !== 'step') total += val;
+        // Draw lines for each dataset
+        ctx.lineWidth = 1.5;
+        for (const dsName of sortedDatasets) {
+            ctx.strokeStyle = datasetColors[dsName] || defaultColor;
+            ctx.beginPath();
+            let started = false;
+            for (let i = 0; i < data.length; i++) {
+                const val = data[i][dsName] || 0;
+                const x = stepToX(i);
+                const y = valToY(val);
+                if (!started) {
+                    ctx.moveTo(x, y);
+                    started = true;
+                } else {
+                    ctx.lineTo(x, y);
+                }
             }
-
-            if (total === 0) continue;
-
-            const totalBarWidth = (total / maxTotal) * plotWidth;
-            let x = padding.left;
-            const scale = totalBarWidth / total;
-
-            // Draw stacked bar for each dataset
-            for (const dsName of sortedDatasets) {
-                const count = d[dsName] || 0;
-                if (count <= 0) continue;
-                ctx.fillStyle = datasetColors[dsName] || defaultColor;
-                const w = count * scale;
-                ctx.fillRect(x, y, w, barHeight);
-                x += w;
-            }
+            ctx.stroke();
         }
+
+        // Y-axis labels
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(maxVal.toString(), padding.left - 4, padding.top + 4);
+        ctx.fillText('0', padding.left - 4, padding.top + plotHeight);
 
         // Legend at bottom
         ctx.font = '9px -apple-system, sans-serif';
@@ -2944,25 +3079,18 @@ class HeartbeatViz {
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
-        // Limit to recent steps
-        const maxVisible = 15;
-        const recentData = this.tokenBreakdown.slice(-maxVisible);
+        const data = this.tokenBreakdown;
 
-        const barHeight = Math.min(16, (plotHeight - 10) / recentData.length - 2);
-        const barSpacing = (plotHeight - recentData.length * barHeight) / (recentData.length + 1);
-
-        // Find max total for scaling and collect all dataset names
+        // Collect all dataset names and find max value
         const allDatasets = new Set();
-        let maxTotal = 0;
-        for (const d of recentData) {
-            let sum = 0;
+        let maxVal = 0;
+        for (const d of data) {
             for (const [key, val] of Object.entries(d)) {
                 if (key !== 'step') {
                     allDatasets.add(key);
-                    sum += val;
+                    maxVal = Math.max(maxVal, val);
                 }
             }
-            maxTotal = Math.max(maxTotal, sum);
         }
 
         // Sort datasets for consistent ordering
@@ -2976,45 +3104,38 @@ class HeartbeatViz {
             return ai - bi;
         });
 
-        for (let i = 0; i < recentData.length; i++) {
-            const d = recentData[i];
-            const y = padding.top + barSpacing + i * (barHeight + barSpacing);
+        // X scale: step index
+        const stepToX = (i) => padding.left + (i / Math.max(1, data.length - 1)) * plotWidth;
+        // Y scale: value
+        const valToY = (v) => padding.top + plotHeight - (v / Math.max(1, maxVal)) * plotHeight;
 
-            // Step label
-            ctx.fillStyle = '#8b949e';
-            ctx.font = '10px -apple-system, sans-serif';
-            ctx.textAlign = 'right';
-            ctx.fillText('s' + d.step, padding.left - 5, y + barHeight / 2 + 3);
-
-            // Calculate total
-            let total = 0;
-            for (const [key, val] of Object.entries(d)) {
-                if (key !== 'step') total += val;
+        // Draw lines for each dataset
+        ctx.lineWidth = 1.5;
+        for (const dsName of sortedDatasets) {
+            ctx.strokeStyle = datasetColors[dsName] || defaultColor;
+            ctx.beginPath();
+            let started = false;
+            for (let i = 0; i < data.length; i++) {
+                const val = data[i][dsName] || 0;
+                const x = stepToX(i);
+                const y = valToY(val);
+                if (!started) {
+                    ctx.moveTo(x, y);
+                    started = true;
+                } else {
+                    ctx.lineTo(x, y);
+                }
             }
-
-            if (total === 0) continue;
-
-            const totalBarWidth = (total / maxTotal) * plotWidth;
-            let x = padding.left;
-            const scale = totalBarWidth / total;
-
-            // Draw stacked bar for each dataset
-            for (const dsName of sortedDatasets) {
-                const count = d[dsName] || 0;
-                if (count <= 0) continue;
-                ctx.fillStyle = datasetColors[dsName] || defaultColor;
-                const w = count * scale;
-                ctx.fillRect(x, y, w, barHeight);
-                x += w;
-            }
-
-            // Show total tokens on right
-            ctx.fillStyle = '#8b949e';
-            ctx.font = '9px -apple-system, sans-serif';
-            ctx.textAlign = 'left';
-            const totalK = (total / 1000).toFixed(1) + 'k';
-            ctx.fillText(totalK, padding.left + totalBarWidth + 4, y + barHeight / 2 + 3);
+            ctx.stroke();
         }
+
+        // Y-axis labels (show in k)
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'right';
+        const maxK = maxVal >= 1000 ? (maxVal / 1000).toFixed(0) + 'k' : maxVal.toString();
+        ctx.fillText(maxK, padding.left - 4, padding.top + 4);
+        ctx.fillText('0', padding.left - 4, padding.top + plotHeight);
 
         // Legend at bottom
         ctx.font = '9px -apple-system, sans-serif';
