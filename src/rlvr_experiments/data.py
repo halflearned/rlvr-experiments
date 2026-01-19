@@ -24,7 +24,8 @@ GSM8K_ASSISTANT_PREFIX = ""
 GSM8K_MAX_COMPLETION_LEN = 512
 
 # MATH: Competition math, longer reasoning needed
-# Format: "Problem: ... Solution:" to match lm-evaluation-harness (uses \boxed{})
+# Format: "Question: ... Answer:" to match Qwen's MATH evaluation methodology
+# (achieves ~43% vs ~17% with lm-eval's "Problem: ... Solution:" format)
 MATH_SYSTEM_PROMPT = ""
 MATH_ASSISTANT_PREFIX = ""
 MATH_MAX_COMPLETION_LEN = 1024
@@ -323,9 +324,9 @@ def load_math(
     ds = ray.data.from_items(indexed_rows)
 
     def preprocess(row):
-        # Format: "Problem: ... Solution:" to match lm-evaluation-harness MATH format
+        # Format: "Question: ... Answer:" to match Qwen's MATH evaluation methodology
         # Model should output reasoning with final answer in \boxed{}
-        question = f"Problem: {row['problem'].strip()}\nSolution:"
+        question = f"Question: {row['problem'].strip()}\nAnswer:"
         # Use subject + index for prompt_id (e.g., math_algebra_0)
         prompt_id = f"math_{row['_subject']}_{row['_subject_idx']}"
         return {
@@ -333,7 +334,7 @@ def load_math(
             "problem": {
                 "answer": row["solution"],
                 "prompt_id": prompt_id,
-                "verifier_type": "math",
+                "verifier_type": "hendrycks_math",
                 "dataset_name": "math",
                 "system_prompt": MATH_SYSTEM_PROMPT,
                 "assistant_prefix": MATH_ASSISTANT_PREFIX,

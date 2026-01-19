@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from .math import MathVerifier
+from .hendrycks_math import HendrycksMathVerifier
 from .ifeval import IFEvalVerifier
 from .code import HumanEvalVerifier, MBPPVerifier, APPSVerifier
 
@@ -39,6 +40,7 @@ class MultiVerifier:
         """
         self._verifiers: dict[str, Any] = {
             "math": MathVerifier(timeout=math_timeout, max_workers=math_max_workers),
+            "hendrycks_math": HendrycksMathVerifier(),
             "ifeval": IFEvalVerifier(timeout=ifeval_timeout),
             "humaneval": HumanEvalVerifier(),
             "mbpp": MBPPVerifier(),
@@ -89,7 +91,7 @@ class MultiVerifier:
             t0 = time.perf_counter()
 
             # Use single-item verify for math/ifeval, verify_completions for code
-            if verifier_type == "math":
+            if verifier_type in ("math", "hendrycks_math"):
                 score = verifier.verify(c, p["answer"])
             elif verifier_type == "ifeval":
                 score = verifier.verify(c, p.get("ground_truth", ""))
@@ -125,7 +127,7 @@ class MultiVerifier:
             t0 = time.perf_counter()
 
             # Use single-item verify for math/ifeval, verify_completions for code
-            if verifier_type == "math":
+            if verifier_type in ("math", "hendrycks_math"):
                 score = verifier.verify(c, p["answer"])
             elif verifier_type == "ifeval":
                 score = verifier.verify(c, p.get("ground_truth", ""))

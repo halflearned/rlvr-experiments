@@ -37,6 +37,7 @@ from .code import (
     TestResult,
 )
 from .math import MathVerifier
+from .hendrycks_math import HendrycksMathVerifier
 from .ifeval import IFEvalVerifier
 from .multi import MultiVerifier
 from .distributed import VerifierPool
@@ -53,8 +54,9 @@ __all__ = [
     "MBPPVerifier",
     "SimpleCodeVerifier",
     "TestResult",
-    # Math verifier
+    # Math verifiers
     "MathVerifier",
+    "HendrycksMathVerifier",
     # IFEval verifier
     "IFEvalVerifier",
     # Multi-verifier (for mixed datasets)
