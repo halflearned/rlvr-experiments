@@ -152,10 +152,12 @@ async def main():
     completion_len_buckets = plan.training.get("completion_len_buckets") or [max_completion_len]
     max_seq_len = seq_len_buckets[-1]
 
-    # Sampling params (strip logprobs for generation, add seed if not present)
+    # Sampling params (strip logprobs for generation)
     sampling_params = {**plan.sampling, "logprobs": 0}
-    if "seed" not in sampling_params:
-        sampling_params["seed"] = seed
+    policy_temperature = sampling_params.get("temperature", 1.0)
+    # TODO: re-enable deterministic seeding with per-request seed variation
+    # if "seed" not in sampling_params:
+    #     sampling_params["seed"] = seed
     rollout_max_model_len = plan.roles.get("rollout").config.get("max_model_len")
     rollout_timeout_s = plan.training.get("rollout_timeout_s", 9999)
 
@@ -244,6 +246,7 @@ async def main():
                         rollout_sample.input_ids[i:i+mb],
                         rollout_sample.completion_ids[i:i+mb],
                         torch.tensor([rollout_sample.prompt_len] * min(mb, n - i)),
+                        temperature=policy_temperature,
                     )
                     chunks.append(chunk)
                 ref_logprobs = torch.cat(chunks, dim=0)
@@ -324,7 +327,46 @@ async def main():
 
             entry = await buffer.pop()
             if entry is None:
-                return  # Producer finished, buffer drained
+                # Producer finished, buffer drained - yield any partial batch
+                if samples:
+                    batch, stats = make_batch(
+                        samples,
+                        pad_token_id,
+                        seq_len_buckets=seq_len_buckets,
+                        completion_len_buckets=completion_len_buckets,
+                    )
+                    lags = []
+                    dataset_counts = {}
+                    dataset_tokens = {}
+                    for s in samples:
+                        lag = trainer.version - s.trainer_version
+                        lags.append(lag)
+                        sample_tokens = sum(s.rollout.completion_lens)
+                        buffer.stats.record_used(s.trainer_version)
+                        log_sample("trained", prompt_id=s.item_id, trained_at_step=trainer.version,
+                                   trainer_version=s.trainer_version, lag=lag, dataset=s.dataset,
+                                   n_tokens=sample_tokens)
+                        dataset_counts[s.dataset] = dataset_counts.get(s.dataset, 0) + 1
+                        dataset_tokens[s.dataset] = dataset_tokens.get(s.dataset, 0) + sample_tokens
+                    lag_counts = {}
+                    for lag in lags:
+                        lag_counts[lag] = lag_counts.get(lag, 0) + 1
+                    tracer.counter("batch.lag", {
+                        "mean_lag": sum(lags) / len(lags) if lags else 0,
+                        "max_lag": max(lags) if lags else 0,
+                        "trained_at_step": trainer.version,
+                        "partial_batch": True,
+                        **{f"lag_{k}": v for k, v in lag_counts.items()},
+                    })
+                    tracer.counter("batch.datasets", {
+                        "trained_at_step": trainer.version,
+                        "partial_batch": True,
+                        **dataset_counts,
+                        **{f"{k}_tokens": v for k, v in dataset_tokens.items()},
+                    })
+                    item_ids = [s.item_id for s in samples]
+                    yield batch, stats, item_ids
+                return
 
             # --- Staleness check ---
             # Reject samples generated with weights too far behind current trainer version
@@ -407,7 +449,11 @@ async def main():
                     loss_fn,
                     batch.input_ids,
                     loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages),
-                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens},
+                    loss_kwargs={
+                        "padding_mask": batch.mask,
+                        "prompt_lens": batch.prompt_lens,
+                        "temperature": policy_temperature,
+                    },
                     scale_loss=1.0 / accumulation_steps,
                     micro_batch_size=get_micro_batch_size(stats.padded_seq_len),
                 )

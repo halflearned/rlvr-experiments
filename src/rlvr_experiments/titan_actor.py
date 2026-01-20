@@ -238,6 +238,7 @@ class TitanModelRank:
         input_ids: torch.Tensor,
         completion_ids: torch.Tensor,
         prompt_lens: torch.Tensor | None = None,
+        temperature: float = 1.0,
     ) -> torch.Tensor | None:
         """Forward pass returning logprobs (only rank 0 returns, others return None).
 
@@ -285,7 +286,12 @@ class TitanModelRank:
         if isinstance(logits, DTensor) and prompt_lens is not None:
             # DTensor path: compute logprobs with vocab-sharded logits
             with loss_parallel():
-                logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
+                logprobs = compute_logprobs(
+                    logits,
+                    completion_ids,
+                    temperature=temperature,
+                    prompt_lens=prompt_lens,
+                )
                 # DEBUG: Memory after logprobs
                 if self.rank == 0:
                     alloc_lp = torch.cuda.memory_allocated() / 1e9
@@ -295,7 +301,12 @@ class TitanModelRank:
             # Regular path: gather logits first if DTensor
             if isinstance(logits, DTensor):
                 logits = logits.full_tensor()
-            logprobs = compute_logprobs(logits, completion_ids, prompt_lens=prompt_lens)
+            logprobs = compute_logprobs(
+                logits,
+                completion_ids,
+                temperature=temperature,
+                prompt_lens=prompt_lens,
+            )
 
         if _PROFILE_TITAN:
             torch.cuda.synchronize()

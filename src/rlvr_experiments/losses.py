@@ -106,9 +106,15 @@ class GRPOLoss(torch.nn.Module):
         advantages: torch.Tensor,       # [B] – pre-computed advantages (use compute_advantages())
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
         prompt_lens: torch.Tensor | None = None,  # [B] – prompt lengths for proper slicing
+        temperature: float = 1.0,
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
-        trainer_logprobs = compute_logprobs(logits, response, prompt_lens=prompt_lens)
+        trainer_logprobs = compute_logprobs(
+            logits,
+            response,
+            temperature=temperature,
+            prompt_lens=prompt_lens,
+        )
 
         # Move other tensors to same device, ensure float32
         ref_logprobs = ref_logprobs.to(trainer_logprobs.device).float()
@@ -215,9 +221,15 @@ class DrGRPOLoss(torch.nn.Module):
         advantages: torch.Tensor,       # [B] – pre-computed advantages (use compute_drgrpo_advantages())
         padding_mask: torch.Tensor,     # [B, T], 1 for tokens, 0 for pad
         prompt_lens: torch.Tensor | None = None,  # [B] – prompt lengths for proper slicing
+        temperature: float = 1.0,
     ):
         # Compute trainer logprobs from logits (keeps gradient flow)
-        trainer_logprobs = compute_logprobs(logits, response, prompt_lens=prompt_lens)
+        trainer_logprobs = compute_logprobs(
+            logits,
+            response,
+            temperature=temperature,
+            prompt_lens=prompt_lens,
+        )
 
         # Move other tensors to same device, ensure float32
         ref_logprobs = ref_logprobs.to(trainer_logprobs.device).float()

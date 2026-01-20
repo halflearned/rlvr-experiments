@@ -124,6 +124,7 @@ class VLLMEngineRank:
         self,
         token_ids_list: list[list[int]],
         prompt_lens: list[int],
+        temperature: float = 1.0,
     ) -> list[list[float]]:
         """Get logprobs for pre-tokenized sequences (for reference model use).
 
@@ -146,7 +147,7 @@ class VLLMEngineRank:
         sp = SamplingParams(
             max_tokens=1,  # vLLM requires at least 1, but we ignore the output
             prompt_logprobs=1,  # Get logprob of each prompt token
-            temperature=1.0,  # Doesn't matter since we're not sampling
+            temperature=temperature,
         )
         sp.output_kind = RequestOutputKind.FINAL_ONLY
 
@@ -435,6 +436,7 @@ class VLLMHandle:
         input_ids: torch.Tensor,
         completion_ids: torch.Tensor,
         prompt_lens: torch.Tensor,
+        temperature: float = 1.0,
     ) -> torch.Tensor:
         """Compute logprobs for reference model use (Titan-compatible interface).
 
@@ -473,7 +475,11 @@ class VLLMHandle:
             token_ids_list.append(seq[:actual_seq_len])
 
         # Get logprobs from vLLM
-        logprobs_lists = await self.get_logprobs_single(token_ids_list, prompt_lens_list)
+        logprobs_lists = await self.get_logprobs_single(
+            token_ids_list,
+            prompt_lens_list,
+            temperature=temperature,
+        )
 
         # Convert back to padded tensor [B, completion_len]
         result = torch.zeros(batch_size, completion_len, dtype=torch.float32)
@@ -487,6 +493,7 @@ class VLLMHandle:
         self,
         token_ids_list: list[list[int]],
         prompt_lens: list[int],
+        temperature: float = 1.0,
     ) -> list[list[float]]:
         """Get logprobs for pre-tokenized sequences with load-aware routing.
 
@@ -521,7 +528,11 @@ class VLLMHandle:
                 actor = self._actors[replica_idx]
                 try:
                     with trace_span("vllm.get_logprobs", args={"replica": replica_idx, "slot": slot_idx, "n_seqs": len(token_ids_list)}):
-                        result = await actor.get_logprobs.remote(token_ids_list, prompt_lens)
+                        result = await actor.get_logprobs.remote(
+                            token_ids_list,
+                            prompt_lens,
+                            temperature,
+                        )
                     return result
                 except asyncio.CancelledError:
                     # Request was cancelled - retry
