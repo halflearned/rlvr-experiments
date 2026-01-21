@@ -1,13 +1,8 @@
 """
-Verifier for GSM8K using gsm8k_cot-compatible extraction.
+Verifier for GSM8K using AllenAI-style extraction.
 
-This verifier extracts answers from "The answer is X." pattern to align
-with lm_eval's gsm8k_cot strict extraction, ensuring training rewards
-match evaluation metrics.
-
-Key difference from MathVerifier:
-- MathVerifier uses math_verify package (lenient, accepts many formats)
-- GSM8KVerifier requires "The answer is X." format (strict, matches eval)
+This verifier extracts the last number in the response (after removing commas),
+matching the AllenAI RLVR GSM8K reward strategy used in the good run.
 """
 
 import re
@@ -16,22 +11,17 @@ from typing import Optional
 
 
 def extract_answer(text: str) -> Optional[str]:
-    """Extract answer from 'The answer is X.' pattern.
-
-    Matches gsm8k_cot strict extraction: The answer is (\-?[0-9\.\,]+).
-    """
-    # Match "The answer is X." where X is a number (possibly with commas, decimals, negative)
-    match = re.search(r"[Tt]he answer is (\-?[0-9\.\,]+)\.", text)
-    if match:
-        return match.group(1)
+    """Extract the last number from the response (AllenAI GSM8K style)."""
+    # Remove commas between digits (e.g., "1,234" -> "1234")
+    text = re.sub(r"(\\d),(\\d)", r"\\1\\2", text)
+    numbers = re.findall(r"[-+]?\\d*\\.\\d+|\\d+", text)
+    if numbers:
+        return numbers[-1]
     return None
 
 
 def normalize_number(s: str) -> Optional[str]:
-    """Normalize a number string for comparison.
-
-    Matches gsm8k_cot's regexes_to_ignore: commas, dollar signs, trailing periods.
-    """
+    """Normalize a number string for comparison."""
     if s is None:
         return None
     # Remove commas and dollar signs (gsm8k_cot regexes_to_ignore)
@@ -77,18 +67,12 @@ def is_equiv(pred: str, gold: str) -> bool:
 
 class GSM8KVerifier:
     """
-    Verifier for GSM8K using gsm8k_cot-compatible extraction.
-
-    Extracts from "The answer is X." pattern to match gsm8k_cot strict evaluation.
-    This ensures training rewards align with eval metrics.
+    Verifier for GSM8K using AllenAI last-number extraction.
 
     Args:
-        format_weight: Weight for format reward (0.0 to 1.0). If > 0, gives partial
-            credit for having correct format even with wrong answer:
-            - No format match: 0.0
-            - Format match, wrong answer: format_weight
-            - Format match, correct answer: 1.0
-            Default 0.0 means strict correctness only (original behavior).
+        format_weight: Optional format reward (0.0 to 1.0). If > 0, gives partial
+            credit for having any numeric output even with wrong answer.
+            Default 0.0 means strict correctness only (matches good run).
     """
 
     def __init__(self, format_weight: float = 0.0):
@@ -111,12 +95,9 @@ class GSM8KVerifier:
             if pred is None:
                 return 0.0
 
-            # Format is correct, check answer
             if is_equiv(pred, target):
                 return 1.0
-            else:
-                # Wrong answer but correct format
-                return self.format_weight
+            return self.format_weight
         except Exception:
             return 0.0
 

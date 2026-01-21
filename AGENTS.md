@@ -2,7 +2,100 @@
 
 Notes for AI agents working on this codebase.
 
+## Compute Resources
+
+### Available Nodes
+
+There are **two compute nodes** available for evaluation and training:
+
+| Node | Private IP | GPUs | Notes |
+|------|------------|------|-------|
+| Primary (this node) | (current) | 8x A100-80GB | Main development node |
+| Secondary | 172.31.17.116 | 8x A100-80GB | Same VPC, SSH accessible |
+
+**SSH to secondary node:**
+```bash
+ssh ubuntu@172.31.17.116
+```
+
+Both nodes mount the same EFS filesystem at `/efs/rlvr-experiments/`, so scripts and checkpoints are shared.
+
+**IMPORTANT: When running commands on the secondary node via SSH, always use absolute paths.**
+
+Due to shell initialization quirks, `cd /path && source .venv/bin/activate` often fails. Instead:
+- Use `/efs/rlvr-experiments/.venv/bin/activate` (absolute path)
+- Use `/efs/rlvr-experiments/scripts/...` for scripts
+- Reference checkpoints with full paths `/efs/rlvr-experiments/checkpoints/...`
+
+Example:
+```bash
+# WRONG - often fails
+ssh ubuntu@172.31.17.116 "cd /efs/rlvr-experiments && source .venv/bin/activate && python script.py"
+
+# CORRECT - use absolute paths
+ssh ubuntu@172.31.17.116 "source /efs/rlvr-experiments/.venv/bin/activate && python /efs/rlvr-experiments/script.py"
+```
+
+**Running parallel evals on both nodes:**
+```bash
+# On primary node - run jobs 0-19 on GPUs 0-7
+./scripts/evaluation/launch_math_qwen_workers.sh 0 8 0
+
+# On secondary node - run jobs 20-38 on GPUs 0-7
+ssh ubuntu@172.31.17.116 "cd /efs/rlvr-experiments && ./scripts/evaluation/launch_math_qwen_workers.sh 20 8 0"
+```
+
 ## General Guidelines
+
+### GPU Utilization - MAXIMIZE PARALLELISM
+
+**CRITICAL: Always use ALL available GPUs when running parallel jobs.**
+
+**BEFORE LAUNCHING ANY GPU JOB:**
+1. **CHECK if the GPU is free first**: `nvidia-smi --query-gpu=index,memory.used --format=csv,noheader`
+2. If memory > 0 but utilization is 0%, it's likely a zombie process - **KILL IT** and use that GPU
+3. If memory > 0 and utilization > 0%, that GPU is actively in use - pick a different one
+4. Only launch on GPUs showing 0 MiB memory usage (or after killing zombies)
+
+**Killing zombie GPU processes:**
+```bash
+# Check full nvidia-smi to see PIDs
+nvidia-smi
+# Kill specific zombie process
+kill -9 <PID>
+```
+
+When launching batch evaluations or any parallel workload:
+1. **Count the total jobs** (e.g., 6 checkpoints × 5 tasks = 30 jobs)
+2. **Check which GPUs are free** before launching anything
+3. **Use ALL available FREE GPUs** (typically 8 per node, 16 across both nodes)
+4. **Launch jobs in parallel** - don't serialize when you can parallelize
+5. **Monitor GPU utilization** - if GPUs are idle, you're wasting expensive compute
+
+**Example - WRONG (wastes resources):**
+```bash
+# Only using 3 GPUs when 8 are available
+for ckpt in step20 step40 step60; do
+    run_eval.sh $ckpt minerva_math 4 $gpu &
+    gpu=$((gpu + 1))
+done
+```
+
+**Example - CORRECT (maximizes utilization):**
+```bash
+# Using all 8 GPUs across both nodes
+# 6 checkpoints = 6 GPUs
+for i in {0..5}; do
+    run_eval.sh ${CKPTS[$i]} minerva_math 4 $i &
+done
+```
+
+**Multi-node parallelism:**
+- Primary node: GPUs 0-7
+- Secondary node (172.31.17.116): GPUs 0-7
+- Launch jobs on BOTH nodes simultaneously for maximum throughput
+
+This is expensive cloud compute. Every idle GPU is wasted money.
 
 ### Long-Running Commands
 When running commands that take minutes (evals, training, etc.), always:
@@ -283,6 +376,55 @@ python entrypoints/train_grpo.py configs/my-config.yaml
 - The config should use local `/efs/` paths for model and tokenizer
 - Training logs are printed to stdout
 
+### Tulu Thinker GRPO (AllenAI Mixed) - Local + Parallel Eval
+
+Local training on GPUs 0-5 with OLMES eval on GPUs 6-7:
+
+```bash
+source .venv/bin/activate
+
+# Start Ray with only training GPUs visible
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 ray start --head --num-gpus=6 --temp-dir=/opt/dlami/nvme/ray_tmp
+
+# Train (leave GPUs 6-7 free)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 python entrypoints/train_grpo.py \
+  configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e3-thinker.yaml \
+  2>&1 | tee /tmp/grpo_thinker_train.log
+
+# In another shell, run OLMES eval watch on GPUs 6-7.
+# NOTE: OLMES runs in its own venv in the Docker image (/opt/olmes-venv).
+# For local runs, DO NOT install OLMES into .venv (it will clash with torch).
+# Instead, use /opt/olmes-venv/bin/python if present, or create a separate venv
+# (e.g., /efs/rlvr-experiments/.olmes-venv) and install requirements-olmes.txt there.
+# Set watch.local_dir in configs/eval/olmes-tulu-watch.yaml to /efs/rlvr-experiments/checkpoints
+CUDA_VISIBLE_DEVICES=6,7 /efs/rlvr-experiments/.venv/bin/python \
+  entrypoints/eval_benchmarks.py configs/eval/olmes-tulu-watch.yaml \
+  2>&1 | tee /tmp/olmes_eval_watch.log
+```
+
+If running locally, consider changing `output_dir` in `configs/eval/olmes-tulu-watch.yaml` to a local path
+like `/efs/rlvr-experiments/eval_results/olmes_tulu_watch`.
+
+### Tulu Thinker GRPO (AllenAI Mixed) - SageMaker
+
+Single-job training + eval (trainer on GPUs 0-5, eval on GPUs 6-7 by default):
+
+```bash
+source .venv/bin/activate
+
+python src/rlvr_experiments/submit.py \
+  configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e3-thinker.yaml \
+  --eval-config configs/eval/olmes-tulu-watch.yaml \
+  --build --push
+```
+
+If you need an explicit GPU split, add `--train-gpus "0,1,2,3,4,5" --eval-gpus "6,7"`.
+
+Notes:
+- On SageMaker, the launcher uses `/opt/olmes-venv/bin/python` for OLMES evals by default.
+- Locally, keep OLMES in a separate venv (do not install into `.venv`); use `/opt/olmes-venv/bin/python`
+  or create `/efs/rlvr-experiments/.olmes-venv` and install `requirements-olmes.txt` there.
+
 ## Model Evaluation with lm_eval
 
 Use `lm_eval` with the **vLLM backend** for fast evaluation. The vLLM backend is ~50-100x faster than the HuggingFace backend.
@@ -317,9 +459,10 @@ lm_eval --model vllm \
 ### Common Tasks
 
 ```bash
-# GSM8K (math reasoning) - use gsm8k for base models, gsm8k_cot for instruct models
---tasks gsm8k --num_fewshot 8        # Base models: ~65% at 8-shot
---tasks gsm8k_cot --num_fewshot 8    # Instruct models with CoT
+# GSM8K (math reasoning) - use gsm8k_cot for CoT prompting (matches Qwen3 eval)
+# Note: Qwen3 technical report uses "gsm8k (4-shot, cot)" which maps to gsm8k_cot
+--tasks gsm8k_cot --num_fewshot 4    # Chain-of-thought prompting (primary metric: strict-match)
+--tasks gsm8k --num_fewshot 8        # Alternative: non-CoT format
 
 # MATH (harder math)
 --tasks minerva_math --num_fewshot 4
@@ -360,61 +503,248 @@ lm_eval --model vllm \
    mv model.safetensors model-00001-of-00001.safetensors
    ```
 
+6. **MBPP/HumanEval require unsafe code execution** - These benchmarks run generated code. You MUST enable code execution with BOTH:
+   - Environment variable: `export HF_ALLOW_CODE_EVAL=1`
+   - CLI flag: `--confirm_run_unsafe_code` (for lm_eval)
+
+   Example for MBPP:
+   ```bash
+   export HF_ALLOW_CODE_EVAL=1
+   lm_eval --model vllm \
+     --model_args pretrained=/path/to/model,dtype=bfloat16,tensor_parallel_size=2 \
+     --tasks mbpp --num_fewshot 3 --batch_size auto --seed 42 \
+     --gen_kwargs temperature=0 \
+     --confirm_run_unsafe_code \
+     --output_path ./eval_results/mbpp_3shot
+   ```
+
+   For batch evaluation scripts, add to the worker script:
+   ```bash
+   # Enable code evaluation for MBPP
+   export HF_ALLOW_CODE_EVAL=1
+   ```
+
+   Without these flags, MBPP evaluations will fail with:
+   ```
+   ValueError: The "code_eval" metric executes untrusted model-generated code...
+   set the environment variable HF_ALLOW_CODE_EVAL="1"
+   ```
+
 ## Qwen3-1.7B-Base Evaluation Baselines
 
-Reference scores for comparing trained checkpoints. All evals: seed=42, temperature=0, greedy decoding, vLLM backend.
+Reference scores for comparing trained checkpoints.
 
-**Commands used to generate these baselines:**
-```bash
-# GSM8K 0-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks gsm8k --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 0
+### CRITICAL: Evaluation Requirements
 
-# GSM8K 4-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks gsm8k --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 4
+**NEVER use tensor_parallel_size > 1 for evaluation.** TP introduces non-determinism and gives wildly wrong results (e.g., 10% instead of 28% on minerva_math). These are small models - parallelize TASKS across GPUs, not the model itself.
 
-# GSM8K 8-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks gsm8k --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 8
-
-# hendrycks_math 4-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks hendrycks_math --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 4
-
-# IFEval 0-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks ifeval --batch_size auto --seed 42 --gen_kwargs temperature=0
-
-# MBPP 3-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks mbpp --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 3 --confirm_run_unsafe_code
-
-# HumanEval 0-shot
-lm_eval --model vllm --model_args pretrained=/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base,tensor_parallel_size=8,dtype=bfloat16,gpu_memory_utilization=0.9,max_model_len=4096 --tasks humaneval --batch_size auto --seed 42 --gen_kwargs temperature=0 --num_fewshot 0 --confirm_run_unsafe_code
+**Required settings for ALL evaluations:**
+```
+tensor_parallel_size=1    # MANDATORY - never use TP > 1
+seed=42                   # In model_args AND --seed flag
+temperature=0             # --gen_kwargs temperature=0
+max_model_len=4096        # Prevent OOM on long sequences
+gpu_memory_utilization=0.8
 ```
 
-### GSM8K (Math Reasoning)
+**Standard command template:**
+```bash
+CUDA_VISIBLE_DEVICES=$GPU lm_eval --model vllm \
+  --model_args "pretrained=$MODEL,dtype=bfloat16,tensor_parallel_size=1,gpu_memory_utilization=0.8,max_model_len=4096,seed=42" \
+  --tasks $TASK --num_fewshot $FEWSHOT \
+  --batch_size auto --seed 42 --gen_kwargs temperature=0 \
+  --output_path $OUTPUT_DIR
+```
 
-| Setting | flexible-extract | strict-match |
-|---------|------------------|--------------|
-| 0-shot  | 14.71%           | 0.00%        |
-| 4-shot  | 67.48%           | 59.14%       |
-| 8-shot  | 69.60%           | 68.92%       |
+**Parallel evaluation across GPUs:**
+```bash
+# Run 7 different benchmarks in parallel on GPUs 0-6
+CUDA_VISIBLE_DEVICES=0 lm_eval ... --tasks gsm8k --num_fewshot 4 &
+CUDA_VISIBLE_DEVICES=1 lm_eval ... --tasks gsm8k --num_fewshot 8 &
+CUDA_VISIBLE_DEVICES=2 lm_eval ... --tasks gsm8k_cot --num_fewshot 4 &
+# ... etc
+```
 
-### MATH (hendrycks_math, 4-shot)
+### Baselines (2026-01-20, TP=1, seed=42, temperature=0)
+
+#### GSM8K (Math Reasoning)
+
+| Task | Setting | flexible-extract | strict-match |
+|------|---------|------------------|--------------|
+| gsm8k | 4-shot | 68.61% | 59.44% |
+| gsm8k | 8-shot | 70.13% | 69.60% |
+| gsm8k_cot | 4-shot | 69.83% | 51.63% |
+| gsm8k_cot | 8-shot | 73.24% | 67.17% |
+
+**Note**: `gsm8k` uses `#### N` answer format. `gsm8k_cot` uses `The answer is N.` format.
+
+#### MATH
+
+| Benchmark | Setting | Metric | Value |
+|-----------|---------|--------|-------|
+| hendrycks_math | 4-shot | exact_match | **17.78%** |
+| minerva_math | 4-shot | exact_match | **28.20%** |
+| minerva_math | 4-shot | math_verify | **39.08%** |
+
+**minerva_math breakdown by subject:**
+
+| Subject | exact_match | math_verify |
+|---------|-------------|-------------|
+| prealgebra | 47.30% | 60.85% |
+| algebra | 38.53% | 56.08% |
+| num_theory | 23.33% | 27.96% |
+| geometry | 21.71% | 31.94% |
+| counting_and_prob | 17.30% | 32.49% |
+| precalc | 12.82% | 20.70% |
+| intermediate_algebra | 12.18% | 19.49% |
+
+#### IFEval (Instruction Following, 0-shot)
 
 | Metric | Value |
 |--------|-------|
-| Overall exact_match | **17.68%** |
+| prompt_level_strict_acc | 21.26% |
+| inst_level_strict_acc | 32.85% |
 
-### IFEval (Instruction Following, 0-shot)
-
-| Metric | Value |
-|--------|-------|
-| prompt_level_strict_acc | 22.00% |
-| inst_level_strict_acc | 33.81% |
-
-### Code Generation
+#### Code Generation
 
 | Benchmark | Setting | pass@1 |
 |-----------|---------|--------|
 | MBPP      | 3-shot  | 55.8%  |
 | HumanEval | 0-shot  | 48.78% |
+
+## Batch Checkpoint Evaluation
+
+### CRITICAL: Use Existing Scripts
+
+**DO NOT CREATE NEW EVALUATION SCRIPTS.** Use the existing scripts in `scripts/evaluation/`. If something doesn't work, FIX THE EXISTING SCRIPTS.
+
+The scripts already enforce the correct settings (TP=1, seed=42, temperature=0). Creating ad-hoc scripts leads to bugs like using TP=8 which gives completely wrong results.
+
+### Scripts Location
+
+| Script | Purpose |
+|--------|---------|
+| `run_lm_eval.sh` | Run single eval: `./run_lm_eval.sh <ckpt_path> <output_name> <task> <fewshot> [gpu]` |
+| `run_batch_evals.sh` | Run all standard tasks on multiple checkpoints from a JSON file |
+| `extract_results.py` | Extract lm_eval JSON results to CSV/Markdown |
+
+### Running Single Evaluations
+
+```bash
+# GSM8K 8-shot on GPU 0
+./scripts/evaluation/run_lm_eval.sh /path/to/checkpoint my_ckpt_step100 gsm8k 8 0
+
+# MBPP 3-shot on GPU 1 (code execution handled automatically)
+./scripts/evaluation/run_lm_eval.sh /path/to/checkpoint my_ckpt_step100 mbpp 3 1
+
+# IFEval 0-shot on GPU 2
+./scripts/evaluation/run_lm_eval.sh /path/to/checkpoint my_ckpt_step100 ifeval 0 2
+```
+
+### Running Parallel Baseline Evals
+
+To evaluate a model on all standard benchmarks in parallel (one per GPU):
+
+```bash
+MODEL="/path/to/model"
+OUTPUT_DIR="/path/to/output"
+COMMON="pretrained=$MODEL,dtype=bfloat16,tensor_parallel_size=1,gpu_memory_utilization=0.8,max_model_len=4096,seed=42"
+
+# Launch all in parallel on GPUs 0-6
+CUDA_VISIBLE_DEVICES=0 lm_eval --model vllm --model_args "$COMMON" --tasks gsm8k --num_fewshot 4 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/gsm8k_4shot" &
+CUDA_VISIBLE_DEVICES=1 lm_eval --model vllm --model_args "$COMMON" --tasks gsm8k --num_fewshot 8 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/gsm8k_8shot" &
+CUDA_VISIBLE_DEVICES=2 lm_eval --model vllm --model_args "$COMMON" --tasks gsm8k_cot --num_fewshot 4 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/gsm8k_cot_4shot" &
+CUDA_VISIBLE_DEVICES=3 lm_eval --model vllm --model_args "$COMMON" --tasks gsm8k_cot --num_fewshot 8 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/gsm8k_cot_8shot" &
+CUDA_VISIBLE_DEVICES=4 lm_eval --model vllm --model_args "$COMMON" --tasks hendrycks_math --num_fewshot 4 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/hendrycks_math_4shot" &
+CUDA_VISIBLE_DEVICES=5 lm_eval --model vllm --model_args "$COMMON" --tasks minerva_math --num_fewshot 4 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/minerva_math_4shot" &
+CUDA_VISIBLE_DEVICES=6 lm_eval --model vllm --model_args "$COMMON" --tasks ifeval --num_fewshot 0 --batch_size auto --seed 42 --gen_kwargs temperature=0 --output_path "$OUTPUT_DIR/ifeval_0shot" &
+wait
+```
+
+### Running Batch Evaluations
+
+Create a JSON file with checkpoints:
+```json
+[
+  {"checkpoint_path": "/path/to/ckpt1", "output_name": "exp1_step100"},
+  {"checkpoint_path": "/path/to/ckpt2", "output_name": "exp1_step200"}
+]
+```
+
+Run all 5 tasks (gsm8k 8-shot, gsm8k 4-shot, hendrycks_math, ifeval, mbpp):
+```bash
+./scripts/evaluation/run_batch_evals.sh jobs.json 0  # Run on GPU 0
+```
+
+### Extracting Results
+
+```bash
+# Generate CSV and Markdown from eval_results_batch/
+python scripts/evaluation/extract_results.py
+
+# Custom paths
+python scripts/evaluation/extract_results.py --results-dir /custom/results --csv output.csv
+```
+
+### Configuration Details
+
+All evals use these standard settings:
+- vLLM backend with bfloat16
+- tensor_parallel_size=1 (single GPU per eval)
+- seed=42, temperature=0 (greedy decoding)
+- gpu_memory_utilization=0.8, max_model_len=4096
+
+**Code execution tasks (MBPP, HumanEval):**
+- `HF_ALLOW_CODE_EVAL=1` environment variable (set automatically by scripts)
+- `--confirm_run_unsafe_code` flag (added automatically for mbpp/humaneval tasks)
+
+### Metric Keys in Results JSON
+
+- GSM8K: `results.gsm8k.exact_match,flexible-extract` and `results.gsm8k.exact_match,strict-match`
+- hendrycks_math: `results.hendrycks_math.exact_match,none`
+- IFEval: `results.ifeval.prompt_level_strict_acc,none` and `results.ifeval.inst_level_strict_acc,none`
+- MBPP: `results.mbpp.pass_at_1,none` (note: underscore, not @)
+
+### Adding New Job Types
+
+When you have a new training job with different naming conventions:
+1. **DO NOT create a new script**
+2. Edit `scripts/evaluation/extract_results.py` and add the job to `JOB_METADATA` or `HADADV_JOBS`
+3. The run_lm_eval.sh script is generic and works with any checkpoint
+
+## MATH Benchmark Evaluation
+
+**CRITICAL: ALWAYS use `math_qwen` task, NEVER use `hendrycks_math`.**
+
+The `lm_eval` `hendrycks_math` task gives ~17% accuracy on Qwen3-1.7B-Base, but Qwen reports 43.5%. This is NOT a model issue - it's an evaluation methodology issue. The `hendrycks_math` results are **misleading and should not be used**.
+
+### Why `hendrycks_math` is Wrong
+
+| Aspect | lm_eval `hendrycks_math` (DON'T USE) | `math_qwen` (USE THIS) |
+|--------|--------------------------------------|------------------------|
+| Prompt template | `Problem: {X}\nAnswer:` | `Question: {X}\nAnswer:` |
+| Few-shot answers | Just the boxed value | Full CoT with reasoning + `\boxed{}` |
+| Answer extraction | String matching | `\boxed{}` + "The answer is X" patterns |
+| Verification | String normalization | Sympy symbolic equivalence |
+| **Base model accuracy** | **17.68% (WRONG)** | **42.9% (CORRECT)** |
+
+Base models need CoT exemplars showing HOW to reason and format answers.
+
+### Running MATH Evaluation
+
+Use the standard `run_lm_eval.sh` script with `math_qwen` task:
+
+```bash
+# Single checkpoint
+./scripts/evaluation/run_lm_eval.sh /path/to/checkpoint my_ckpt_step100 math_qwen 4 0
+
+# Batch evaluation (uses math_qwen automatically for MATH)
+./scripts/evaluation/run_batch_evals.sh jobs.json 0
+```
+
+The `math_qwen` task internally calls `scripts/adhoc/eval_math_qwen_style.py`.
+
+See `scripts/adhoc/NOTES_math_eval.md` for technical details.
 
 ## MBPP Training Notes
 
