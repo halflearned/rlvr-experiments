@@ -37,8 +37,10 @@ from .code import (
     TestResult,
 )
 from .math import MathVerifier
-from .hendrycks_math import HendrycksMathVerifier
+from .gsm8k import GSM8KVerifier
+from .minerva_math import MinervaMathVerifier
 from .ifeval import IFEvalVerifier
+from .allenai import AllenAIGSM8KVerifier, AllenAIMathVerifier
 from .multi import MultiVerifier
 from .distributed import VerifierPool
 
@@ -56,7 +58,11 @@ __all__ = [
     "TestResult",
     # Math verifiers
     "MathVerifier",
-    "HendrycksMathVerifier",
+    "GSM8KVerifier",
+    "MinervaMathVerifier",
+    # AllenAI verifiers
+    "AllenAIGSM8KVerifier",
+    "AllenAIMathVerifier",
     # IFEval verifier
     "IFEvalVerifier",
     # Multi-verifier (for mixed datasets)

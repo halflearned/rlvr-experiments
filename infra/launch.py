@@ -109,6 +109,25 @@ def cmd_set_head(args):
     print(f"Head node set to {args.ip}")
 
 
+def cmd_scale(args):
+    """Scale cluster to a new instance count."""
+    print(f"Scaling stack '{args.stack_name}' to {args.instances} instances...")
+    run(f"""aws cloudformation update-stack \
+        --stack-name {args.stack_name} \
+        --use-previous-template \
+        --capabilities CAPABILITY_IAM \
+        --parameters ParameterKey=InstanceCount,ParameterValue={args.instances} \
+                     ParameterKey=KeyName,UsePreviousValue=true""", capture=False)
+    print("Waiting for stack update...")
+    run(f"aws cloudformation wait stack-update-complete --stack-name {args.stack_name}", capture=False)
+    print("Stack updated.")
+
+    # Wait for new instances to be ready
+    instances = get_instances(args.stack_name)
+    wait_for_setup(instances, args.key)
+    cmd_status(args)
+
+
 def cmd_delete(args):
     print(f"Deleting stack '{args.stack_name}'...")
     run(f"aws cloudformation delete-stack --stack-name {args.stack_name}", capture=False)
@@ -130,7 +149,10 @@ if __name__ == "__main__":
     h = sub.add_parser("set-head", help="Set head node IP")
     h.add_argument("ip", help="Private IP of head node")
 
+    s = sub.add_parser("scale", help="Scale cluster to N instances")
+    s.add_argument("-n", "--instances", type=int, required=True, help="Target instance count")
+
     sub.add_parser("delete", help="Delete cluster")
 
     args = p.parse_args()
-    {"create": cmd_create, "status": cmd_status, "set-head": cmd_set_head, "delete": cmd_delete}[args.cmd](args)
+    {"create": cmd_create, "status": cmd_status, "set-head": cmd_set_head, "scale": cmd_scale, "delete": cmd_delete}[args.cmd](args)

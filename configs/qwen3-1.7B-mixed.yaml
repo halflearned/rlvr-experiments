@@ -9,7 +9,7 @@ tokenizer:
   use_fast: false
 
 training:
-  max_steps: 624
+  max_steps: 2000
   max_staleness: 0
   abort_in_flight: false
   checkpoint_interval: 50 
@@ -34,7 +34,6 @@ training:
     768: 64
     1280: 16
     2560: 8
-  max_concurrent_tasks: 4
 
 verifier:
   num_workers: 4
@@ -52,18 +51,29 @@ loss:
 
 data:
   dataset: mixed
+  cycle: true
   datasets:
     - name: gsm8k
       split: train
       weight: 0.25
+      order: "/efs/rlvr-experiments/experiments/curricula/gsm8k_curriculum.txt"
     - name: math
       split: train
       weight: 0.25
+      order: "/efs/rlvr-experiments/experiments/curricula/math_curriculum.txt"
     - name: mbpp
       split: train
       weight: 0.1
+      order: "/efs/rlvr-experiments/experiments/curricula/mbpp_curriculum.txt"
     - name: ifeval
-      weight: 0.4
+      weight: 0.3
+      order: "/efs/rlvr-experiments/experiments/curricula/ifeval_curriculum.txt"
+    - name: apps
+      split: train
+      difficulty: ["introductory"]
+      weight: 0.1
+      order: "/efs/rlvr-experiments/experiments/curricula/apps_introductory_curriculum.txt"
+
   seed: 42
 
 # Mixed datasets have different system prompts per sample, so leave empty here
@@ -107,7 +117,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000005  
+        lr: 0.000001  
         eps: 0.0001
 
       lr_scheduler:

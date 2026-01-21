@@ -70,8 +70,31 @@ fi
 # install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# install conda
-curl -s https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o /tmp/miniconda.sh && \
-bash /tmp/miniconda.sh -b -p $HOME/miniconda && \
-rm /tmp/miniconda.sh && \
-$HOME/miniconda/bin/conda init bash
+########################################
+# Redirect /tmp to NVMe (more space)
+########################################
+NVME_TMP="/opt/dlami/nvme/tmp"
+if [ -d "/opt/dlami/nvme" ]; then
+    echo "[INFO] Redirecting /tmp to NVMe..."
+    sudo mkdir -p "${NVME_TMP}"
+    sudo chmod 1777 "${NVME_TMP}"
+    sudo mount --bind "${NVME_TMP}" /tmp
+    grep -q "${NVME_TMP} /tmp" /etc/fstab || \
+        echo "${NVME_TMP} /tmp none bind 0 0" | sudo tee -a /etc/fstab
+    echo "[INFO] /tmp now on NVMe:"
+    df -h /tmp
+fi
+
+########################################
+# Put HuggingFace cache on NVMe
+########################################
+HF_CACHE="/opt/dlami/nvme/huggingface"
+if [ -d "/opt/dlami/nvme" ]; then
+    echo "[INFO] Setting up HuggingFace cache on NVMe..."
+    mkdir -p "${HF_CACHE}"
+    if ! grep -q 'HF_HOME' ~/.bashrc; then
+        echo "export HF_HOME=${HF_CACHE}" >> ~/.bashrc
+    fi
+    export HF_HOME="${HF_CACHE}"
+    echo "[INFO] HF_HOME set to ${HF_CACHE}"
+fi

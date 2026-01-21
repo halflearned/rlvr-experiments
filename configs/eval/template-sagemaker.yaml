@@ -1,0 +1,50 @@
+# Template eval config for SageMaker jobs with S3 paths
+#
+# When running on SageMaker, checkpoints should be in S3. The eval script
+# will download them to a local cache before running lm_eval.
+#
+# Instance types:
+#   - ml.g6e.48xlarge: 8x L40S (48GB each) - good for most evals
+#   - ml.g6e.24xlarge: 4x L40S - smaller/cheaper, set tensor_parallel_size: 4
+#   - ml.p4de.24xlarge: 8x A100 (80GB) - for very large models
+#
+# Usage:
+#   python -m rlvr_experiments.submit_eval configs/eval/my-eval.yaml --instance-type ml.g6e.48xlarge
+
+checkpoints:
+  - name: base
+    path: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/models/Qwen3-1.7B-Base
+
+  - name: step100
+    path: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/my_run/step100
+
+  - name: final
+    path: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/my_run/final
+
+benchmarks:
+  # Core math benchmarks
+  - task: gsm8k
+    num_fewshot: 8
+
+  - task: hendrycks_math
+    num_fewshot: 4
+
+  - task: minerva_math
+    num_fewshot: 4
+
+  # Instruction following
+  - task: ifeval
+
+  # Code generation
+  - task: mbpp
+    num_fewshot: 3
+
+vllm:
+  # For ml.g6e.48xlarge (8x L40S)
+  tensor_parallel_size: 8
+  dtype: bfloat16
+  gpu_memory_utilization: 0.9
+  max_model_len: 4096
+
+# Output to S3 for persistence
+output_dir: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/eval_results/my_run

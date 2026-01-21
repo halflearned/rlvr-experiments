@@ -13,37 +13,47 @@
     <article>
         <header>
             <h1>RLVR Experiments</h1>
-            <p class="subtitle">Subtitle</p>
+            <p class="subtitle">Async pipelines, curriculum learning, and dataset mixing for RL with verifiable rewards</p>
         </header>
 
         <section class="intro">
-            <p> text text </p>
+            RLVR intro etc
         </section>
 
-        <section id="system-architecture">
-            <h2>1. System Architecture</h2>
-            <p>TODO: Description of the system architecture.</p>
+        <section id="system">
+            <h2>1. System</h2>
+            <p>
+         </p>
+
+
         </section>
 
-        <details class="visualization-details" open>
+        <details class="visualization-details">
             <summary>Pipeline animation</summary>
             <section class="visualization">
-                <div class="controls">
-                    <button id="prev-btn" title="Previous step">&larr;</button>
-                    <input type="range" id="time-slider" min="0" max="100" value="0">
-                    <button id="next-btn" title="Next step">&rarr;</button>
-                    <span id="time-display">0.0s</span>
-                    <button id="play-btn" title="Play/Pause">&#9654;</button>
-                </div>
 
                 <div class="graphs">
                     <div class="graph-container">
-                        <h3>Pipeline Timeline</h3>
+                        <div class="graph-header">
+                            <h3>Pipeline Timeline</h3>
+                            <div class="graph-nav">
+                                <button id="timeline-prev" title="Earlier">&larr;</button>
+                                <span id="timeline-range"></span>
+                                <button id="timeline-next" title="Later">&rarr;</button>
+                            </div>
+                        </div>
                         <canvas id="timeline-canvas"></canvas>
                     </div>
 
                     <div class="graph-container">
-                        <h3>Buffer Dynamics</h3>
+                        <div class="graph-header">
+                            <h3>Buffer Dynamics</h3>
+                            <div class="graph-nav">
+                                <button id="buffer-prev" title="Earlier">&larr;</button>
+                                <span id="buffer-range"></span>
+                                <button id="buffer-next" title="Later">&rarr;</button>
+                            </div>
+                        </div>
                         <canvas id="buffer-canvas"></canvas>
                     </div>
 
@@ -67,9 +77,29 @@
         <section id="experiments">
             <h2>2. Experiments</h2>
 
+            <section id="setup">
+                <h3>2.1 Setup</h3>
+                <p>
+                    <strong>Model:</strong> Qwen3-1.7B-Base<br>
+                    <strong>Datasets:</strong> GSM8K (7,473), MATH L3-5 (5,584), MBPP (374), IFEval (3,200)<br>
+                    <strong>Training:</strong> GRPO with 8 completions per prompt, β=0.001
+                </p>
+                <p>
+                    We run a factorial experiment across three axes:
+                </p>
+                <ul>
+                    <li><strong>Learning rate:</strong> 1e-6, 5e-6, 1e-5</li>
+                    <li><strong>Staleness:</strong> 0 (strict on-policy) vs 1 (async)</li>
+                    <li><strong>Ordering:</strong> curriculum (easy→hard by pass@k) vs random</li>
+                    <li><strong>Mixing:</strong> interleaved (60% math, 40% IFEval) vs sequential (one dataset at a time)</li>
+                </ul>
+                <p>
+                    Total: 3 × 2 × 2 × 2 = 24 configurations. Each run trains for ~600 steps on 8×H100 GPUs.
+                </p>
+            </section>
+
             <section id="staleness">
-                <h3>2.1 Staleness</h3>
-                <p> text text </p>
+                <h3>2.2 Does staleness hurt?</h3>
                 <!-- Combined staleness diagrams (collapsible) -->
                 <details class="staleness-details" open>
                     <summary>Staleness diagrams</summary>
@@ -223,136 +253,64 @@
                         </div>
                     </div>
                 </details>
+            </section>
 
-                <h4>Results</h4>
+            <section id="curriculum">
+                <h3>Curriculum based on a-priori pass@k</h3>
+            </section>
+
+            <section id="mixing">
+                <h3>Dataset mixture</h3>
+            </section>
+
+            <section id="results">
+                <h3>2.5 Results</h3>
                 <div class="results-table-container">
                     <table class="results-table">
                         <thead>
                             <tr>
-                                <th>prompts_per_optim_step</th>
-                                <th>max_staleness</th>
+                                <th>Configuration</th>
                                 <th>GSM8K</th>
                                 <th>MATH</th>
-                                <th>MBPP</th>
                                 <th>IFEval</th>
+                                <th>MBPP</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr class="baseline-row">
-                                <td colspan="2" class="row-label">Base model</td>
+                                <td class="row-label">Base model</td>
                                 <td>64.6</td>
                                 <td>17.7</td>
-                                <td>55.8</td>
                                 <td>22.0</td>
                             </tr>
                             <tr>
-                                <td>16</td>
-                                <td>0</td>
-                                <td>68.7</td>
-                                <td>17.2</td>
-                                <td>55.0</td>
-                                <td>25.9</td>
-                            </tr>
-                            <tr>
-                                <td>16</td>
-                                <td>1</td>
-                                <td>&mdash;</td>
+                                <td>staleness=0, random, mixed</td>
                                 <td>&mdash;</td>
                                 <td>&mdash;</td>
                                 <td>&mdash;</td>
                             </tr>
                             <tr>
-                                <td>8</td>
-                                <td>1</td>
+                                <td>staleness=1, random, mixed</td>
                                 <td>&mdash;</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                            </tr>
+                            <tr>
+                                <td>staleness=1, curriculum, mixed</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                                <td>&mdash;</td>
+                            </tr>
+                            <tr>
+                                <td>staleness=1, random, sequential</td>
                                 <td>&mdash;</td>
                                 <td>&mdash;</td>
                                 <td>&mdash;</td>
                             </tr>
                         </tbody>
                     </table>
-                    <p class="table-caption"><strong>Table 1.</strong> Benchmark performance across staleness configurations. Model: Qwen3-1.7B-Base.</p>
+                    <p class="table-caption"><strong>Table 1.</strong> Results across configurations (LR=5e-6, ~600 steps).</p>
                 </div>
-            </section>
-
-            <section id="curriculum">
-                <h3>2.2 Curriculum Learning</h3>
-                <p>
-                    A significant fraction of generated samples are filtered due to constant rewards&mdash;the prompt
-                    is either too easy (all completions correct) or too hard (all incorrect). This represents wasted
-                    compute. Curriculum learning addresses this by ordering training samples by difficulty.
-                </p>
-
-                <h4>Measuring Difficulty via Pass@k</h4>
-                <p>
-                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
-                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
-                    solves it), while high pass@k indicates an "easy" prompt.
-                </p>
-
-                <div class="results-table-container">
-                    <table class="results-table">
-                        <thead>
-                            <tr>
-                                <th>Dataset</th>
-                                <th>Prompts</th>
-                                <th>pass@1</th>
-                                <th>pass@8</th>
-                                <th>pass@64</th>
-                                <th>pass@256</th>
-                                <th>pass@512</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td>GSM8K</td>
-                                <td>7,473</td>
-                                <td>75.0%</td>
-                                <td>95.6%</td>
-                                <td>99.2%</td>
-                                <td>99.7%</td>
-                                <td>99.8%</td>
-                            </tr>
-                            <tr>
-                                <td>MATH (L3-5)</td>
-                                <td>5,584</td>
-                                <td>29.7%</td>
-                                <td>57.4%</td>
-                                <td>76.5%</td>
-                                <td>82.3%</td>
-                                <td>84.0%</td>
-                            </tr>
-                            <tr>
-                                <td>MBPP</td>
-                                <td>374</td>
-                                <td>26.6%</td>
-                                <td>54.8%</td>
-                                <td>78.6%</td>
-                                <td>87.2%</td>
-                                <td>89.6%</td>
-                            </tr>
-                            <tr>
-                                <td>IFEval</td>
-                                <td>3,200</td>
-                                <td>7.6%</td>
-                                <td>16.5%</td>
-                                <td>23.4%</td>
-                                <td>26.0%</td>
-                                <td>27.0%</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
-                </div>
-
-                <p>
-                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
-                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
-                    in ascending order (hard-to-easy).
-                </p>
-
-                <h4>Results</h4>
-                <p>TODO: Curriculum vs random ordering comparison.</p>
             </section>
         </section>
     </article>

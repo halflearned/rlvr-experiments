@@ -34,7 +34,6 @@ training:
     768: 64
     1280: 16
     2560: 8
-  max_concurrent_tasks: 4
 
 verifier:
   num_workers: 4

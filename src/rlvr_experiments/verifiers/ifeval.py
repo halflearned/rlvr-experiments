@@ -1,11 +1,9 @@
 """IFEval verifier for instruction-following constraints.
 
-Implements verification functions for the RLVR-IFeval dataset constraints.
-Based on the IFEval benchmark: https://arxiv.org/abs/2311.07911
+Implements verification functions from AllenAI's open-instruct:
+https://github.com/allenai/open-instruct/blob/main/open_instruct/if_functions.py
 
-The ground_truth field contains a JSON object with:
-- func_name: Name of the validation function
-- Various parameters (N, keyword_list, forbidden_words, etc.)
+Covers all 25 constraints from the IFEval taxonomy.
 """
 
 import json
@@ -13,242 +11,317 @@ import re
 import time
 
 
-# --- Validation functions ---
-# Each takes (response, **kwargs) and returns bool
+# =============================================================================
+# AllenAI IFEval constraint verification functions
+# From: https://github.com/allenai/open-instruct/blob/main/open_instruct/if_functions.py
+# =============================================================================
 
 
-def validate_lowercase(response: str, **kwargs) -> bool:
-    """Check if response is entirely lowercase."""
-    return response == response.lower()
+def verify_keywords(text, keyword_list, **kwargs):
+    """
+    Verify if the response contains all the specified keywords.
+    """
+    response_lower = text.lower()
+    return all(keyword.lower() in response_lower for keyword in keyword_list)
 
 
-def validate_uppercase(response: str, **kwargs) -> bool:
-    """Check if response is entirely uppercase."""
-    return response == response.upper()
+def verify_keyword_frequency(text, word, N, **kwargs):
+    """
+    Verifies if a keyword appears exactly N times in the given text.
+    """
+    text = text.lower()
+    keyword = word.lower()
+    words = re.findall(r"\b\w+\b", text)
+    actual_count = sum(1 for w in words if w == keyword)
+    return actual_count == N
 
 
-def validate_no_commas(response: str, **kwargs) -> bool:
-    """Check if response contains no commas."""
-    return "," not in response
+def validate_forbidden_words(text, forbidden_words, **kwargs):
+    """
+    Validates that the text does not contain any of the specified forbidden words.
+    """
+    text_lower = text.lower()
+    found_words = [word for word in forbidden_words if word.lower() in text_lower]
+    return len(found_words) == 0
 
 
-def validate_quotation(response: str, **kwargs) -> bool:
-    """Check if response is wrapped in double quotes."""
-    response = response.strip()
-    return response.startswith('"') and response.endswith('"')
-
-
-def verify_keyword_frequency(response: str, keyword: str = None, N: int = None, **kwargs) -> bool:
-    """Check if keyword appears exactly N times."""
-    if keyword is None or N is None:
+def verify_letter_frequency(text, letter, N, **kwargs):
+    """
+    Verifies if a given letter appears exactly the specified number of times in the text.
+    """
+    if len(letter) != 1:
         return False
-    # Case-insensitive count
-    count = len(re.findall(re.escape(keyword), response, re.IGNORECASE))
-    return count >= N
+    actual_count = text.count(letter)
+    return actual_count == N
 
 
-def verify_keyword_existence(response: str, keyword_list: list = None, **kwargs) -> bool:
-    """Check if all keywords in the list exist in the response."""
-    if keyword_list is None:
-        return True
-    response_lower = response.lower()
-    return all(kw.lower() in response_lower for kw in keyword_list)
-
-
-def verify_forbidden_words(response: str, forbidden_words: list = None, **kwargs) -> bool:
-    """Check that none of the forbidden words appear in the response."""
-    if forbidden_words is None:
-        return True
-    response_lower = response.lower()
-    return not any(word.lower() in response_lower for word in forbidden_words)
-
-
-def verify_letter_frequency(response: str, letter: str = None, N: int = None, **kwargs) -> bool:
-    """Check if a specific letter appears at least N times."""
-    if letter is None or N is None:
-        return False
-    count = response.lower().count(letter.lower())
-    return count >= N
-
-
-def verify_paragraph_count(response: str, N: int = None, section_splitter: str = None, **kwargs) -> bool:
-    """Check if response has exactly N paragraphs separated by the splitter."""
-    if N is None:
-        return False
-    splitter = section_splitter or "***"
-    # Count paragraphs (number of parts when split)
-    parts = [p.strip() for p in response.split(splitter) if p.strip()]
-    return len(parts) == N
-
-
-def verify_sentence_count(response: str, N: int = None, **kwargs) -> bool:
-    """Check if response has at least N sentences."""
-    if N is None:
-        return False
-    # Simple sentence counting via punctuation
-    sentences = re.split(r'[.!?]+', response)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    return len(sentences) >= N
-
-
-def verify_word_count(response: str, N: int = None, quantifier: str = None, **kwargs) -> bool:
-    """Check word count constraints. quantifier can be 'at_least', 'at_most', 'exactly'."""
-    if N is None:
-        return False
-    words = response.split()
-    word_count = len(words)
-
-    if quantifier == "at_least":
-        return word_count >= N
-    elif quantifier == "at_most":
-        return word_count <= N
-    elif quantifier == "exactly":
-        return word_count == N
-    else:
-        # Default: at least N words
-        return word_count >= N
-
-
-def verify_bullet_points(response: str, N: int = None, **kwargs) -> bool:
-    """Check if response has at least N bullet points."""
-    if N is None:
-        return False
-    # Match lines starting with *, -, or numbered bullets
-    bullet_pattern = r'^[\s]*[-*•]|\d+[.)]\s'
-    bullets = re.findall(bullet_pattern, response, re.MULTILINE)
-    return len(bullets) >= N
-
-
-def verify_sections(response: str, N: int = None, section_splitter: str = None, **kwargs) -> bool:
-    """Check if response has exactly N sections."""
-    return verify_paragraph_count(response, N=N, section_splitter=section_splitter, **kwargs)
-
-
-def verify_end_phrase(response: str, end_phrase: str = None, **kwargs) -> bool:
-    """Check if response ends with a specific phrase."""
-    if end_phrase is None:
-        return False
-    return response.strip().endswith(end_phrase)
-
-
-def verify_postscript(response: str, postscript_marker: str = None, **kwargs) -> bool:
-    """Check if response contains a postscript with the given marker."""
-    if postscript_marker is None:
-        postscript_marker = "P.S."
-    return postscript_marker in response
-
-
-def verify_json_format(response: str, **kwargs) -> bool:
-    """Check if response is valid JSON or contains a JSON block."""
-    # Try to parse entire response as JSON
+def validate_response_language(text, language, **kwargs):
+    """
+    Validates that the entire response is in the specified language.
+    """
     try:
-        json.loads(response.strip())
-        return True
-    except json.JSONDecodeError:
-        pass
+        from langdetect import detect
+        detected_language = detect(text)
+        return detected_language == language
+    except Exception:
+        return False
 
-    # Try to find JSON block in markdown code blocks
-    json_pattern = r'```(?:json)?\s*([\s\S]*?)```'
-    matches = re.findall(json_pattern, response)
-    for match in matches:
-        try:
-            json.loads(match.strip())
-            return True
-        except json.JSONDecodeError:
-            continue
 
+def verify_paragraph_count(text, N, **kwargs):
+    """
+    Verifies that a text contains the expected number of paragraphs,
+    where paragraphs are separated by markdown dividers '* * *'
+    """
+    def clean_text(text):
+        return "\n".join(line.strip() for line in text.splitlines()).strip()
+
+    text = clean_text(text)
+    paragraphs = text.split("* * *")
+    actual_count = len(paragraphs)
+    valid_paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    if len(valid_paragraphs) != actual_count:
+        return False
+    return actual_count == N
+
+
+def validate_word_constraint(text, N, quantifier, **kwargs):
+    """
+    Validates if a text meets specified word count constraints.
+    """
+    words = text.strip().split()
+    actual_count = len(words)
+    tolerance = max(round(N * 0.1), 1)
+
+    if quantifier == "at least":
+        return actual_count >= N
+    elif quantifier == "at most":
+        return actual_count <= N
+    elif quantifier == "around":
+        return abs(actual_count - N) <= tolerance
+    else:
+        return False
+
+
+def verify_sentence_constraint(text, N, quantifier, **kwargs):
+    """
+    Verifies if a text contains the expected number of sentences.
+    """
+    sentences = re.split(r"(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?)\s", text)
+    actual_count = len(sentences)
+
+    if quantifier == "at least":
+        return actual_count >= N
+    elif quantifier == "around":
+        return abs(actual_count - N) <= 1
+    elif quantifier == "at most":
+        return actual_count <= N
+    else:
+        return False
+
+
+def validate_paragraphs(text, N, first_word, i, **kwargs):
+    """
+    Validates that a text contains the expected number of paragraphs and that
+    the i-th paragraph starts with a specific word.
+    """
+    paragraphs = text.split("\n\n")
+
+    if len(paragraphs) != N:
+        return False
+
+    return bool(paragraphs[i - 1].strip().startswith(first_word))
+
+
+def verify_postscript(text, postscript_marker, **kwargs):
+    """
+    Verifies if a text contains a postscript starting with the marker.
+    """
+    if postscript_marker in text:
+        marker_index = text.find(postscript_marker)
+        remaining_text = text[marker_index:].strip()
+        return len(remaining_text) > len(postscript_marker)
     return False
 
 
-def verify_title_format(response: str, **kwargs) -> bool:
-    """Check if response contains a title wrapped in <<brackets>>."""
-    return bool(re.search(r'<<[^>]+>>', response))
-
-
-def verify_placeholder(response: str, N: int = None, **kwargs) -> bool:
-    """Check if response contains at least N placeholders in [brackets]."""
-    if N is None:
-        N = 1
-    placeholders = re.findall(r'\[[^\]]+\]', response)
+def validate_placeholders(text, N, **kwargs):
+    """
+    Validates if a text contains at least the specified number of placeholders
+    in square brackets.
+    """
+    pattern = r"\[(.*?)\]"
+    placeholders = re.findall(pattern, text)
     return len(placeholders) >= N
 
 
-def verify_two_responses(response: str, **kwargs) -> bool:
-    """Check if response contains two distinct responses separated by markers."""
-    # Look for common separators
-    separators = ['***', '---', '===', '\n\n\n']
-    for sep in separators:
-        parts = [p.strip() for p in response.split(sep) if p.strip()]
-        if len(parts) >= 2:
+def verify_bullet_points(text, N, **kwargs):
+    """
+    Verifies if a text contains exactly N bullet points in markdown format.
+    """
+    lines = text.split("\n")
+    bullet_points = [line.strip() for line in lines if line.strip().startswith(("*", "-"))]
+    actual_count = len(bullet_points)
+    return actual_count == N
+
+
+def validate_title(text, **kwargs):
+    """
+    Validates if text contains a title wrapped in <<brackets>>.
+    """
+    pattern = r"<<(.*?)>>"
+    matches = re.findall(pattern, text)
+    return len(matches) > 0
+
+
+def validate_choice(text, options, **kwargs):
+    """
+    Validates if text matches one of the provided options.
+    """
+    # Handle both list and string formats for options
+    if isinstance(options, str):
+        options = [opt.strip() for opt in options.split(",")]
+    return any(text in option for option in options)
+
+
+def validate_highlighted_sections(text, N, **kwargs):
+    """
+    Validates if text contains at least N highlighted sections (*text*).
+    """
+    pattern = r"\*(.*?)\*"
+    matches = re.findall(pattern, text)
+    return len(matches) >= N
+
+
+def validate_sections(text, N, section_splitter, **kwargs):
+    """
+    Validates if text has exactly N sections when split by delimiter.
+    """
+    sections = text.split(section_splitter)
+    if sections[0] == "":
+        sections.pop(0)
+    return len(sections) == N
+
+
+def validate_json_format(text, **kwargs):
+    """
+    Validates if text is valid JSON.
+    """
+    try:
+        json.loads(text)
+        return True
+    except (ValueError, json.JSONDecodeError):
+        return False
+
+
+def validate_repeat_prompt(text, original_prompt, **kwargs):
+    """
+    Validates if text starts with the original prompt.
+    """
+    return bool(text.startswith(original_prompt))
+
+
+def validate_two_responses(text, **kwargs):
+    """
+    Validates if text contains exactly two distinct responses separated by '******'.
+    """
+    if text.count("******") == 1:
+        response_list = text.split("******")
+        first_response = response_list[0].strip()
+        second_response = response_list[1].strip()
+        if first_response != second_response:
             return True
     return False
 
 
-def verify_repeat_prompt(response: str, original_prompt: str = None, **kwargs) -> bool:
-    """Check if response repeats the original prompt."""
-    if original_prompt is None:
+def validate_uppercase(text, **kwargs):
+    """
+    Validates if entire text is uppercase.
+    """
+    return text == text.upper()
+
+
+def validate_lowercase(text, **kwargs):
+    """
+    Validates if entire text is lowercase.
+    """
+    return text == text.lower()
+
+
+def validate_frequency_capital_words(text, N, quantifier, **kwargs):
+    """
+    Validates capital word frequency with quantifier support.
+    """
+    words = re.findall(r"\b[A-Z]+\b", text)
+    if quantifier == "at least":
+        return len(words) >= N
+    elif quantifier == "around":
+        return len(words) == N
+    elif quantifier == "at most":
+        return len(words) <= N
+    else:
         return False
-    # Check if original prompt appears in response (case-insensitive)
-    return original_prompt.lower() in response.lower()
 
 
-def verify_highlighted_sections(response: str, N: int = None, **kwargs) -> bool:
-    """Check if response has at least N highlighted sections (*text* or **text**)."""
-    if N is None:
-        N = 1
-    highlights = re.findall(r'\*+[^*]+\*+', response)
-    return len(highlights) >= N
+def validate_end(text, end_phrase, **kwargs):
+    """
+    Validates if text ends with the specified phrase.
+    """
+    return bool(text.endswith(end_phrase))
 
 
-def verify_capitalized_words(response: str, N: int = None, **kwargs) -> bool:
-    """Check if response has at least N fully capitalized words."""
-    if N is None:
-        return False
-    # Match words that are all caps (at least 2 chars)
-    caps_words = re.findall(r'\b[A-Z]{2,}\b', response)
-    return len(caps_words) >= N
+def validate_quotation(text, **kwargs):
+    """
+    Validates if text is wrapped in double quotes.
+    """
+    return bool(text.startswith('"') and text.endswith('"'))
 
 
-# --- Function registry ---
+def validate_no_commas(text, **kwargs):
+    """
+    Validates if text contains no commas.
+    """
+    return "," not in text
 
-VALIDATION_FUNCTIONS = {
-    # Case constraints
-    "validate_lowercase": validate_lowercase,
-    "validate_uppercase": validate_uppercase,
 
-    # Punctuation/format constraints
-    "validate_no_commas": validate_no_commas,
-    "validate_quotation": validate_quotation,
-    "verify_json_format": verify_json_format,
-    "verify_title_format": verify_title_format,
+# =============================================================================
+# Function registry - maps func_name to validation function
+# =============================================================================
 
-    # Keyword constraints
+IF_FUNCTIONS_MAP = {
+    "verify_keywords": verify_keywords,
     "verify_keyword_frequency": verify_keyword_frequency,
-    "verify_keyword_existence": verify_keyword_existence,
-    "verify_forbidden_words": verify_forbidden_words,
+    "validate_forbidden_words": validate_forbidden_words,
     "verify_letter_frequency": verify_letter_frequency,
-
-    # Structure constraints
+    "validate_response_language": validate_response_language,
     "verify_paragraph_count": verify_paragraph_count,
-    "verify_sentence_count": verify_sentence_count,
-    "verify_word_count": verify_word_count,
-    "verify_bullet_points": verify_bullet_points,
-    "verify_sections": verify_sections,
-    "verify_highlighted_sections": verify_highlighted_sections,
-
-    # Content constraints
-    "verify_end_phrase": verify_end_phrase,
+    "validate_word_constraint": validate_word_constraint,
+    "verify_sentence_constraint": verify_sentence_constraint,
+    "validate_paragraphs": validate_paragraphs,
     "verify_postscript": verify_postscript,
-    "verify_placeholder": verify_placeholder,
-    "verify_two_responses": verify_two_responses,
-    "verify_repeat_prompt": verify_repeat_prompt,
-    "verify_capitalized_words": verify_capitalized_words,
+    "validate_placeholders": validate_placeholders,
+    "verify_bullet_points": verify_bullet_points,
+    "validate_title": validate_title,
+    "validate_choice": validate_choice,
+    "validate_highlighted_sections": validate_highlighted_sections,
+    "validate_sections": validate_sections,
+    "validate_json_format": validate_json_format,
+    "validate_repeat_prompt": validate_repeat_prompt,
+    "validate_two_responses": validate_two_responses,
+    "validate_uppercase": validate_uppercase,
+    "validate_lowercase": validate_lowercase,
+    "validate_frequency_capital_words": validate_frequency_capital_words,
+    "validate_end": validate_end,
+    "validate_quotation": validate_quotation,
+    "validate_no_commas": validate_no_commas,
 }
 
 
 class IFEvalVerifier:
     """
-    Verifier for instruction-following constraints from RLVR-IFeval dataset.
+    Verifier for instruction-following constraints from IFEval datasets.
+
+    Supports both:
+    - allenai/RLVR-GSM-MATH-IF-Mixed-Constraints (func_name format)
+    - allenai/RLVR-IFeval (func_name format)
 
     Each problem has a ground_truth JSON with func_name and parameters.
     Returns 1.0 if constraint is satisfied, 0.0 otherwise.
@@ -257,7 +330,7 @@ class IFEvalVerifier:
     def __init__(self, timeout: float = 1.0):
         self.timeout = timeout
 
-    def _parse_ground_truth(self, ground_truth: str) -> dict:
+    def _parse_ground_truth(self, ground_truth: str | dict) -> dict:
         """Parse ground_truth JSON string."""
         if isinstance(ground_truth, dict):
             return ground_truth
@@ -274,12 +347,12 @@ class IFEvalVerifier:
         if not func_name:
             return 0.0
 
-        func = VALIDATION_FUNCTIONS.get(func_name)
+        func = IF_FUNCTIONS_MAP.get(func_name)
         if func is None:
             # Unknown function - return 0.0
             return 0.0
 
-        # Build kwargs from ground_truth, filtering out None values
+        # Build kwargs from ground_truth, filtering out None values and func_name
         kwargs = {k: v for k, v in gt.items() if k != "func_name" and v is not None}
 
         try:

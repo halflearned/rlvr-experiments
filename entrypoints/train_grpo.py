@@ -154,7 +154,8 @@ async def main():
 
     # Sampling params (strip logprobs for generation)
     sampling_params = {**plan.sampling, "logprobs": 0}
-    policy_temperature = sampling_params.get("temperature", 1.0)
+    # Force trainer/ref logprobs to temp=1.0 (ignore rollout temperature).
+    policy_temperature = 1.0
     # TODO: re-enable deterministic seeding with per-request seed variation
     # if "seed" not in sampling_params:
     #     sampling_params["seed"] = seed

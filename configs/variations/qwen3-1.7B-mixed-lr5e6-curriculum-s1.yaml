@@ -1,0 +1,172 @@
+run:
+  name: mixed_lr5e6_curriculum_s1
+
+model:
+  path: "Qwen/Qwen3-1.7B-Base"
+
+tokenizer:
+  pretrained_model_name_or_path: "Qwen/Qwen3-1.7B-Base"
+  use_fast: false
+
+training:
+  max_steps: 624
+  max_staleness: 1
+  abort_in_flight: false
+  checkpoint_interval: 50
+
+  seq_len_buckets: [768, 1280, 2560]
+  completion_len_buckets: [512, 1024, 2048]
+
+  prompts_per_rollout_sync: 16
+  prompts_per_reference_sync: 64
+  prompts_per_optim_step: 16
+  prompts_per_forward_backward: 2
+  completions_per_micro_batch:
+    768: 64
+    1280: 16
+    2560: 8
+
+verifier:
+  num_workers: 4
+
+loss:
+  beta: 0.05
+  eps: 0.2
+
+data:
+  dataset: mixed
+  datasets:
+    - name: gsm8k
+      split: train
+      weight: 0.25
+      order: "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/gsm8k_curriculum.txt"
+    - name: math
+      split: train
+      weight: 0.25
+      order: "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/math_curriculum.txt"
+    - name: mbpp
+      split: train
+      weight: 0.1
+      order: "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/mbpp_curriculum.txt"
+    - name: ifeval
+      weight: 0.4
+      order: "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/curricula/ifeval_curriculum.txt" 
+  seed: 42
+
+data_iter:
+  system_prompt: ""
+  assistant_prefix: ""
+
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 2048
+  n: 16
+  logprobs: 0
+
+buffer:
+  max_reads: 1
+  maxsize: 0
+
+roles:
+  - name: trainer
+    kind: titan
+    config:
+      trainable: true
+
+      profiling:
+        enable_profiling: true
+        save_traces_folder: "profile_trace"
+        profile_freq: 10
+
+      metrics:
+        log_freq: 1
+        enable_tensorboard: false
+        save_tb_folder: "tb"
+
+      model:
+        name: "qwen3"
+        flavor: "1.7B"
+        hf_assets_path: "Qwen/Qwen3-1.7B-Base"
+
+      optimizer:
+        name: "AdamW"
+        lr: 0.000005
+        eps: 0.0001
+
+      lr_scheduler:
+        warmup_steps: 0
+        decay_ratio: 0.0
+
+      training:
+        seq_len: 2560
+        dtype: "bfloat16"
+        mixed_precision_param: "bfloat16"
+        mixed_precision_reduce: "float32"
+
+      parallelism:
+        data_parallel_replicate_degree: 1
+        data_parallel_shard_degree: 1
+        fsdp_reshard_after_forward: "default"
+        tensor_parallel_degree: 2
+        context_parallel_degree: 1
+        disable_loss_parallel: false
+
+      checkpoint:
+        enable: true
+        folder: "checkpoint"
+        initial_load_in_hf: true
+        interval: 500
+        last_save_model_only: false
+        export_dtype: "bfloat16"
+        async_mode: "disabled"
+
+      activation_checkpoint:
+        mode: selective
+        selective_ac_option: "op"
+
+      compile:
+        enable: true
+        components:
+          - "model"
+
+  - name: reference
+    kind: vllm
+    config:
+      model: "Qwen/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      max_model_len: 2561
+      gpu_memory_utilization: 0.90
+      dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: false
+      enable_chunked_prefill: true
+
+  - name: rollout
+    kind: vllm
+    config:
+      model: "Qwen/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 10
+      max_num_seqs: 64
+      tensor_parallel_size: 1
+      data_parallel_size: 5
+      max_model_len: 2560
+      gpu_memory_utilization: 0.90
+      dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+
+sync:
+  chunk_mb: 100
+  wiring:
+    - src: trainer
+      dst: reference
+    - src: trainer
+      dst: rollout

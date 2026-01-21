@@ -1,3 +1,7 @@
+eval_results/
+curricula/
+experiments/
+.GENERAL.md
 docs/
 secrets.env
 assets/

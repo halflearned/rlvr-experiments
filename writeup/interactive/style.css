@@ -65,7 +65,49 @@ h3 {
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: #8b949e;
-    margin: 0 0 12px;
+    margin: 0;
+}
+
+.graph-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.graph-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.graph-nav button {
+    font-family: 'Roboto', sans-serif;
+    font-size: 14px;
+    padding: 4px 10px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #21262d;
+    color: #c9d1d9;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.graph-nav button:hover {
+    background: #30363d;
+    border-color: #666;
+}
+
+.graph-nav button:active {
+    background: #484f58;
+}
+
+.graph-nav span {
+    font-family: 'Source Code Pro', monospace;
+    font-size: 11px;
+    color: #8b949e;
+    min-width: 140px;
+    text-align: center;
 }
 
 p {

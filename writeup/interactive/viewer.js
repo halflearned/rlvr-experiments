@@ -1,34 +1,38 @@
 /**
  * RLVR Training Trace Viewer
  * Renders pipeline timeline, buffer dynamics, and sample fates from trace data.
+ *
+ * Performance optimizations for large traces:
+ * - Streaming parse with sampling for traces > 50k lines
+ * - Lazy initialization - only loads data when visualization is opened
+ * - Windowed viewing with navigation for timeline/buffer graphs
  */
 
 class TraceViewer {
     constructor() {
-        // Canvas contexts
         this.timelineCtx = null;
         this.bufferCtx = null;
         this.fatesCtx = null;
 
-        // Trace data
-        this.events = [];
+        this.dataLoaded = false;
         this.maxTs = 0;
-        this.playhead = 0;  // Current time position
 
-        // Parsed event arrays
         this.vllmSpans = [];
         this.refSpans = [];
         this.trainerSpans = [];
         this.verifierSpans = [];
         this.syncEvents = [];
         this.bufferEvents = [];
-        this.optimEvents = [];
 
-        // Playback
-        this.playing = false;
-        this.playInterval = null;
+        // Windowed viewing
+        this.windowDuration = 300;  // Show 300 seconds at a time
+        this.timelineStart = 0;
+        this.bufferStart = 0;
 
-        // Colors
+        // Sampling config
+        this.maxSpansPerType = 5000;
+        this.maxBufferEvents = 2000;
+
         this.colors = {
             generate: '#3fb950',
             reference: '#58a6ff',
@@ -43,91 +47,85 @@ class TraceViewer {
     }
 
     async init() {
-        // Get canvas contexts
         const timelineCanvas = document.getElementById('timeline-canvas');
         const bufferCanvas = document.getElementById('buffer-canvas');
         const fatesCanvas = document.getElementById('fates-canvas');
+
+        if (!timelineCanvas) return;
 
         this.timelineCtx = timelineCanvas.getContext('2d');
         this.bufferCtx = bufferCanvas.getContext('2d');
         this.fatesCtx = fatesCanvas.getContext('2d');
 
-        // Setup controls
-        this.setupControls();
+        this.setupNavigation();
 
-        // Load trace data
-        await this.loadTrace('trace.jsonl');
-
-        // Initial render
-        this.render();
-    }
-
-    setupControls() {
-        const slider = document.getElementById('time-slider');
-        const prevBtn = document.getElementById('prev-btn');
-        const nextBtn = document.getElementById('next-btn');
-        const playBtn = document.getElementById('play-btn');
-
-        slider.addEventListener('input', (e) => {
-            this.playhead = (e.target.value / 100) * this.maxTs;
-            this.updateTimeDisplay();
-            this.render();
-        });
-
-        prevBtn.addEventListener('click', () => {
-            this.step(-1);
-        });
-
-        nextBtn.addEventListener('click', () => {
-            this.step(1);
-        });
-
-        playBtn.addEventListener('click', () => {
-            this.togglePlay();
-        });
-
-        // Handle window resize
-        window.addEventListener('resize', () => this.render());
-    }
-
-    step(direction) {
-        // Step by ~5 seconds
-        const stepSize = 5;
-        this.playhead = Math.max(0, Math.min(this.maxTs, this.playhead + direction * stepSize));
-        this.updateSlider();
-        this.updateTimeDisplay();
-        this.render();
-    }
-
-    togglePlay() {
-        this.playing = !this.playing;
-        const playBtn = document.getElementById('play-btn');
-        playBtn.innerHTML = this.playing ? '&#10074;&#10074;' : '&#9654;';
-
-        if (this.playing) {
-            this.playInterval = setInterval(() => {
-                this.playhead += 0.5;  // Advance 0.5s per frame
-                if (this.playhead >= this.maxTs) {
-                    this.playhead = this.maxTs;
-                    this.togglePlay();
+        const details = document.querySelector('.visualization-details');
+        if (details) {
+            details.addEventListener('toggle', async () => {
+                if (details.open) {
+                    await this.loadTraceIfNeeded();
                 }
-                this.updateSlider();
-                this.updateTimeDisplay();
-                this.render();
-            }, 50);  // 20fps
-        } else {
-            clearInterval(this.playInterval);
+            });
+            if (details.open) {
+                await this.loadTraceIfNeeded();
+            }
+        }
+
+        let resizeTimeout;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                if (this.dataLoaded) this.render();
+            }, 100);
+        });
+    }
+
+    setupNavigation() {
+        const timelinePrev = document.getElementById('timeline-prev');
+        const timelineNext = document.getElementById('timeline-next');
+        const bufferPrev = document.getElementById('buffer-prev');
+        const bufferNext = document.getElementById('buffer-next');
+
+        if (timelinePrev) {
+            timelinePrev.addEventListener('click', () => {
+                this.timelineStart = Math.max(0, this.timelineStart - this.windowDuration);
+                this.renderTimeline();
+            });
+        }
+        if (timelineNext) {
+            timelineNext.addEventListener('click', () => {
+                this.timelineStart = Math.min(
+                    Math.max(0, this.maxTs - this.windowDuration),
+                    this.timelineStart + this.windowDuration
+                );
+                this.renderTimeline();
+            });
+        }
+        if (bufferPrev) {
+            bufferPrev.addEventListener('click', () => {
+                this.bufferStart = Math.max(0, this.bufferStart - this.windowDuration);
+                this.renderBuffer();
+            });
+        }
+        if (bufferNext) {
+            bufferNext.addEventListener('click', () => {
+                this.bufferStart = Math.min(
+                    Math.max(0, this.maxTs - this.windowDuration),
+                    this.bufferStart + this.windowDuration
+                );
+                this.renderBuffer();
+            });
         }
     }
 
-    updateSlider() {
-        const slider = document.getElementById('time-slider');
-        slider.value = (this.playhead / this.maxTs) * 100;
-    }
-
-    updateTimeDisplay() {
-        const display = document.getElementById('time-display');
-        display.textContent = `${this.playhead.toFixed(1)}s / ${this.maxTs.toFixed(0)}s`;
+    async loadTraceIfNeeded() {
+        if (this.dataLoaded) return;
+        this.dataLoaded = true;
+        await this.loadTrace('trace.jsonl');
+        // Start at end of trace to show most recent data
+        this.timelineStart = Math.max(0, this.maxTs - this.windowDuration);
+        this.bufferStart = Math.max(0, this.maxTs - this.windowDuration);
+        this.render();
     }
 
     async loadTrace(url) {
@@ -136,91 +134,121 @@ class TraceViewer {
             const text = await response.text();
             const lines = text.trim().split('\n');
 
-            // Parse JSON lines
-            for (const line of lines) {
-                if (!line.trim()) continue;
-                try {
-                    const event = JSON.parse(line);
-                    this.events.push(event);
-                } catch (e) {
-                    // Skip malformed lines
-                }
+            console.log(`Trace has ${lines.length} lines`);
+
+            const isLarge = lines.length > 50000;
+            const sampleRate = isLarge ? Math.ceil(lines.length / 50000) : 1;
+
+            if (isLarge) {
+                console.log(`Large trace detected, sampling every ${sampleRate} events`);
             }
 
-            this.processEvents();
-            this.updateTimeDisplay();
+            await this.parseEventsChunked(lines, sampleRate);
         } catch (e) {
             console.error('Failed to load trace:', e);
         }
     }
 
-    processEvents() {
+    async parseEventsChunked(lines, sampleRate) {
+        const chunkSize = 10000;
         let currentVersion = 0;
+        let lineIndex = 0;
 
-        for (const event of this.events) {
-            const ts = event.ts || 0;
-            this.maxTs = Math.max(this.maxTs, ts + (event.dur || 0));
+        const tempVllm = [];
+        const tempRef = [];
+        const tempTrainer = [];
+        const tempVerifier = [];
+        const tempBuffer = [];
 
-            // Track version from sync events
-            if (event.type === 'sync') {
-                currentVersion = event.version || currentVersion + 1;
-                this.syncEvents.push({ ts, version: currentVersion });
-            }
+        const processChunk = () => {
+            const endIndex = Math.min(lineIndex + chunkSize, lines.length);
 
-            // Span events (pipeline activity)
-            if (event.type === 'span') {
-                const span = {
-                    ts,
-                    dur: event.dur || 0,
-                    name: event.name,
-                    replica: event.replica || 0,
-                    slot: event.slot || 0,
-                    worker: event.worker || 0
-                };
+            for (; lineIndex < endIndex; lineIndex++) {
+                const line = lines[lineIndex];
+                if (!line || !line.trim()) continue;
 
-                if (event.name === 'vllm.generate_single' || event.name === 'generate') {
-                    this.vllmSpans.push(span);
-                } else if (event.name === 'reference' || event.name === 'ref_logprobs' || event.name === 'vllm.get_logprobs') {
-                    this.refSpans.push(span);
-                } else if (event.name === 'train' || event.name === 'forward_backward' || event.name === 'optim_step') {
-                    this.trainerSpans.push(span);
-                } else if (event.name === 'verify' || event.name === 'verifier') {
-                    this.verifierSpans.push(span);
-                } else if (event.name.startsWith('sync.')) {
-                    // Treat sync spans as sync events
-                    this.syncEvents.push({ ts, version: currentVersion, dur: event.dur });
+                let event;
+                try {
+                    event = JSON.parse(line);
+                } catch (e) {
+                    continue;
+                }
+
+                const ts = event.ts || 0;
+                this.maxTs = Math.max(this.maxTs, ts + (event.dur || 0));
+
+                if (event.type === 'sync') {
+                    currentVersion = event.version || currentVersion + 1;
+                    this.syncEvents.push({ ts, version: currentVersion });
+                    continue;
+                }
+
+                if (event.type === 'buffer') {
+                    tempBuffer.push({
+                        ts,
+                        size: event.size,
+                        byVersion: event.by_version || {},
+                        fates: event.fates || { used: {}, wasted: {}, filtered: {}, failed: {} },
+                        version: currentVersion
+                    });
+                    continue;
+                }
+
+                if (event.type === 'span' && (sampleRate === 1 || lineIndex % sampleRate === 0)) {
+                    const span = { ts, dur: event.dur || 0 };
+
+                    if (event.name === 'vllm.generate_single' || event.name === 'generate') {
+                        tempVllm.push(span);
+                    } else if (event.name === 'reference' || event.name === 'ref_logprobs' || event.name === 'vllm.get_logprobs') {
+                        tempRef.push(span);
+                    } else if (event.name === 'train' || event.name === 'forward_backward' || event.name === 'optim_step') {
+                        tempTrainer.push(span);
+                    } else if (event.name === 'verify' || event.name === 'verifier') {
+                        tempVerifier.push(span);
+                    } else if (event.name.startsWith('sync.')) {
+                        this.syncEvents.push({ ts, version: currentVersion, dur: event.dur });
+                    }
                 }
             }
+        };
 
-            // Buffer events
-            if (event.type === 'buffer') {
-                this.bufferEvents.push({
-                    ts,
-                    size: event.size,
-                    byVersion: event.by_version || {},
-                    fates: event.fates || { used: {}, wasted: {}, filtered: {}, failed: {} },
-                    version: currentVersion
-                });
-            }
-
-            // Optim events
-            if (event.type === 'optim') {
-                this.optimEvents.push({ ts, step: event.step });
+        while (lineIndex < lines.length) {
+            processChunk();
+            if (lineIndex < lines.length) {
+                await new Promise(resolve => setTimeout(resolve, 0));
             }
         }
 
-        // Set playhead to first generation event
-        if (this.vllmSpans.length > 0) {
-            this.playhead = this.vllmSpans[0].ts + 5;  // Start 5s after first generation
-        } else {
-            this.playhead = Math.min(30, this.maxTs * 0.01);
+        this.vllmSpans = this.downsampleSpans(tempVllm, this.maxSpansPerType);
+        this.refSpans = this.downsampleSpans(tempRef, this.maxSpansPerType);
+        this.trainerSpans = this.downsampleSpans(tempTrainer, this.maxSpansPerType);
+        this.verifierSpans = this.downsampleSpans(tempVerifier, this.maxSpansPerType);
+        this.bufferEvents = this.downsampleSpans(tempBuffer, this.maxBufferEvents);
+
+        console.log(`Loaded: ${this.vllmSpans.length} gen, ${this.refSpans.length} ref, ${this.trainerSpans.length} train, ${this.verifierSpans.length} verify, ${this.bufferEvents.length} buffer`);
+    }
+
+    downsampleSpans(spans, maxCount) {
+        if (spans.length <= maxCount) return spans;
+        const step = spans.length / maxCount;
+        const result = [];
+        for (let i = 0; i < maxCount; i++) {
+            result.push(spans[Math.floor(i * step)]);
         }
+        return result;
     }
 
     render() {
         this.renderTimeline();
         this.renderBuffer();
         this.renderFates();
+    }
+
+    updateRangeDisplay(id, start, end, max) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.textContent = `${Math.floor(start)}s - ${Math.floor(end)}s / ${Math.floor(max)}s`;
+        }
     }
 
     renderTimeline() {
@@ -236,7 +264,6 @@ class TraceViewer {
         const width = rect.width;
         const height = rect.height;
 
-        // Clear
         ctx.fillStyle = '#0d1117';
         ctx.fillRect(0, 0, width, height);
 
@@ -244,18 +271,19 @@ class TraceViewer {
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
-        // Fixed x-axis from 180s to maxTs
-        const visibleStart = 180;
-        const visibleEnd = this.maxTs;
+        const visibleStart = this.timelineStart;
+        const visibleEnd = Math.min(this.timelineStart + this.windowDuration, this.maxTs);
         const duration = visibleEnd - visibleStart;
+
+        this.updateRangeDisplay('timeline-range', visibleStart, visibleEnd, this.maxTs);
+
+        if (duration <= 0) return;
 
         const timeToX = (t) => padding.left + ((t - visibleStart) / duration) * plotWidth;
 
-        // Lane layout
         const lanes = ['Generation', 'Verifier', 'Reference', 'Training'];
         const laneHeight = plotHeight / lanes.length;
 
-        // Draw lane labels and backgrounds
         ctx.font = '11px -apple-system, sans-serif';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
@@ -268,7 +296,6 @@ class TraceViewer {
             ctx.fillText(lanes[i], padding.left - 8, y + laneHeight / 2);
         }
 
-        // Draw spans
         const drawSpans = (spans, laneIndex, color) => {
             const y = padding.top + laneIndex * laneHeight + 4;
             const h = laneHeight - 8;
@@ -276,12 +303,10 @@ class TraceViewer {
 
             for (const span of spans) {
                 if (span.ts > visibleEnd || span.ts + span.dur < visibleStart) continue;
-                if (span.ts > this.playhead) continue;  // Only show up to playhead
-
                 const x1 = Math.max(padding.left, timeToX(span.ts));
-                const x2 = Math.min(padding.left + plotWidth, timeToX(Math.min(span.ts + span.dur, this.playhead)));
+                const x2 = Math.min(padding.left + plotWidth, timeToX(span.ts + span.dur));
                 if (x2 > x1) {
-                    ctx.fillRect(x1, y, x2 - x1, h);
+                    ctx.fillRect(x1, y, Math.max(1, x2 - x1), h);
                 }
             }
         };
@@ -290,14 +315,11 @@ class TraceViewer {
         drawSpans(this.verifierSpans, 1, this.colors.verifier);
         drawSpans(this.refSpans, 2, this.colors.reference);
         drawSpans(this.trainerSpans, 3, this.colors.trainer);
-        // Order: Generation -> Verifier -> Reference -> Training (matches pipeline flow)
 
-        // Draw sync events as vertical lines
         ctx.strokeStyle = this.colors.sync;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1;
         for (const sync of this.syncEvents) {
             if (sync.ts < visibleStart || sync.ts > visibleEnd) continue;
-            if (sync.ts > this.playhead) continue;
             const x = timeToX(sync.ts);
             ctx.beginPath();
             ctx.moveTo(x, padding.top);
@@ -305,20 +327,6 @@ class TraceViewer {
             ctx.stroke();
         }
 
-        // Draw playhead
-        const playheadX = timeToX(this.playhead);
-        if (playheadX >= padding.left && playheadX <= padding.left + plotWidth) {
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 2;
-            ctx.setLineDash([4, 4]);
-            ctx.beginPath();
-            ctx.moveTo(playheadX, padding.top);
-            ctx.lineTo(playheadX, padding.top + plotHeight);
-            ctx.stroke();
-            ctx.setLineDash([]);
-        }
-
-        // Time axis
         ctx.fillStyle = '#8b949e';
         ctx.font = '10px -apple-system, sans-serif';
         ctx.textAlign = 'center';
@@ -344,9 +352,13 @@ class TraceViewer {
         const width = rect.width;
         const height = rect.height;
 
-        // Clear
         ctx.fillStyle = '#0d1117';
         ctx.fillRect(0, 0, width, height);
+
+        const visibleStart = this.bufferStart;
+        const visibleEnd = Math.min(this.bufferStart + this.windowDuration, this.maxTs);
+
+        this.updateRangeDisplay('buffer-range', visibleStart, visibleEnd, this.maxTs);
 
         if (!this.bufferEvents.length) {
             ctx.fillStyle = '#8b949e';
@@ -360,25 +372,24 @@ class TraceViewer {
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
 
-        // Fixed x-axis from 180s to maxTs (matching timeline)
-        const visibleStart = 180;
-        const visibleEnd = this.maxTs;
         const duration = visibleEnd - visibleStart;
+        if (duration <= 0) return;
 
         const timeToX = (t) => padding.left + ((t - visibleStart) / duration) * plotWidth;
 
-        // Filter events up to playhead
-        const visibleEvents = this.bufferEvents.filter(e => e.ts <= this.playhead && e.ts >= visibleStart - 10);
+        // Filter to visible range
+        const visibleEvents = this.bufferEvents.filter(
+            e => e.ts >= visibleStart && e.ts <= visibleEnd
+        );
 
         if (!visibleEvents.length) {
             ctx.fillStyle = '#8b949e';
             ctx.font = '14px -apple-system, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('Buffer data will appear here', width / 2, height / 2);
+            ctx.fillText('No data in range', width / 2, height / 2);
             return;
         }
 
-        // Collect versions
         const allVersions = new Set();
         for (const evt of visibleEvents) {
             for (const v of Object.keys(evt.byVersion || {})) {
@@ -387,24 +398,21 @@ class TraceViewer {
         }
         const versions = [...allVersions].sort((a, b) => a - b);
 
-        // Max size for scaling
         let maxSize = Math.max(...visibleEvents.map(e => e.size), 1);
-        maxSize = Math.max(maxSize, 50);  // Minimum scale
+        maxSize = Math.max(maxSize, 50);
 
-        // Draw stacked area
         if (versions.length > 0) {
             const stackedData = visibleEvents.map(evt => {
                 const result = [];
                 let cumulative = 0;
                 for (const version of versions) {
                     const count = evt.byVersion[version] || 0;
-                    result.push({ bottom: cumulative, top: cumulative + count, count });
+                    result.push({ bottom: cumulative, top: cumulative + count });
                     cumulative += count;
                 }
                 return result;
             });
 
-            // Draw each version band
             for (let vi = 0; vi < versions.length; vi++) {
                 const version = versions[vi];
                 const color = this.colors.buffer[version % this.colors.buffer.length];
@@ -422,7 +430,6 @@ class TraceViewer {
 
                 if (points.length < 2) continue;
 
-                // Draw filled band
                 ctx.beginPath();
                 ctx.moveTo(points[0].x, points[0].bottom);
                 for (let i = 0; i < points.length; i++) {
@@ -439,12 +446,10 @@ class TraceViewer {
             }
         }
 
-        // Draw sync events
         ctx.strokeStyle = this.colors.sync + '66';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1;
         for (const sync of this.syncEvents) {
             if (sync.ts < visibleStart || sync.ts > visibleEnd) continue;
-            if (sync.ts > this.playhead) continue;
             const x = timeToX(sync.ts);
             ctx.beginPath();
             ctx.moveTo(x, padding.top);
@@ -452,7 +457,6 @@ class TraceViewer {
             ctx.stroke();
         }
 
-        // Y-axis label
         ctx.fillStyle = '#8b949e';
         ctx.font = '10px -apple-system, sans-serif';
         ctx.textAlign = 'right';
@@ -460,7 +464,6 @@ class TraceViewer {
         ctx.fillText(maxSize.toFixed(0), padding.left - 8, padding.top);
         ctx.fillText('0', padding.left - 8, height - padding.bottom);
 
-        // Time axis
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         const numTicks = 6;
@@ -484,24 +487,20 @@ class TraceViewer {
         const width = rect.width;
         const height = rect.height;
 
-        // Clear
         ctx.fillStyle = '#0d1117';
         ctx.fillRect(0, 0, width, height);
 
-        // Get latest fates up to playhead
-        const relevantEvents = this.bufferEvents.filter(e => e.ts <= this.playhead);
-        if (!relevantEvents.length) {
+        if (!this.bufferEvents.length) {
             ctx.fillStyle = '#8b949e';
             ctx.font = '14px -apple-system, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('Sample fates will appear here', width / 2, height / 2);
+            ctx.fillText('No data', width / 2, height / 2);
             return;
         }
 
-        const lastEvent = relevantEvents[relevantEvents.length - 1];
+        const lastEvent = this.bufferEvents[this.bufferEvents.length - 1];
         const fates = lastEvent.fates || { used: {}, wasted: {}, filtered: {}, failed: {} };
 
-        // Sum up fates
         const sumFates = (obj) => Object.values(obj).reduce((a, b) => a + b, 0);
         const used = sumFates(fates.used);
         const wasted = sumFates(fates.wasted);
@@ -513,7 +512,7 @@ class TraceViewer {
             ctx.fillStyle = '#8b949e';
             ctx.font = '14px -apple-system, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('No samples processed yet', width / 2, height / 2);
+            ctx.fillText('No samples processed', width / 2, height / 2);
             return;
         }
 
@@ -522,7 +521,6 @@ class TraceViewer {
         const barHeight = 40;
         const barY = height / 2 - barHeight / 2;
 
-        // Draw stacked horizontal bar
         const categories = [
             { label: 'Used', value: used, color: '#3fb950' },
             { label: 'Filtered', value: filtered, color: '#8b949e' },
@@ -539,7 +537,6 @@ class TraceViewer {
             x += w;
         }
 
-        // Labels below
         ctx.font = '12px -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
@@ -554,7 +551,6 @@ class TraceViewer {
             x += w;
         }
 
-        // Total label
         ctx.fillStyle = '#8b949e';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
@@ -562,7 +558,6 @@ class TraceViewer {
     }
 }
 
-// Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
     new TraceViewer();
 });

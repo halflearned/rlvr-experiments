@@ -1,0 +1,51 @@
+# Eval config for hadadv-adhoc-20260116-011803 (mixed training, lr=5e-6, staleness=0)
+#
+# Usage:
+#   python -m rlvr_experiments.submit_eval configs/eval/hadadv-adhoc-mixed.yaml
+#
+# Or locally:
+#   python entrypoints/eval_benchmarks.py configs/eval/hadadv-adhoc-mixed.yaml
+
+checkpoints:
+  - name: base
+    path: /efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base
+
+  - name: step100
+    path: /efs/rlvr-experiments/checkpoints/hadadv-adhoc-20260116-011803/qwen3_1_7b_mixed_step100
+
+  - name: step300
+    path: /efs/rlvr-experiments/checkpoints/hadadv-adhoc-20260116-011803/qwen3_1_7b_mixed_step300
+
+  - name: final
+    path: /efs/rlvr-experiments/checkpoints/hadadv-adhoc-20260116-011803/qwen3_1_7b_mixed_final
+
+benchmarks:
+  # GSM8K - math reasoning (easier)
+  - task: gsm8k
+    num_fewshot: 0
+  - task: gsm8k
+    num_fewshot: 4
+  - task: gsm8k
+    num_fewshot: 8
+
+  # MATH - math reasoning (harder)
+  - task: hendrycks_math
+    num_fewshot: 4
+
+  # IFEval - instruction following
+  - task: ifeval
+    # 0-shot by default
+
+  # Code generation
+  - task: mbpp
+    num_fewshot: 3
+  - task: humaneval
+    num_fewshot: 0
+
+vllm:
+  tensor_parallel_size: 8
+  dtype: bfloat16
+  gpu_memory_utilization: 0.9
+  max_model_len: 4096
+
+output_dir: /efs/rlvr-experiments/eval_results/hadadv-adhoc-mixed

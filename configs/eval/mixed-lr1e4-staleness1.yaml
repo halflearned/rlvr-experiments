@@ -1,0 +1,46 @@
+# Eval config for lr=1e-4 staleness=1 mixed training run (100 steps)
+#
+# This run showed large GSM8K 0-shot improvement (+24pp) - need to verify on other benchmarks.
+#
+# Usage:
+#   python -m rlvr_experiments.submit_eval configs/eval/mixed-lr1e4-staleness1.yaml --local
+#
+# Base model results are in AGENTS.md - no need to re-run base each time.
+
+checkpoints:
+  # Uncomment to include base model comparison:
+  # - name: base
+  #   path: /efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base
+
+  - name: staleness1_lr1e4_step100
+    path: /efs/rlvr-experiments/checkpoints/qwen3_1_7b_mixed_staleness1_step100
+
+benchmarks:
+  # GSM8K - multiple fewshot settings
+  - task: gsm8k
+    num_fewshot: 0
+  - task: gsm8k
+    num_fewshot: 4
+  - task: gsm8k
+    num_fewshot: 8
+
+  # MATH
+  - task: hendrycks_math
+    num_fewshot: 4
+
+  # IFEval
+  - task: ifeval
+
+  # Code generation
+  - task: mbpp
+    num_fewshot: 3
+  - task: humaneval
+    num_fewshot: 0
+
+vllm:
+  tensor_parallel_size: 8
+  dtype: bfloat16
+  gpu_memory_utilization: 0.9
+  max_model_len: 4096
+
+output_dir: /efs/rlvr-experiments/eval_results/mixed-lr1e4-staleness1

@@ -6,6 +6,8 @@ import ray.data
 from datasets import load_dataset
 
 from .sample_logger import log_sample
+from .chat_templates import CHAT_TEMPLATES
+from .kshot_parser import parse_kshot_messages
 
 
 def _hash_prompt(prompt: str) -> str:
@@ -24,8 +26,8 @@ GSM8K_ASSISTANT_PREFIX = ""
 GSM8K_MAX_COMPLETION_LEN = 512
 
 # MATH: Competition math, longer reasoning needed
-# Format: "Question: ... Answer:" to match Qwen's MATH evaluation methodology
-# (achieves ~43% vs ~17% with lm-eval's "Problem: ... Solution:" format)
+# Format: "Problem:\n{problem}\n\nSolution:" to match minerva_math eval format
+# This ensures training and eval use the same prompt format
 MATH_SYSTEM_PROMPT = ""
 MATH_ASSISTANT_PREFIX = ""
 MATH_MAX_COMPLETION_LEN = 1024
@@ -96,7 +98,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
             "problem": {
                 "answer": answer,
                 "prompt_id": prompt_id,
-                "verifier_type": "math",
+                "verifier_type": "gsm8k",
                 "dataset_name": "gsm8k",
                 "system_prompt": GSM8K_SYSTEM_PROMPT,
                 "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
@@ -310,10 +312,19 @@ def load_math(
 
     # Add index to each item for deterministic prompt_id
     # Group by subject for more interpretable IDs
+    # IMPORTANT: Normalize subject names to use underscores (matching HuggingFace config names)
+    # The 'type' field has values like "Counting & Probability" but we need "counting_and_probability"
+    # to match curriculum IDs generated from HuggingFace config names
+    SUBJECT_NORMALIZE = {
+        "counting & probability": "counting_and_probability",
+        "intermediate algebra": "intermediate_algebra",
+        "number theory": "number_theory",
+    }
     subject_counters = {}
     indexed_rows = []
     for row in all_rows:
         subject = row["type"].lower()
+        subject = SUBJECT_NORMALIZE.get(subject, subject)  # Normalize to underscore format
         if subject not in subject_counters:
             subject_counters[subject] = 0
         row["_subject"] = subject
@@ -324,9 +335,9 @@ def load_math(
     ds = ray.data.from_items(indexed_rows)
 
     def preprocess(row):
-        # Format: "Question: ... Answer:" to match Qwen's MATH evaluation methodology
+        # Format: "Problem:\n{problem}\n\nSolution:" to match minerva_math eval format
         # Model should output reasoning with final answer in \boxed{}
-        question = f"Question: {row['problem'].strip()}\nAnswer:"
+        question = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
         # Use subject + index for prompt_id (e.g., math_algebra_0)
         prompt_id = f"math_{row['_subject']}_{row['_subject_idx']}"
         return {
@@ -334,7 +345,7 @@ def load_math(
             "problem": {
                 "answer": row["solution"],
                 "prompt_id": prompt_id,
-                "verifier_type": "hendrycks_math",
+                "verifier_type": "minerva_math",
                 "dataset_name": "math",
                 "system_prompt": MATH_SYSTEM_PROMPT,
                 "assistant_prefix": MATH_ASSISTANT_PREFIX,
@@ -395,6 +406,9 @@ def load_apps(
         question = row["question"]
 
         # Parse input_output - it's a JSON string
+        # Some APPS problems have very large integers that exceed Python's default limit
+        import sys
+        sys.set_int_max_str_digits(0)  # Remove limit for JSON parsing
         io_data = row.get("input_output", "{}")
         if isinstance(io_data, str):
             io_data = json.loads(io_data) if io_data else {}
@@ -554,16 +568,197 @@ def load_dummy(split: str = "train", num_samples: int = 64) -> ray.data.Dataset:
     return ray.data.from_items(rows)
 
 
+def load_gsm8k_dummy(split: str = "train", num_samples: int = 10000) -> ray.data.Dataset:
+    """
+    Load a dummy GSM8K dataset with a single problem repeated N times.
+
+    Uses verifier_type="gsm8k" to test the GSM8K verifier (strict "The answer is X." format).
+    The problem is from GSM8K index 63: "Janet's ducks lay 16 eggs per day..."
+    Answer: 29
+    """
+    # GSM8K problem #63
+    prompt = "Q: Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\nA:"
+    rows = [
+        {
+            "prompt": prompt,
+            "problem": {
+                "answer": "29",
+                "prompt_id": f"gsm8k_dummy_{i}",
+                "verifier_type": "gsm8k",
+                "dataset_name": "gsm8k_dummy",
+                "system_prompt": GSM8K_SYSTEM_PROMPT,
+                "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
+                "max_completion_len": GSM8K_MAX_COMPLETION_LEN,
+            },
+        }
+        for i in range(num_samples)
+    ]
+    return ray.data.from_items(rows)
+
+
 # --- Dataset registry for load_mixed ---
+
+# --- AllenAI RLVR Dataset ---
+# AllenAI's RLVR-GSM-MATH-IF-Mixed-Constraints dataset has CoT examples baked into prompts:
+# - GSM8K: 8-shot CoT, "So the answer is X." format
+# - MATH: 4-shot CoT, \boxed{} format
+# - IFEval: Constraint-based instruction following with verification metadata
+#
+# Key differences from our custom loaders:
+# - Few-shot examples are included in the prompt (no need to add them during eval)
+# - Format matches what models are trained to produce
+# - Ground truth format is different (just the answer, not the full solution)
+
+ALLENAI_GSM8K_MAX_COMPLETION_LEN = 512
+ALLENAI_MATH_MAX_COMPLETION_LEN = 1024
+ALLENAI_IFEVAL_MAX_COMPLETION_LEN = 2048
+
+
+def load_allenai_rlvr(
+    split: str = "train",
+    datasets: list[str] | None = None,
+    parse_kshot: bool = False,
+) -> ray.data.Dataset:
+    """
+    Load AllenAI's RLVR-GSM-MATH-IF-Mixed-Constraints dataset.
+
+    This dataset has CoT examples baked into the prompts, matching the format
+    used in the Tulu-3 paper. Key features:
+    - GSM8K: 8-shot CoT with "So the answer is X." format
+    - MATH: 4-shot CoT with \\boxed{} format
+    - IFEval: Constraint verification metadata in ground_truth field
+
+    Args:
+        split: Dataset split (only "train" available)
+        datasets: List of datasets to include. Options: ["gsm8k", "MATH", "ifeval"]
+                  If None, includes all datasets.
+
+    Returns:
+        Ray Dataset with columns: "prompt", "problem"
+        where "problem" contains verifier metadata.
+    """
+    import os
+    import subprocess
+
+    # Check for S3 cache first (for SageMaker VPC environments)
+    s3_cache = "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/allenai_rlvr_train/"
+    local_cache = "/tmp/allenai_rlvr_train_cache"
+
+    use_local_cache = False
+    # Check for valid local cache (must have dataset files, not just empty dir)
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+        print(f"[load_allenai_rlvr] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_allenai_rlvr] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            result = subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            # Check if we actually got files
+            if os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+                print(f"[load_allenai_rlvr] Loaded from S3 cache")
+                use_local_cache = True
+            else:
+                print(f"[load_allenai_rlvr] S3 cache empty, loading from HuggingFace Hub")
+                # Clean up empty directory
+                import shutil
+                shutil.rmtree(local_cache, ignore_errors=True)
+        except Exception as e:
+            print(f"[load_allenai_rlvr] S3 cache not available ({e}), loading from HuggingFace Hub")
+            # Clean up any partial download
+            import shutil
+            shutil.rmtree(local_cache, ignore_errors=True)
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        items = list(hf_dataset)
+    else:
+        hf_dataset = load_dataset("allenai/RLVR-GSM-MATH-IF-Mixed-Constraints", split=split)
+        items = list(hf_dataset)
+
+    # Filter by dataset if specified
+    if datasets is not None:
+        dataset_set = set(d.lower() for d in datasets)
+        items = [item for item in items if item["dataset"].lower() in dataset_set]
+        print(f"[load_allenai_rlvr] Filtered to datasets {datasets}: {len(items)} samples")
+
+    # Add index for deterministic prompt_ids
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        # Extract user message content from messages list
+        messages = row["messages"]
+        user_content = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                user_content = msg["content"]
+                break
+
+        dataset_name = row["dataset"].lower()
+        prompt_id = f"allenai_{dataset_name}_{row['_idx']}"
+
+        # Determine verifier type and settings based on source dataset
+        if dataset_name == "gsm8k":
+            verifier_type = "allenai_gsm8k"
+            max_completion_len = ALLENAI_GSM8K_MAX_COMPLETION_LEN
+        elif dataset_name == "math":
+            verifier_type = "allenai_math"
+            max_completion_len = ALLENAI_MATH_MAX_COMPLETION_LEN
+        elif dataset_name == "ifeval":
+            verifier_type = "ifeval"  # Reuse existing IFEval verifier
+            max_completion_len = ALLENAI_IFEVAL_MAX_COMPLETION_LEN
+        else:
+            verifier_type = "unknown"
+            max_completion_len = 1024
+
+        # Convert None to empty string to avoid Arrow schema mismatch
+        # (GSM8K/MATH have None for constraint fields, IFEval has strings)
+        constraint_type = row["constraint_type"] if row["constraint_type"] is not None else ""
+        constraint = row["constraint"] if row["constraint"] is not None else ""
+
+        # Optionally parse k-shot plaintext into multi-turn chat messages.
+        parsed_messages = None
+        if parse_kshot:
+            # Only parse when the dataset provides a single user message.
+            if isinstance(messages, list) and len(messages) == 1 and messages[0].get("role") == "user":
+                parsed_messages = parse_kshot_messages(user_content, dataset_name)
+
+        return {
+            "prompt": user_content,
+            "problem": {
+                "ground_truth": row["ground_truth"],
+                "constraint_type": constraint_type,
+                "constraint": constraint,
+                "source_dataset": row["dataset"],
+                "messages": parsed_messages or messages,
+                "prompt_id": prompt_id,
+                "verifier_type": verifier_type,
+                "dataset_name": f"allenai_{dataset_name}",
+                "system_prompt": "",  # AllenAI doesn't use system prompts
+                "assistant_prefix": "",
+                "max_completion_len": max_completion_len,
+            },
+        }
+
+    return ds.map(preprocess)
+
 
 DATASET_LOADERS = {
     "gsm8k": load_gsm8k,
+    "gsm8k_dummy": load_gsm8k_dummy,
     "math": load_math,
     "humaneval": load_humaneval,
     "mbpp": load_mbpp,
     "apps": load_apps,
     "ifeval": load_ifeval,
     "dummy": load_dummy,
+    "allenai_rlvr": load_allenai_rlvr,
 }
 
 
@@ -571,6 +766,7 @@ def load_mixed(
     datasets: list[dict],
     mode: str = "weighted",
     seed: int = 42,
+    cycle: bool = False,
 ) -> tuple[ray.data.Dataset, list[str]]:
     """
     Load and combine multiple datasets with configurable ordering.
@@ -591,11 +787,16 @@ def load_mixed(
         datasets: List of dataset configs
         mode: "weighted" for probabilistic interleaving, "sequential" for concatenation
         seed: Random seed for shuffling and weighted sampling
+        cycle: If True, short datasets cycle back to the beginning instead of being
+               exhausted. Only applies to weighted mode. Useful when mixing datasets
+               of different sizes (e.g., MBPP with 374 samples vs IFEval with 14k).
+               Training stops via max_steps, not when data is exhausted.
 
     Returns:
         Tuple of (combined_dataset, order_list) where:
         - combined_dataset: Ray Dataset with all samples
-        - order_list: List of prompt_ids in the final order
+        - order_list: List of prompt_ids in the final order (infinite when cycle=True,
+                      but DataIterator handles this by cycling through the order)
 
     Note: Each dataset type has its own namespaced prompt_ids (gsm8k_, math_, etc.),
     so mixing different datasets won't cause ID collisions. If the same dataset is
@@ -612,6 +813,21 @@ def load_mixed(
               weight: 0.7
             - name: math
               weight: 0.3
+
+    Example weighted config with cycling (for uneven dataset sizes):
+        data:
+          dataset: mixed
+          mode: weighted
+          cycle: true
+          datasets:
+            - name: gsm8k
+              weight: 0.25
+            - name: math
+              weight: 0.25
+            - name: mbpp
+              weight: 0.10
+            - name: ifeval
+              weight: 0.40
 
     Example sequential config:
         data:
@@ -634,6 +850,9 @@ def load_mixed(
     if mode not in ("weighted", "sequential"):
         raise ValueError(f"mode must be 'weighted' or 'sequential', got '{mode}'")
 
+    if cycle and mode != "weighted":
+        raise ValueError("cycle=True is only supported in 'weighted' mode")
+
     rng = random.Random(seed)
 
     # Step 1: Load all datasets and build per-dataset ordered prompt_id lists
@@ -654,12 +873,15 @@ def load_mixed(
             )
 
         # Extract loader kwargs (everything except our special keys)
-        special_keys = ("name", "weight", "count", "order")
+        special_keys = ("name", "weight", "count", "order", "verifier_type")
         loader_kwargs = {k: v for k, v in ds_config.items() if k not in special_keys}
 
         # Load the dataset
         loader = DATASET_LOADERS[name]
         ds = loader(**loader_kwargs)
+
+        # Optional verifier_type override (allows using different verifier than default)
+        verifier_type_override = ds_config.get("verifier_type")
 
         # Materialize to list
         rows = list(ds.iter_rows())
@@ -706,12 +928,16 @@ def load_mixed(
         for row in rows:
             pid = row["problem"]["prompt_id"]
             if pid in ordered_ids_set:
+                # Apply verifier_type override if specified
+                if verifier_type_override:
+                    row["problem"]["verifier_type"] = verifier_type_override
                 prompt_id_to_row[pid] = row
                 all_rows.append(row)
 
         count_info = f"count={counts[name]}" if counts[name] else "all"
         weight_info = f"weight={weights[name]}"
-        print(f"[load_mixed] Loaded {len(ordered_ids)} samples from {name} ({weight_info if mode == 'weighted' else count_info})")
+        verifier_info = f", verifier_type={verifier_type_override}" if verifier_type_override else ""
+        print(f"[load_mixed] Loaded {len(ordered_ids)} samples from {name} ({weight_info if mode == 'weighted' else count_info}{verifier_info})")
 
     # Step 2: Build final order based on mode
     final_order: list[str] = []
@@ -725,6 +951,8 @@ def load_mixed(
     else:  # weighted
         # Convert to dict for weighted sampling
         queues_dict = {name: list(ids) for name, ids in per_dataset_queues}
+        # Keep original lists for cycling
+        original_queues = {name: list(ids) for name, ids in per_dataset_queues}
 
         def get_active_datasets() -> list[str]:
             return [n for n, q in queues_dict.items() if q]
@@ -735,8 +963,8 @@ def load_mixed(
                 return None
             # Normalize weights for active datasets
             active_weights = [weights[n] for n in active]
-            total = sum(active_weights)
-            probs = [w / total for w in active_weights]
+            total_weight = sum(active_weights)
+            probs = [w / total_weight for w in active_weights]
             # Weighted random choice
             r = rng.random()
             cumsum = 0.0
@@ -746,15 +974,48 @@ def load_mixed(
                     return n
             return active[-1]  # Fallback
 
+        cycle_counts: dict[str, int] = {name: 0 for name in queues_dict}
+
+        # When cycling, we need to decide how many total samples to generate.
+        # We generate enough so that the largest dataset is consumed once,
+        # which means smaller datasets will cycle multiple times proportionally.
+        if cycle:
+            # Calculate total samples needed: sum of all dataset sizes
+            # This ensures each dataset is seen at least once per "epoch"
+            total_samples_for_cycle = sum(len(ids) for ids in original_queues.values())
+            # Multiply by a factor to cover multiple epochs worth of training
+            # (training will stop via max_steps anyway)
+            total_samples_for_cycle *= 10  # Generate 10 epochs worth
+            print(f"[load_mixed] Generating {total_samples_for_cycle} samples for cycling")
+
         while True:
+            # Check termination condition for cycling mode
+            if cycle:
+                if len(final_order) >= total_samples_for_cycle:
+                    break
+
             ds_name = sample_dataset()
             if ds_name is None:
                 break
+
             # Pop next item from this dataset's queue
             prompt_id = queues_dict[ds_name].pop(0)
             final_order.append(prompt_id)
 
-        print(f"[load_mixed] Total: {len(final_order)} samples, interleaved from {len(datasets)} datasets")
+            # If cycling and queue is now empty, refill it
+            if cycle and not queues_dict[ds_name]:
+                cycle_counts[ds_name] += 1
+                # Reshuffle for variety
+                refilled = list(original_queues[ds_name])
+                rng.shuffle(refilled)
+                queues_dict[ds_name] = refilled
+                print(f"[load_mixed] Cycling {ds_name} (cycle {cycle_counts[ds_name]})")
+
+        if cycle:
+            cycle_summary = ", ".join(f"{name}:{count}x" for name, count in cycle_counts.items() if count > 0)
+            print(f"[load_mixed] Total: {len(final_order)} samples, interleaved from {len(datasets)} datasets (cycling: {cycle_summary})")
+        else:
+            print(f"[load_mixed] Total: {len(final_order)} samples, interleaved from {len(datasets)} datasets")
 
     return ray.data.from_items(all_rows), final_order
 
@@ -801,11 +1062,13 @@ class DataIterator:
         system_prompt: str = "",
         assistant_prefix: str = "",
         order: list[str] | str | None = None,
+        chat_template: str | None = None,
     ):
         self.ds = ds
         self.tokenizer = tokenizer
         self.assistant_prefix = assistant_prefix
         self.system_prompt = system_prompt
+        self.chat_template = chat_template
         # Build index: prompt_id -> row data
         self._prompt_id_index: dict[str, dict] = {}
         self._build_index()
@@ -848,6 +1111,27 @@ class DataIterator:
                 if prompt_id:
                     self._prompt_id_index[prompt_id] = {"prompt": p, "problem": prob}
 
+    def _build_messages(self, prompt: str, problem: dict, system_prompt: str, use_problem_messages: bool) -> list[dict]:
+        """Build chat messages for template application.
+
+        If use_problem_messages is True and problem contains messages, use them
+        (optionally prepending system_prompt when missing).
+        """
+        if use_problem_messages:
+            messages = problem.get("messages")
+            if isinstance(messages, list) and messages:
+                # Shallow-copy to avoid mutating dataset rows.
+                messages = [dict(m) for m in messages]
+                if system_prompt and not any(m.get("role") == "system" for m in messages):
+                    messages = [{"role": "system", "content": system_prompt}] + messages
+                return messages
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return messages
+
     def _apply_template(self, prompt: str, problem: dict) -> str:
         """Apply chat template to a single prompt.
 
@@ -857,18 +1141,29 @@ class DataIterator:
         # Per-row overrides take precedence over global config
         system_prompt = problem.get("system_prompt") or self.system_prompt
         assistant_prefix = problem.get("assistant_prefix") or self.assistant_prefix
+        if self.chat_template:
+            if self.chat_template not in CHAT_TEMPLATES:
+                raise ValueError(f"Unknown chat_template: {self.chat_template}")
+            messages = self._build_messages(
+                prompt, problem, system_prompt, use_problem_messages=True
+            )
+            content = CHAT_TEMPLATES[self.chat_template](
+                messages,
+                tokenizer=None,
+                add_generation_prompt=True,
+            )
+        else:
+            messages = self._build_messages(
+                prompt, problem, system_prompt, use_problem_messages=False
+            )
+            content = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,  # TODO: make configurable
+            )
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        content = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,  # TODO: make configurable
-        ) + assistant_prefix
-        return content
+        return content + assistant_prefix
 
     def _get_item(self, prompt_id: str) -> dict:
         """Get formatted item for a prompt_id."""
