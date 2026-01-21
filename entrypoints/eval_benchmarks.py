@@ -55,6 +55,7 @@ import yaml
 
 DEFAULT_S3_BUCKET = os.environ.get("RLVR_S3_BUCKET", "sagemaker-us-west-2-503561457547")
 DEFAULT_S3_CHECKPOINT_PREFIX = "rlvr-experiments/checkpoints"
+DEFAULT_S3_EVAL_PREFIX = "rlvr-experiments/eval_results"
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -69,8 +70,13 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, prefix
 
 
-def default_checkpoint_prefix() -> str | None:
-    """Build default checkpoint prefix from SageMaker env."""
+def is_sagemaker_env() -> bool:
+    """Return True when running inside a SageMaker job."""
+    return bool(os.environ.get("SM_TRAINING_ENV") or os.environ.get("SM_MODEL_DIR"))
+
+
+def get_sagemaker_job_name() -> str | None:
+    """Extract job_name from SageMaker env."""
     training_env = os.environ.get("SM_TRAINING_ENV")
     if not training_env:
         return None
@@ -78,9 +84,23 @@ def default_checkpoint_prefix() -> str | None:
         job_name = json.loads(training_env).get("job_name")
     except json.JSONDecodeError:
         return None
+    return job_name or None
+
+
+def default_checkpoint_prefix() -> str | None:
+    """Build default checkpoint prefix from SageMaker env."""
+    job_name = get_sagemaker_job_name()
     if not job_name:
         return None
     return f"s3://{DEFAULT_S3_BUCKET}/{DEFAULT_S3_CHECKPOINT_PREFIX}/{job_name}/"
+
+
+def default_eval_output_dir() -> str | None:
+    """Build default eval output dir from SageMaker env."""
+    job_name = get_sagemaker_job_name()
+    if not job_name:
+        return None
+    return f"s3://{DEFAULT_S3_BUCKET}/{DEFAULT_S3_EVAL_PREFIX}/{job_name}/"
 
 
 def list_s3_checkpoint_dirs(prefix: str) -> list[dict]:
@@ -597,8 +617,17 @@ def main():
     vllm_config = config.get("vllm", {})
     olmes_cfg = config.get("olmes", {}) or {}
     watch_cfg = config.get("watch", {}) or {}
-    output_dir = config.get("output_dir", "/tmp/eval_results")
+    output_dir = config.get("output_dir") or "/tmp/eval_results"
     seed = int(config.get("seed", 42))
+
+    if is_sagemaker_env() and not output_dir.startswith("s3://"):
+        default_output = default_eval_output_dir()
+        if default_output:
+            print(
+                f"[eval] SageMaker detected; overriding output_dir to {default_output}",
+                flush=True,
+            )
+            output_dir = default_output
 
     # Create cache and output directories
     os.makedirs(args.cache_dir, exist_ok=True)
@@ -620,8 +649,9 @@ def main():
         if hf_cache_s3:
             sync_hf_cache(hf_cache_s3, hf_cache_local)
         os.environ["HF_HOME"] = hf_cache_local
-        os.environ["HF_DATASETS_OFFLINE"] = "1"
-        os.environ["HF_HUB_OFFLINE"] = "1"
+        if is_sagemaker_env():
+            os.environ["HF_DATASETS_OFFLINE"] = "1"
+            os.environ["HF_HUB_OFFLINE"] = "1"
 
     # Summary results
     all_results = {

@@ -1,0 +1,27 @@
+harness: olmes
+seed: 42
+
+watch:
+  enable: true
+  poll_interval_s: 300
+  run_name: allenai_full_lr1e6_beta1e3_thinker
+
+output_dir: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/eval_results/olmes_lr1e6_beta1e3
+
+olmes:
+  tasks:
+    - gsm8k::tulu
+    - minerva_math::tulu
+    - ifeval::tulu
+    - ifeval_ood::tulu
+
+  model_type: vllm
+  model_args:
+    dtype: bfloat16
+    gpu_memory_utilization: 0.8
+    tensor_parallel_size: 1
+
+  hf_cache_s3: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/hf_cache/olmes/
+  hf_cache_local: /tmp/hf_cache_olmes
+
+  upload_summary: true

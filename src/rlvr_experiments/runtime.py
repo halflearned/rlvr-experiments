@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,8 +72,6 @@ class Runtime:
 
     @classmethod
     async def from_plan(cls, plan_path: str) -> "Runtime":
-        import os
-
         plan = load_plan(plan_path)
 
         # Initialize tracing - use temp dir for SageMaker (will be uploaded to S3 by train script)
@@ -148,7 +147,6 @@ class Runtime:
         if not ray.is_initialized():
             # Set up runtime_env to make rlvr_experiments available to all workers
             # This is needed for SageMaker where source is in /opt/ml/code
-            import os
             runtime_env = {}
             src_path = "/opt/ml/code/src"
             if os.path.exists(src_path):

@@ -33,7 +33,12 @@ RUN mkdir -p /opt/rlvr
 COPY requirements-olmes.txt /opt/rlvr/requirements-olmes.txt
 RUN python -m venv /opt/olmes-venv && \
     /opt/olmes-venv/bin/pip install --upgrade pip && \
-    uv pip install --python /opt/olmes-venv/bin/python -r /opt/rlvr/requirements-olmes.txt
+    uv pip install --index-strategy unsafe-best-match --python /opt/olmes-venv/bin/python -r /opt/rlvr/requirements-olmes.txt
+
+# Patch lm_eval for vLLM 0.11.0 compatibility (prompt_token_ids -> prompts)
+COPY patches/lm_eval_vllm_compat.patch /opt/rlvr/lm_eval_vllm_compat.patch
+RUN cd /opt/olmes-venv/lib/python3.11/site-packages && \
+    patch -p1 < /opt/rlvr/lm_eval_vllm_compat.patch
 
 # SageMaker will copy source to /opt/ml/code and set PYTHONPATH
 WORKDIR /opt/ml/code

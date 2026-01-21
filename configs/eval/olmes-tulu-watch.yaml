@@ -3,7 +3,7 @@ seed: 42
 
 watch:
   enable: true
-  poll_interval_s: 300
+  poll_interval_s: 30
   # Optional: override run_name or checkpoint_prefix if not running on SageMaker.
   run_name: allenai_full_lr5e6_beta1e3_thinker
   # checkpoint_prefix: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/<job_name>/
@@ -21,13 +21,16 @@ olmes:
     - ifeval_ood::tulu
 
   model_type: vllm
+  num_workers: 1
+  num_gpus: 2
   model_args:
     dtype: bfloat16
-    gpu_memory_utilization: 0.8
-    tensor_parallel_size: 1
+    trust_remote_code: true
+    max_length: 4096
+    gpu_memory_utilization: 0.9
 
   # Offline HF cache sync (SageMaker VPC has no HF Hub access).
-  hf_cache_s3: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/hf_cache/olmes/
-  hf_cache_local: /tmp/hf_cache_olmes
+  # hf_cache_s3: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/hf_cache/olmes/
+  # hf_cache_local: /tmp/hf_cache_olmes
 
   upload_summary: true
