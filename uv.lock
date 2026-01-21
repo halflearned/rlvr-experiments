@@ -221,6 +221,34 @@ wheels = [
 ]
 
 [[package]]
+name = "boto3"
+version = "1.42.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a4/da/d81abc51bd35c2d2154f1caa0040843ada7df1689ea17d51c116c793b8f0/boto3-1.42.31.tar.gz", hash = "sha256:b2038fc5dbcd6746a16ada8d55fe73659b8cf95c7b6aeb63fe782e831485edaa", size = 112803, upload-time = "2026-01-20T21:04:45.292Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fd/4d/2a2830424f11d575f7ca2abdff889138f212c7dd3f1dde2b2994a779a5ab/boto3-1.42.31-py3-none-any.whl", hash = "sha256:7f04b4cd7c375e4d88cc2cba3022c40805012ce8f57468b82cedb1bcd6b3a58a", size = 140572, upload-time = "2026-01-20T21:04:43.112Z" },
+]
+
+[[package]]
+name = "botocore"
+version = "1.42.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/78/4fd91ed2f9d4b500680f33c714b7716fc37690083a8c8d3e94177cbc811e/botocore-1.42.31.tar.gz", hash = "sha256:62f2c31e229df625612dd4d7c72618948e4064436d71a647102f36fcddfa0f4d", size = 14895682, upload-time = "2026-01-20T21:04:32.999Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/c3/6898ecbfc140754fc90702c43e63c2b13017cac345cd3015df404cfeb3e9/botocore-1.42.31-py3-none-any.whl", hash = "sha256:021346ad57cc3018acf4a46edc1f649b9818b33c07a08674ce1c36e9edbb5859", size = 14569714, upload-time = "2026-01-20T21:04:29.495Z" },
+]
+
+[[package]]
 name = "cachetools"
 version = "6.2.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2747,6 +2775,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "antlr4-python3-runtime" },
+    { name = "boto3" },
     { name = "fastapi" },
     { name = "lm-eval" },
     { name = "math-verify" },
@@ -2772,6 +2801,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "antlr4-python3-runtime", specifier = "==4.11" },
+    { name = "boto3", specifier = ">=1.42.31" },
     { name = "fastapi" },
     { name = "lm-eval", specifier = ">=0.4.9.2" },
     { name = "math-verify", specifier = ">=0.8.0" },
@@ -2851,6 +2881,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/da/8a/22b7beea3ee0d44b1916c0c1cb0ee3af23b700b6da9f04991899d0c555d4/rsa-4.9.1.tar.gz", hash = "sha256:e7bdbfdb5497da4c07dfd35530e1a902659db6ff241e39d9953cad06ebd0ae75", size = 29034, upload-time = "2025-04-16T09:51:18.218Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/8d/0133e4eb4beed9e425d9a98ed6e081a55d195481b7632472be1af08d2f6b/rsa-4.9.1-py3-none-any.whl", hash = "sha256:68635866661c6836b8d39430f97a996acbd61bfa49406748ea243539fe239762", size = 34696, upload-time = "2025-04-16T09:51:17.142Z" },
+]
+
+[[package]]
+name = "s3transfer"
+version = "0.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/05/04/74127fc843314818edfa81b5540e26dd537353b123a4edc563109d8f17dd/s3transfer-0.16.0.tar.gz", hash = "sha256:8e990f13268025792229cd52fa10cb7163744bf56e719e0b9cb925ab79abf920", size = 153827, upload-time = "2025-12-01T02:30:59.114Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/51/727abb13f44c1fcf6d145979e1535a35794db0f6e450a0cb46aa24732fe2/s3transfer-0.16.0-py3-none-any.whl", hash = "sha256:18e25d66fed509e3868dc1572b3f427ff947dd2c56f844a5bf09481ad3f3b2fe", size = 86830, upload-time = "2025-12-01T02:30:57.729Z" },
 ]
 
 [[package]]

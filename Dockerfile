@@ -28,5 +28,12 @@ RUN uv pip install --system sagemaker-training
 # Install math verification for MATH dataset
 RUN uv pip install --system "math-verify>=0.8.0"
 
+# Install OLMES in an isolated venv for evaluation
+RUN mkdir -p /opt/rlvr
+COPY requirements-olmes.txt /opt/rlvr/requirements-olmes.txt
+RUN python -m venv /opt/olmes-venv && \
+    /opt/olmes-venv/bin/pip install --upgrade pip && \
+    uv pip install --python /opt/olmes-venv/bin/python -r /opt/rlvr/requirements-olmes.txt
+
 # SageMaker will copy source to /opt/ml/code and set PYTHONPATH
 WORKDIR /opt/ml/code

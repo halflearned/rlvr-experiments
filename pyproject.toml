@@ -19,6 +19,7 @@ dependencies = [
     "pandas>=2.3.3",
     "antlr4-python3-runtime==4.11",
     "lm-eval>=0.4.9.2",
+    "boto3>=1.42.31",
 ]
 
 [tool.uv]

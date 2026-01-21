@@ -376,6 +376,55 @@ python entrypoints/train_grpo.py configs/my-config.yaml
 - The config should use local `/efs/` paths for model and tokenizer
 - Training logs are printed to stdout
 
+### Tulu Thinker GRPO (AllenAI Mixed) - Local + Parallel Eval
+
+Local training on GPUs 0-5 with OLMES eval on GPUs 6-7:
+
+```bash
+source .venv/bin/activate
+
+# Start Ray with only training GPUs visible
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 ray start --head --num-gpus=6 --temp-dir=/opt/dlami/nvme/ray_tmp
+
+# Train (leave GPUs 6-7 free)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 python entrypoints/train_grpo.py \
+  configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e3-thinker.yaml \
+  2>&1 | tee /tmp/grpo_thinker_train.log
+
+# In another shell, run OLMES eval watch on GPUs 6-7.
+# NOTE: OLMES runs in its own venv in the Docker image (/opt/olmes-venv).
+# For local runs, DO NOT install OLMES into .venv (it will clash with torch).
+# Instead, use /opt/olmes-venv/bin/python if present, or create a separate venv
+# (e.g., /efs/rlvr-experiments/.olmes-venv) and install requirements-olmes.txt there.
+# Set watch.local_dir in configs/eval/olmes-tulu-watch.yaml to /efs/rlvr-experiments/checkpoints
+CUDA_VISIBLE_DEVICES=6,7 /efs/rlvr-experiments/.venv/bin/python \
+  entrypoints/eval_benchmarks.py configs/eval/olmes-tulu-watch.yaml \
+  2>&1 | tee /tmp/olmes_eval_watch.log
+```
+
+If running locally, consider changing `output_dir` in `configs/eval/olmes-tulu-watch.yaml` to a local path
+like `/efs/rlvr-experiments/eval_results/olmes_tulu_watch`.
+
+### Tulu Thinker GRPO (AllenAI Mixed) - SageMaker
+
+Single-job training + eval (trainer on GPUs 0-5, eval on GPUs 6-7 by default):
+
+```bash
+source .venv/bin/activate
+
+python src/rlvr_experiments/submit.py \
+  configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e3-thinker.yaml \
+  --eval-config configs/eval/olmes-tulu-watch.yaml \
+  --build --push
+```
+
+If you need an explicit GPU split, add `--train-gpus "0,1,2,3,4,5" --eval-gpus "6,7"`.
+
+Notes:
+- On SageMaker, the launcher uses `/opt/olmes-venv/bin/python` for OLMES evals by default.
+- Locally, keep OLMES in a separate venv (do not install into `.venv`); use `/opt/olmes-venv/bin/python`
+  or create `/efs/rlvr-experiments/.olmes-venv` and install `requirements-olmes.txt` there.
+
 ## Model Evaluation with lm_eval
 
 Use `lm_eval` with the **vLLM backend** for fast evaluation. The vLLM backend is ~50-100x faster than the HuggingFace backend.

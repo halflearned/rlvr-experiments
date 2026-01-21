@@ -123,6 +123,10 @@ def submit_job(
     wait: bool = False,
     local: bool = False,
     gpus: str | None = None,
+    eval_config: str | None = None,
+    train_gpus: str | None = None,
+    eval_gpus: str | None = None,
+    eval_python: str | None = None,
 ):
     """Submit a training job to SageMaker."""
     local_uri = f"{DEFAULT_IMAGE_NAME}:{image_tag or datetime.now().strftime('%Y%m%d')}"
@@ -209,6 +213,15 @@ def submit_job(
         },
     }
 
+    if eval_config:
+        training_job_config["HyperParameters"]["eval-config"] = eval_config
+    if train_gpus:
+        training_job_config["HyperParameters"]["train-gpus"] = train_gpus
+    if eval_gpus:
+        training_job_config["HyperParameters"]["eval-gpus"] = eval_gpus
+    if eval_python:
+        training_job_config["HyperParameters"]["eval-python"] = eval_python
+
     print(f"\nSubmitting job: {job_name}")
     print(f"  Image: {remote_uri}")
     print(f"  Instance: {instance_type} x {instance_count}")
@@ -241,6 +254,10 @@ def main():
     parser.add_argument("--wait", action="store_true", help="Wait for job to complete")
     parser.add_argument("--local", action="store_true", help="Run locally using Docker")
     parser.add_argument("--gpus", default=None, help="GPU IDs for local mode (e.g., '5,6,7')")
+    parser.add_argument("--eval-config", default=None, help="Eval config to run in parallel")
+    parser.add_argument("--train-gpus", default=None, help="GPU IDs for training (e.g., '0-5')")
+    parser.add_argument("--eval-gpus", default=None, help="GPU IDs for eval (e.g., '6-7')")
+    parser.add_argument("--eval-python", default=None, help="Python for eval (default: /opt/olmes-venv/bin/python)")
 
     args = parser.parse_args()
 
@@ -255,6 +272,10 @@ def main():
         wait=args.wait,
         local=args.local,
         gpus=args.gpus,
+        eval_config=args.eval_config,
+        train_gpus=args.train_gpus,
+        eval_gpus=args.eval_gpus,
+        eval_python=args.eval_python,
     )
 
 
