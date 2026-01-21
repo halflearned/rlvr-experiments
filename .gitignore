@@ -1,4 +1,6 @@
 docs/
+eval_results/
+external/
 secrets.env
 assets/
 .venv

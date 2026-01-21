@@ -89,6 +89,7 @@ async def main():
     runtime = await Runtime.from_plan(args.config)
     plan = runtime.plan
     run_name = plan.run.get("name", "grpo_run")
+    run_id = f"{run_name}_{runtime.run_timestamp}"  # Unique run identifier
 
     # Set random seed for reproducibility
     seed = plan.run.get("seed", 42)
@@ -515,11 +516,11 @@ async def main():
 
             # Checkpoint
             if checkpoint_interval and trainer.version % checkpoint_interval == 0:
-                ckpt_path = os.path.join(checkpoint_dir, f"{run_name}_step{trainer.version}")
+                ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_step{trainer.version}")
                 print(f"[step {trainer.version}] Saving checkpoint to {ckpt_path}")
                 await trainer.export_to_hf(ckpt_path)
                 if use_s3_checkpoints:
-                    upload_checkpoint_to_s3(ckpt_path, run_name, f"step{trainer.version}", runtime.trace_dir)
+                    upload_checkpoint_to_s3(ckpt_path, run_id, f"step{trainer.version}", runtime.trace_dir)
                     cleanup_local_checkpoint(ckpt_path)
 
             # Reset accumulation
@@ -543,11 +544,11 @@ async def main():
     await rollout.stop(abort=True)
 
     # Save final checkpoint
-    final_ckpt_path = os.path.join(checkpoint_dir, f"{run_name}_final")
+    final_ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_final")
     print(f"Saving final checkpoint to {final_ckpt_path}")
     await trainer.export_to_hf(final_ckpt_path)
     if use_s3_checkpoints:
-        upload_checkpoint_to_s3(final_ckpt_path, run_name, "final", runtime.trace_dir)
+        upload_checkpoint_to_s3(final_ckpt_path, run_id, "final", runtime.trace_dir)
         cleanup_local_checkpoint(checkpoint_dir)
 
     # Run summary

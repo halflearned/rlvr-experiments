@@ -425,6 +425,30 @@ Notes:
 - Locally, keep OLMES in a separate venv (do not install into `.venv`); use `/opt/olmes-venv/bin/python`
   or create `/efs/rlvr-experiments/.olmes-venv` and install `requirements-olmes.txt` there.
 
+### Local lm_eval Watcher (Checkpoint Polling)
+
+Use `entrypoints/eval_benchmarks.py` in watch mode to poll a checkpoint folder and run lm_eval
+tasks sequentially per GPU (TP=1). Static settings live in `configs/eval/lm_eval_watch.yaml`;
+dynamic checkpoint glob is passed via `--watch-path`.
+
+```bash
+# Check GPUs 6-7 are free
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
+
+# Run watcher on GPUs 6-7 (task groups use visible GPU indices 0 and 1)
+CUDA_VISIBLE_DEVICES=6,7 /efs/rlvr-experiments/.venv/bin/python \
+  entrypoints/eval_benchmarks.py configs/eval/lm_eval_watch.yaml \
+  --watch-path /efs/rlvr-experiments/checkpoints/allenai_full_lr5e6_beta1e3_repro_step* \
+  2>&1 | tee /tmp/lm_eval_watch.log
+```
+
+Notes:
+- `configs/eval/lm_eval_watch.yaml` sets `gpu_mode: visible`, so task groups use indices
+  within `CUDA_VISIBLE_DEVICES`. If you want to use absolute GPU IDs in YAML, set
+  `gpu_mode: absolute`.
+- Results are written under `/efs/rlvr-experiments/eval_results/repro_watch/<checkpoint_name>/`.
+- Stop the watcher with: `pkill -f "entrypoints/eval_benchmarks.py configs/eval/lm_eval_watch.yaml"`.
+
 ## Model Evaluation with lm_eval
 
 Use `lm_eval` with the **vLLM backend** for fast evaluation. The vLLM backend is ~50-100x faster than the HuggingFace backend.

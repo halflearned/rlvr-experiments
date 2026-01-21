@@ -1,0 +1,41 @@
+seed: 42
+output_dir: /efs/rlvr-experiments/eval_results/repro_watch
+
+vllm:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  gpu_memory_utilization: 0.8
+  max_model_len: 4096
+
+# Benchmarks list can be reused for non-watch runs.
+benchmarks:
+  - task: gsm8k_cot
+    num_fewshot: 8
+  - task: ifeval
+    num_fewshot: 0
+  - task: minerva_math
+    num_fewshot: 4
+  - task: hendrycks_math
+    num_fewshot: 4
+
+watch:
+  enable: true
+  # You can override local_dir/pattern via --watch-path.
+  local_dir: /efs/rlvr-experiments/checkpoints
+  pattern: allenai_full_lr5e6_beta1e3_repro_step*
+  poll_interval_s: 30
+  # Use visible GPU indices when launching with CUDA_VISIBLE_DEVICES=6,7.
+  gpu_mode: visible
+  task_groups:
+    - gpu: 0
+      benchmarks:
+        - task: gsm8k_cot
+          num_fewshot: 8
+        - task: ifeval
+          num_fewshot: 0
+    - gpu: 1
+      benchmarks:
+        - task: minerva_math
+          num_fewshot: 4
+        - task: hendrycks_math
+          num_fewshot: 4

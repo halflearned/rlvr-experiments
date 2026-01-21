@@ -55,6 +55,7 @@ class Runtime:
     channel_ports: Dict[str, int]       # channel_name -> sync port
     namespace: int
     buffer: Any
+    run_timestamp: str = ""             # unique timestamp for this run (YYYYMMDD_HHMMSS)
 
     @property
     def tracer(self):
@@ -195,6 +196,7 @@ class Runtime:
             channel_ports=channel_ports,
             namespace=0,  # No longer used, kept for compatibility
             buffer=buffer,
+            run_timestamp=timestamp,
         )
 
     async def start(self, wire=True) -> "Runtime":

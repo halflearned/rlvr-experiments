@@ -16,6 +16,10 @@ dependencies = [
     "pytest>=9.0.2",
     "lm-eval>=0.4.9.2",
     "math-verify>=0.8.0",
+    "antlr4-python3-runtime==4.11",
+    "langdetect>=1.0.9",
+    "immutabledict>=4.2.2",
+    "ipykernel>=7.1.0",
 ]
 
 [tool.uv]
