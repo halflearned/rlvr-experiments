@@ -7,9 +7,11 @@ import time
 from typing import Any
 
 from .math import MathVerifier
-from .hendrycks_math import HendrycksMathVerifier
+from .gsm8k import GSM8KVerifier
+from .minerva_math import MinervaMathVerifier
 from .ifeval import IFEvalVerifier
 from .code import HumanEvalVerifier, MBPPVerifier, APPSVerifier
+from .allenai import AllenAIGSM8KVerifier, AllenAIMathVerifier
 
 
 class MultiVerifier:
@@ -30,6 +32,7 @@ class MultiVerifier:
         math_timeout: float = 5.0,
         math_max_workers: int = 4,
         ifeval_timeout: float = 1.0,
+        gsm8k_format_weight: float = 0.0,
     ):
         """Initialize all sub-verifiers.
 
@@ -37,14 +40,20 @@ class MultiVerifier:
             math_timeout: Timeout for math verification (sympy can hang)
             math_max_workers: Number of workers for parallel math verification
             ifeval_timeout: Timeout for ifeval verification
+            gsm8k_format_weight: Weight for GSM8K format reward (0.0 to 1.0).
+                If > 0, gives partial credit for correct format even with wrong answer.
         """
         self._verifiers: dict[str, Any] = {
             "math": MathVerifier(timeout=math_timeout, max_workers=math_max_workers),
-            "hendrycks_math": HendrycksMathVerifier(),
+            "gsm8k": GSM8KVerifier(format_weight=gsm8k_format_weight),
+            "minerva_math": MinervaMathVerifier(),
             "ifeval": IFEvalVerifier(timeout=ifeval_timeout),
             "humaneval": HumanEvalVerifier(),
             "mbpp": MBPPVerifier(),
             "apps": APPSVerifier(),
+            # AllenAI verifiers (for allenai/RLVR-GSM-MATH-IF-Mixed-Constraints dataset)
+            "allenai_gsm8k": AllenAIGSM8KVerifier(),
+            "allenai_math": AllenAIMathVerifier(use_sympy=False),  # Disable sympy for speed
         }
 
     def _get_verifier(self, verifier_type: str) -> Any:
@@ -90,10 +99,10 @@ class MultiVerifier:
             verifier = self._get_verifier(verifier_type)
             t0 = time.perf_counter()
 
-            # Use single-item verify for math/ifeval, verify_completions for code
+            # Use single-item verify for math/ifeval/AllenAI, verify_completions for code
             if verifier_type in ("math", "hendrycks_math"):
                 score = verifier.verify(c, p["answer"])
-            elif verifier_type == "ifeval":
+            elif verifier_type in ("ifeval", "allenai_gsm8k", "allenai_math"):
                 score = verifier.verify(c, p.get("ground_truth", ""))
             else:
                 # Code verifiers - verify_completions returns (scores, durations)
@@ -126,10 +135,10 @@ class MultiVerifier:
             verifier = self._get_verifier(verifier_type)
             t0 = time.perf_counter()
 
-            # Use single-item verify for math/ifeval, verify_completions for code
+            # Use single-item verify for math/ifeval/AllenAI, verify_completions for code
             if verifier_type in ("math", "hendrycks_math"):
                 score = verifier.verify(c, p["answer"])
-            elif verifier_type == "ifeval":
+            elif verifier_type in ("ifeval", "allenai_gsm8k", "allenai_math"):
                 score = verifier.verify(c, p.get("ground_truth", ""))
             else:
                 # Code verifiers - verify_completions returns (scores, durations)

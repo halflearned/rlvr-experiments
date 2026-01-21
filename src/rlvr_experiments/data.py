@@ -24,8 +24,8 @@ GSM8K_ASSISTANT_PREFIX = ""
 GSM8K_MAX_COMPLETION_LEN = 512
 
 # MATH: Competition math, longer reasoning needed
-# Format: "Question: ... Answer:" to match Qwen's MATH evaluation methodology
-# (achieves ~43% vs ~17% with lm-eval's "Problem: ... Solution:" format)
+# Format: "Problem:\n{problem}\n\nSolution:" to match minerva_math eval format
+# This ensures training and eval use the same prompt format
 MATH_SYSTEM_PROMPT = ""
 MATH_ASSISTANT_PREFIX = ""
 MATH_MAX_COMPLETION_LEN = 1024
@@ -96,7 +96,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
             "problem": {
                 "answer": answer,
                 "prompt_id": prompt_id,
-                "verifier_type": "math",
+                "verifier_type": "gsm8k",
                 "dataset_name": "gsm8k",
                 "system_prompt": GSM8K_SYSTEM_PROMPT,
                 "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
@@ -324,9 +324,9 @@ def load_math(
     ds = ray.data.from_items(indexed_rows)
 
     def preprocess(row):
-        # Format: "Question: ... Answer:" to match Qwen's MATH evaluation methodology
+        # Format: "Problem:\n{problem}\n\nSolution:" to match minerva_math eval format
         # Model should output reasoning with final answer in \boxed{}
-        question = f"Question: {row['problem'].strip()}\nAnswer:"
+        question = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
         # Use subject + index for prompt_id (e.g., math_algebra_0)
         prompt_id = f"math_{row['_subject']}_{row['_subject_idx']}"
         return {
@@ -334,7 +334,7 @@ def load_math(
             "problem": {
                 "answer": row["solution"],
                 "prompt_id": prompt_id,
-                "verifier_type": "hendrycks_math",
+                "verifier_type": "minerva_math",
                 "dataset_name": "math",
                 "system_prompt": MATH_SYSTEM_PROMPT,
                 "assistant_prefix": MATH_ASSISTANT_PREFIX,
@@ -554,6 +554,144 @@ def load_dummy(split: str = "train", num_samples: int = 64) -> ray.data.Dataset:
     return ray.data.from_items(rows)
 
 
+# --- AllenAI RLVR Dataset ---
+# AllenAI's RLVR-GSM-MATH-IF-Mixed-Constraints dataset has CoT examples baked into prompts:
+# - GSM8K: 8-shot CoT, "So the answer is X." format
+# - MATH: 4-shot CoT, \boxed{} format
+# - IFEval: Constraint-based instruction following with verification metadata
+
+ALLENAI_GSM8K_MAX_COMPLETION_LEN = 512
+ALLENAI_MATH_MAX_COMPLETION_LEN = 1024
+ALLENAI_IFEVAL_MAX_COMPLETION_LEN = 2048
+
+
+def load_allenai_rlvr(
+    split: str = "train",
+    datasets: list[str] | None = None,
+) -> ray.data.Dataset:
+    """
+    Load AllenAI's RLVR-GSM-MATH-IF-Mixed-Constraints dataset.
+
+    This dataset has CoT examples baked into the prompts, matching the format
+    used in the Tulu-3 paper. Key features:
+    - GSM8K: 8-shot CoT with "So the answer is X." format
+    - MATH: 4-shot CoT with \\boxed{} format
+    - IFEval: Constraint verification metadata in ground_truth field
+
+    Args:
+        split: Dataset split (only "train" available)
+        datasets: List of datasets to include. Options: ["gsm8k", "MATH", "ifeval"]
+                  If None, includes all datasets.
+
+    Returns:
+        Ray Dataset with columns: "prompt", "problem"
+        where "problem" contains verifier metadata.
+    """
+    import os
+    import subprocess
+
+    # Check for S3 cache first (for SageMaker VPC environments)
+    s3_cache = "s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/allenai_rlvr_train/"
+    local_cache = "/tmp/allenai_rlvr_train_cache"
+
+    use_local_cache = False
+    # Check for valid local cache (must have dataset files, not just empty dir)
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+        print(f"[load_allenai_rlvr] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_allenai_rlvr] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            result = subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            # Check if we actually got files
+            if os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+                print(f"[load_allenai_rlvr] Loaded from S3 cache")
+                use_local_cache = True
+            else:
+                print(f"[load_allenai_rlvr] S3 cache empty, loading from HuggingFace Hub")
+                # Clean up empty directory
+                import shutil
+                shutil.rmtree(local_cache, ignore_errors=True)
+        except Exception as e:
+            print(f"[load_allenai_rlvr] S3 cache not available ({e}), loading from HuggingFace Hub")
+            # Clean up any partial download
+            import shutil
+            shutil.rmtree(local_cache, ignore_errors=True)
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        items = list(hf_dataset)
+    else:
+        hf_dataset = load_dataset("allenai/RLVR-GSM-MATH-IF-Mixed-Constraints", split=split)
+        items = list(hf_dataset)
+
+    # Filter by dataset if specified
+    if datasets is not None:
+        dataset_set = set(d.lower() for d in datasets)
+        items = [item for item in items if item["dataset"].lower() in dataset_set]
+        print(f"[load_allenai_rlvr] Filtered to datasets {datasets}: {len(items)} samples")
+
+    # Add index for deterministic prompt_ids
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        # Extract user message content from messages list
+        messages = row["messages"]
+        user_content = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                user_content = msg["content"]
+                break
+
+        dataset_name = row["dataset"].lower()
+        prompt_id = f"allenai_{dataset_name}_{row['_idx']}"
+
+        # Determine verifier type and settings based on source dataset
+        if dataset_name == "gsm8k":
+            verifier_type = "allenai_gsm8k"
+            max_completion_len = ALLENAI_GSM8K_MAX_COMPLETION_LEN
+        elif dataset_name == "math":
+            verifier_type = "allenai_math"
+            max_completion_len = ALLENAI_MATH_MAX_COMPLETION_LEN
+        elif dataset_name == "ifeval":
+            verifier_type = "ifeval"  # Reuse existing IFEval verifier
+            max_completion_len = ALLENAI_IFEVAL_MAX_COMPLETION_LEN
+        else:
+            verifier_type = "unknown"
+            max_completion_len = 1024
+
+        # Convert None to empty string to avoid Arrow schema mismatch
+        # (GSM8K/MATH have None for constraint fields, IFEval has strings)
+        constraint_type = row["constraint_type"] if row["constraint_type"] is not None else ""
+        constraint = row["constraint"] if row["constraint"] is not None else ""
+
+        return {
+            "prompt": user_content,
+            "problem": {
+                "ground_truth": row["ground_truth"],
+                "constraint_type": constraint_type,
+                "constraint": constraint,
+                "source_dataset": row["dataset"],
+                "messages": messages,
+                "prompt_id": prompt_id,
+                "verifier_type": verifier_type,
+                "dataset_name": f"allenai_{dataset_name}",
+                "system_prompt": "",  # AllenAI doesn't use system prompts
+                "assistant_prefix": "",
+                "max_completion_len": max_completion_len,
+            },
+        }
+
+    return ds.map(preprocess)
+
+
 # --- Dataset registry for load_mixed ---
 
 DATASET_LOADERS = {
@@ -564,6 +702,7 @@ DATASET_LOADERS = {
     "apps": load_apps,
     "ifeval": load_ifeval,
     "dummy": load_dummy,
+    "allenai_rlvr": load_allenai_rlvr,
 }
 
 
