@@ -39,6 +39,7 @@ def create_prompt_with_tulu_thinker_r1_style_chat_format(
             formatted_text += "<|user|>\n" + content + "\n"
         elif role == "assistant":
             if "</think>" in content:
+                # OLMES template strips reasoning if <think> appears in exemplars (odd but matches eval).
                 content = content.split("</think>")[-1]
             formatted_text += "<|assistant|>\n" + content
             if not is_last_iteration:
@@ -60,4 +61,3 @@ def create_prompt_with_tulu_thinker_r1_style_chat_format(
 CHAT_TEMPLATES = {
     "tulu_thinker_r1_style": create_prompt_with_tulu_thinker_r1_style_chat_format,
 }
-

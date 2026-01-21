@@ -6,8 +6,11 @@ https://github.com/allenai/open-instruct/blob/main/open_instruct/if_functions.py
 Covers all 25 constraints from the IFEval taxonomy.
 """
 
+import ast
 import json
+import os
 import re
+import sys
 import time
 
 
@@ -15,6 +18,43 @@ import time
 # AllenAI IFEval constraint verification functions
 # From: https://github.com/allenai/open-instruct/blob/main/open_instruct/if_functions.py
 # =============================================================================
+
+
+_INSTRUCTIONS_REGISTRY = None
+_INSTRUCTIONS_REGISTRY_TRIED = False
+
+
+def _get_instructions_registry():
+    """Load open-instruct IFEvalG instructions registry if available."""
+    global _INSTRUCTIONS_REGISTRY, _INSTRUCTIONS_REGISTRY_TRIED
+    if _INSTRUCTIONS_REGISTRY_TRIED:
+        return _INSTRUCTIONS_REGISTRY
+    _INSTRUCTIONS_REGISTRY_TRIED = True
+
+    try:
+        from open_instruct.IFEvalG import instructions_registry
+        _INSTRUCTIONS_REGISTRY = instructions_registry
+        return _INSTRUCTIONS_REGISTRY
+    except Exception:
+        pass
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    open_instruct_path = os.path.join(repo_root, "external", "open-instruct")
+    if os.path.isdir(open_instruct_path) and open_instruct_path not in sys.path:
+        sys.path.append(open_instruct_path)
+        try:
+            from open_instruct.IFEvalG import instructions_registry
+            _INSTRUCTIONS_REGISTRY = instructions_registry
+            return _INSTRUCTIONS_REGISTRY
+        except Exception:
+            pass
+
+    try:
+        from oe_eval.dependencies.ifeval import instructions_registry
+        _INSTRUCTIONS_REGISTRY = instructions_registry
+        return _INSTRUCTIONS_REGISTRY
+    except Exception:
+        return None
 
 
 def verify_keywords(text, keyword_list, **kwargs):
@@ -282,6 +322,15 @@ def validate_no_commas(text, **kwargs):
     return "," not in text
 
 
+def remove_thinking_section(prediction: str) -> str:
+    """Strip <think> and <answer> tags from r1-style outputs."""
+    if prediction is None:
+        return ""
+    prediction = prediction.replace("<|assistant|>", "").strip()
+    prediction = prediction.split("</think>")[-1]
+    prediction = prediction.replace("<answer>", "").replace("</answer>", "")
+    return prediction.strip()
+
 # =============================================================================
 # Function registry - maps func_name to validation function
 # =============================================================================
@@ -334,14 +383,68 @@ class IFEvalVerifier:
         """Parse ground_truth JSON string."""
         if isinstance(ground_truth, dict):
             return ground_truth
+        if isinstance(ground_truth, list):
+            return ground_truth[0] if ground_truth else {}
         try:
-            return json.loads(ground_truth)
+            parsed = json.loads(ground_truth)
         except json.JSONDecodeError:
-            return {}
+            try:
+                parsed = ast.literal_eval(ground_truth)
+            except (ValueError, SyntaxError):
+                return {}
+
+        if isinstance(parsed, list):
+            if not parsed:
+                return {}
+            parsed = parsed[0]
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(parsed)
+                except (ValueError, SyntaxError):
+                    return {}
+
+        return parsed if isinstance(parsed, dict) else {}
 
     def verify(self, response: str, ground_truth: str | dict) -> float:
         """Verify a single response against ground_truth constraints."""
         gt = self._parse_ground_truth(ground_truth)
+        if not gt:
+            return 0.0
+
+        instruction_keys = gt.get("instruction_id") or gt.get("instruction_id_list")
+        if instruction_keys:
+            registry = _get_instructions_registry()
+            if registry is None:
+                return 0.0
+            instruction_dict = registry.INSTRUCTION_DICT
+            args_list = gt.get("kwargs") or []
+            if isinstance(instruction_keys, str):
+                instruction_keys = [instruction_keys]
+            if not isinstance(instruction_keys, list):
+                return 0.0
+            if not isinstance(args_list, list):
+                args_list = [{} for _ in range(len(instruction_keys))]
+
+            answer = remove_thinking_section(response)
+            if len(response) == 0 or len(answer) == 0:
+                return 0.0
+
+            rewards = []
+            for instruction_key, args in zip(instruction_keys, args_list):
+                if args is None:
+                    args = {}
+                args = {k: v for k, v in args.items() if v is not None}
+                instruction_cls = instruction_dict[instruction_key]
+                instruction_instance = instruction_cls(instruction_key)
+                instruction_instance.build_description(**args)
+                if response.strip() and instruction_instance.check_following(answer):
+                    rewards.append(1.0)
+                else:
+                    rewards.append(0.0)
+            return sum(rewards) / len(rewards) if rewards else 0.0
 
         func_name = gt.get("func_name")
         if not func_name:
@@ -356,7 +459,7 @@ class IFEvalVerifier:
         kwargs = {k: v for k, v in gt.items() if k != "func_name" and v is not None}
 
         try:
-            result = func(response, **kwargs)
+            result = func(remove_thinking_section(response), **kwargs)
             return 1.0 if result else 0.0
         except Exception:
             return 0.0

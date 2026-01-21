@@ -53,7 +53,7 @@ class MultiVerifier:
             "apps": APPSVerifier(),
             # AllenAI verifiers (for allenai/RLVR-GSM-MATH-IF-Mixed-Constraints dataset)
             "allenai_gsm8k": AllenAIGSM8KVerifier(),
-            "allenai_math": AllenAIMathVerifier(use_sympy=False),  # Disable sympy for speed
+            "allenai_math": AllenAIMathVerifier(use_sympy=True),
         }
 
     def _get_verifier(self, verifier_type: str) -> Any:

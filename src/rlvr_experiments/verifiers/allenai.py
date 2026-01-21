@@ -49,6 +49,19 @@ def normalize_gsm8k(s: str) -> Optional[str]:
     return s
 
 
+def strip_r1_style_answer(text: str) -> str:
+    """Strip <think> and <answer> tags to align with r1_style outputs."""
+    if text is None:
+        return ""
+    # Drop reasoning section if present.
+    if "</think>" in text:
+        text = re.sub(r"(?ms)^.*?</think>", "", text)
+    # Remove answer tags if present.
+    text = re.sub(r"(?ms)^\\s*<answer>\\s*", "", text)
+    text = re.sub(r"(?ms)</answer>\\s*$", "", text)
+    return text.strip()
+
+
 class AllenAIGSM8KVerifier:
     """
     Verifier for AllenAI's GSM8K dataset.
@@ -368,26 +381,10 @@ def hendrycks_is_equiv(str1: Optional[str], str2: Optional[str]) -> bool:
 
 
 def is_equiv_sympy(x1: str, x2: str, timeout_seconds: float = 5.0) -> bool:
-    """Check equivalence using sympy (with timeout)."""
+    """Check equivalence using latex2sympy2_extended (Minerva-style)."""
     try:
-        from sympy.parsing.latex import parse_latex
-        from sympy import simplify
-
-        try:
-            parsed_x1 = parse_latex(x1)
-            parsed_x2 = parse_latex(x2)
-        except Exception:
-            return False
-
-        try:
-            diff = parsed_x1 - parsed_x2
-        except TypeError:
-            return False
-
-        try:
-            return simplify(diff) == 0
-        except Exception:
-            return False
+        from .minerva_math import _sympy_equiv_with_timeout
+        return _sympy_equiv_with_timeout(x1, x2, timeout_seconds)
     except Exception:
         return False
 
@@ -416,6 +413,7 @@ class AllenAIMathVerifier:
     def _extract_all_answers(self, raw_answer: str) -> list[str]:
         """Extract candidate answers using multiple strategies."""
         all_answers = []
+        raw_answer = strip_r1_style_answer(raw_answer)
 
         # Strategy 1: Boxed answer
         boxed_answer = last_boxed_only_string(raw_answer)
