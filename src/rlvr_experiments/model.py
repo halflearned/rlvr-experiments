@@ -427,8 +427,21 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
                         dst = os.path.join(output_path, fname)
                         shutil.copy2(src, dst)
 
+            # Create symlinks for sharded filenames referenced in model.safetensors.index.json
+            # (torchtitan's loader requires the index file, which references sharded names)
+            index_path = os.path.join(output_path, "model.safetensors.index.json")
+            if os.path.exists(index_path):
+                import json
+                with open(index_path) as f:
+                    index_data = json.load(f)
+                # Get unique shard filenames from weight_map
+                shard_files = set(index_data.get("weight_map", {}).values())
+                for shard_name in shard_files:
+                    shard_path = os.path.join(output_path, shard_name)
+                    if not os.path.exists(shard_path):
+                        os.symlink("model.safetensors", shard_path)
+
             logger.info(f"Exported HuggingFace model to {output_path}")
 
         logger.debug("TitanModel.export_to_hf: done")
-
 
