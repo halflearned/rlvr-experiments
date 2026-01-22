@@ -7,6 +7,7 @@ import time
 import traceback
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("NCCL_TIMEOUT", "90")  # 90s timeout for NCCL collectives to prevent infinite hangs
 
 import torch
 from transformers import AutoTokenizer
@@ -326,7 +327,18 @@ async def main():
             if producer_task.done() and producer_task.exception():
                 raise producer_task.exception()
 
-            entry = await buffer.pop()
+            # Deadlock guard: nothing pending, nothing buffered, and all in-flight
+            # items are already sitting in our local samples list.
+            if buffer.size() == 0 and data_iter.pending_count() == 0 and data_iter.in_flight_count() == len(samples):
+                tracer.counter("deadlock", {
+                    "pending": 0,
+                    "in_flight": len(samples),
+                    "buffer_size": 0,
+                    "samples": len(samples),
+                })
+                entry = None
+            else:
+                entry = await buffer.pop()
             if entry is None:
                 # Producer finished, buffer drained - yield any partial batch
                 if samples:
@@ -524,10 +536,10 @@ async def main():
                 await trainer.export_to_hf(ckpt_path)
                 print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] export_to_hf() returned in {_time.time()-t0:.2f}s", flush=True)
                 if use_s3_checkpoints:
-                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] Calling upload_checkpoint_to_s3()...", flush=True)
+                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] Uploading checkpoint to S3...", flush=True)
                     t0 = _time.time()
                     upload_checkpoint_to_s3(ckpt_path, run_id, f"step{trainer.version}", runtime.trace_dir)
-                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] upload done in {_time.time()-t0:.2f}s", flush=True)
+                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] S3 upload done in {_time.time()-t0:.2f}s", flush=True)
                     cleanup_local_checkpoint(ckpt_path)
                 print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] CHECKPOINT COMPLETE", flush=True)
 
