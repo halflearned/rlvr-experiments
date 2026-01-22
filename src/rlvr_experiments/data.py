@@ -940,11 +940,13 @@ class DataIterator:
         system_prompt: str = "",
         assistant_prefix: str = "",
         order: list[str] | str | None = None,
+        skip_chat_template: bool = False,
     ):
         self.ds = ds
         self.tokenizer = tokenizer
         self.assistant_prefix = assistant_prefix
         self.system_prompt = system_prompt
+        self.skip_chat_template = skip_chat_template
         # Build index: prompt_id -> row data
         self._prompt_id_index: dict[str, dict] = {}
         self._build_index()
@@ -992,10 +994,21 @@ class DataIterator:
 
         Uses per-row system_prompt/assistant_prefix from problem dict if present,
         otherwise falls back to global defaults.
+
+        If skip_chat_template=True, returns the raw prompt + assistant_prefix without
+        applying any chat formatting. Use this for base models that don't understand
+        chat special tokens like <|im_start|>.
         """
         # Per-row overrides take precedence over global config
         system_prompt = problem.get("system_prompt") or self.system_prompt
         assistant_prefix = problem.get("assistant_prefix") or self.assistant_prefix
+
+        if self.skip_chat_template:
+            # For base models: just return raw prompt + prefix
+            # Optionally prepend system prompt as regular text if provided
+            if system_prompt:
+                return system_prompt + "\n\n" + prompt + assistant_prefix
+            return prompt + assistant_prefix
 
         messages = []
         if system_prompt:
