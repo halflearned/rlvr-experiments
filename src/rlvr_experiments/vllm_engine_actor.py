@@ -463,15 +463,9 @@ class VLLMHandle:
             # Get actual sequence length (up to first pad token or end)
             seq = input_ids[i].tolist()
             plen = prompt_lens_list[i]
-            # Find actual completion length (non-padding portion)
-            comp_seq = completion_ids[i].tolist()
-            actual_comp_len = completion_len
-            for j in range(completion_len):
-                if comp_seq[j] == 0:  # Assuming 0 is pad_token_id or we need to strip trailing zeros
-                    actual_comp_len = j
-                    break
-            # Actual sequence = prompt + completion (no trailing padding)
-            actual_seq_len = plen + actual_comp_len
+            # Keep full padded completion length; padding is masked later.
+            # Avoid trimming based on a hardcoded pad_token_id (0 is wrong for Qwen).
+            actual_seq_len = plen + completion_len
             token_ids_list.append(seq[:actual_seq_len])
 
         # Get logprobs from vLLM
