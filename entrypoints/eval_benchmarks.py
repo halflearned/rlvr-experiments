@@ -69,18 +69,40 @@ def download_from_s3(s3_path: str, local_dir: str) -> str:
 
 
 def upload_to_s3(local_path: str, s3_path: str):
-    """Upload file or directory to S3."""
+    """Upload file or directory to S3 using boto3."""
+    import boto3
+    from botocore.config import Config
+    from urllib.parse import urlparse
+
     print(f"[eval] Uploading {local_path} -> {s3_path}", flush=True)
-    if os.path.isdir(local_path):
-        subprocess.run(
-            ["aws", "s3", "sync", local_path, s3_path, "--quiet"],
-            check=True
-        )
-    else:
-        subprocess.run(
-            ["aws", "s3", "cp", local_path, s3_path, "--quiet"],
-            check=True
-        )
+
+    # Parse S3 path
+    parsed = urlparse(s3_path)
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip('/')
+
+    config = Config(connect_timeout=30, read_timeout=60, retries={'max_attempts': 3})
+    s3 = boto3.client('s3', config=config)
+
+    try:
+        if os.path.isdir(local_path):
+            files_uploaded = 0
+            for root, dirs, files in os.walk(local_path):
+                for filename in files:
+                    filepath = os.path.join(root, filename)
+                    rel_path = os.path.relpath(filepath, local_path)
+                    s3_key = f"{prefix}/{rel_path}" if prefix else rel_path
+                    s3.upload_file(filepath, bucket, s3_key)
+                    files_uploaded += 1
+            print(f"[eval] Uploaded {files_uploaded} files to s3://{bucket}/{prefix}", flush=True)
+        else:
+            filename = os.path.basename(local_path)
+            s3_key = f"{prefix}/{filename}" if prefix else filename
+            s3.upload_file(local_path, bucket, s3_key)
+            print(f"[eval] Uploaded {local_path} to s3://{bucket}/{s3_key}", flush=True)
+    except Exception as e:
+        print(f"[eval] Upload FAILED: {type(e).__name__}: {e}", flush=True)
+        raise
 
 
 def resolve_checkpoint_path(path: str, cache_dir: str) -> str:

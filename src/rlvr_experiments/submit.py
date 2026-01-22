@@ -126,6 +126,7 @@ def submit_job(
     eval_config: str | None = None,
     train_gpus: str = "0,1,2,3,4,5",
     eval_gpus: str = "6,7",
+    entrypoint: str | None = None,
 ):
     """Submit a training job to SageMaker.
 
@@ -207,7 +208,13 @@ def submit_job(
     sm_client = boto3.client("sagemaker", region_name=REGION)
 
     # Build hyperparameters based on launcher type
-    if use_combined:
+    if entrypoint:
+        # Custom entrypoint script (e.g., for testing)
+        hyperparams = {
+            "sagemaker_program": entrypoint,
+            "sagemaker_submit_directory": s3_source_uri,
+        }
+    elif use_combined:
         hyperparams = {
             "config": config,
             "eval-config": eval_config,
@@ -239,10 +246,7 @@ def submit_job(
         "StoppingCondition": {
             "MaxRuntimeInSeconds": 5 * 24 * 3600,  # 5 days
         },
-        "VpcConfig": {
-            "Subnets": SUBNETS,
-            "SecurityGroupIds": SECURITY_GROUP_IDS,
-        },
+        # VpcConfig removed to allow direct internet/S3 access
         "Environment": {
             "PYTORCH_ALLOC_CONF": "expandable_segments:True",
         },
@@ -277,7 +281,8 @@ def submit_job(
 
 def main():
     parser = argparse.ArgumentParser(description="Submit GRPO training to SageMaker")
-    parser.add_argument("config", help="Training config file (e.g., configs/qwen3-17B-base-gsm8k.yaml)")
+    parser.add_argument("config", nargs="?", default=None,
+                        help="Training config file (e.g., configs/qwen3-17B-base-gsm8k.yaml)")
     parser.add_argument("--instance-type", default=DEFAULT_INSTANCE_TYPE, help="Instance type")
     parser.add_argument("--instance-count", type=int, default=1, help="Number of instances")
     parser.add_argument("--image-tag", default=None, help="Docker image tag (default: YYYYMMDD)")
@@ -293,6 +298,8 @@ def main():
                         help="GPUs for training (default: 0,1,2,3,4,5)")
     parser.add_argument("--eval-gpus", default="6,7",
                         help="GPUs for evaluation (default: 6,7)")
+    parser.add_argument("--entrypoint", default=None,
+                        help="Custom entrypoint script (overrides config-based launcher)")
 
     args = parser.parse_args()
 
@@ -310,6 +317,7 @@ def main():
         eval_config=args.eval_config,
         train_gpus=args.train_gpus,
         eval_gpus=args.eval_gpus,
+        entrypoint=args.entrypoint,
     )
 
 

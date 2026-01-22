@@ -2438,17 +2438,10 @@ class HeartbeatViz {
         let minVal = Math.min(...values);
         let maxVal = Math.max(...values);
 
-        // Fixed 0-1 range for reward statistics (they're already 0-1 values)
-        const fixedRangeMetrics = new Set(['reward_overall', 'reward_used', 'frac_all_correct', 'frac_all_wrong']);
-        if (fixedRangeMetrics.has(metric)) {
-            minVal = 0;
-            maxVal = 1;
-        } else {
-            // Add some padding to the range
-            const rangePadding = (maxVal - minVal) * 0.1 || 0.1;
-            minVal -= rangePadding;
-            maxVal += rangePadding;
-        }
+        // Add some padding to the range
+        const rangePadding = (maxVal - minVal) * 0.1 || 0.1;
+        minVal -= rangePadding;
+        maxVal += rangePadding;
         const range = maxVal - minVal || 1;
 
         // Helper to convert value to y coordinate

@@ -561,6 +561,40 @@ def load_dummy(split: str = "train", num_samples: int = 64) -> ray.data.Dataset:
 # - IFEval: Constraint-based instruction following with verification metadata
 
 ALLENAI_GSM8K_MAX_COMPLETION_LEN = 512
+
+
+def _transform_gsm8k_to_lmeval_format(prompt: str, num_shots: int = 4) -> str:
+    """
+    Transform AllenAI GSM8K prompt to match lm_eval gsm8k_cot format:
+    - Replace "Question:" -> "Q:" and "Answer:" -> "A:"
+    - Keep only first num_shots examples (AllenAI has 8, lm_eval 4-shot uses 4)
+    - Change "So the answer is" -> "The answer is" to match lm_eval format
+
+    Returns transformed prompt (without trailing "A:" - that's added as assistant_prefix)
+    """
+    import re
+
+    # Replace Question:/Answer: with Q:/A:
+    prompt = prompt.replace("Question:", "Q:")
+    prompt = prompt.replace("Answer:", "A:")
+
+    # Change "So the answer is" to "The answer is" in fewshot examples
+    prompt = prompt.replace("So the answer is", "The answer is")
+
+    # Split into Q&A pairs and keep only first num_shots + the final question
+    # Pattern: Q: ... A: ... (repeated), then final Q: ...
+    # We need to find where each Q: starts
+    parts = re.split(r'(?=Q:)', prompt)
+    parts = [p for p in parts if p.strip()]  # Remove empty parts
+
+    if len(parts) > num_shots + 1:
+        # Keep first num_shots complete Q&A pairs + final question
+        # Each complete pair is "Q: question\nA: answer\n\n"
+        # Final question is just "Q: question"
+        kept_parts = parts[:num_shots] + [parts[-1]]
+        prompt = "".join(kept_parts)
+
+    return prompt
 ALLENAI_MATH_MAX_COMPLETION_LEN = 1024
 ALLENAI_IFEVAL_MAX_COMPLETION_LEN = 2048
 
@@ -654,9 +688,13 @@ def load_allenai_rlvr(
         prompt_id = f"allenai_{dataset_name}_{row['_idx']}"
 
         # Determine verifier type and settings based on source dataset
+        assistant_prefix = ""
         if dataset_name == "gsm8k":
             verifier_type = "allenai_gsm8k"
             max_completion_len = ALLENAI_GSM8K_MAX_COMPLETION_LEN
+            # Transform to lm_eval format: Q:/A:, 4-shot, "The answer is"
+            user_content = _transform_gsm8k_to_lmeval_format(user_content, num_shots=4)
+            assistant_prefix = "A:"
         elif dataset_name == "math":
             verifier_type = "allenai_math"
             max_completion_len = ALLENAI_MATH_MAX_COMPLETION_LEN
@@ -684,12 +722,50 @@ def load_allenai_rlvr(
                 "verifier_type": verifier_type,
                 "dataset_name": f"allenai_{dataset_name}",
                 "system_prompt": "",  # AllenAI doesn't use system prompts
-                "assistant_prefix": "",
+                "assistant_prefix": assistant_prefix,
                 "max_completion_len": max_completion_len,
             },
         }
 
     return ds.map(preprocess)
+
+
+def load_allenai_gsm8k_mini(
+    n_samples: int = 10,
+    seed: int = 42,
+) -> ray.data.Dataset:
+    """
+    Load a fixed mini subset of GSM8K from AllenAI RLVR for overfitting tests.
+
+    This is useful for verifying the training harness is working correctly
+    by checking if the model can overfit on a small fixed set of samples.
+
+    Args:
+        n_samples: Number of samples to select (default: 10)
+        seed: Random seed for sample selection (default: 42)
+
+    Returns:
+        Ray Dataset with n_samples GSM8K problems
+    """
+    import random
+
+    # Load full GSM8K subset from AllenAI RLVR
+    full_ds = load_allenai_rlvr(datasets=["gsm8k"])
+
+    # Materialize and select fixed subset
+    all_rows = list(full_ds.iter_rows())
+
+    # Use deterministic random selection
+    rng = random.Random(seed)
+    selected_rows = rng.sample(all_rows, min(n_samples, len(all_rows)))
+
+    print(f"[load_allenai_gsm8k_mini] Selected {len(selected_rows)} samples from {len(all_rows)} GSM8K problems (seed={seed})")
+
+    # Print selected prompt_ids for reproducibility
+    for row in selected_rows:
+        print(f"  - {row['problem']['prompt_id']}")
+
+    return ray.data.from_items(selected_rows)
 
 
 # --- Dataset registry for load_mixed ---
@@ -703,6 +779,7 @@ DATASET_LOADERS = {
     "ifeval": load_ifeval,
     "dummy": load_dummy,
     "allenai_rlvr": load_allenai_rlvr,
+    "allenai_gsm8k_mini": load_allenai_gsm8k_mini,
 }
 
 

@@ -1,0 +1,24 @@
+seed: 42
+output_dir: /efs/rlvr-experiments/eval_results/overfit_4shot_watch
+
+vllm:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  gpu_memory_utilization: 0.8
+  max_model_len: 4096
+
+benchmarks:
+  - task: gsm8k_cot
+    num_fewshot: 4
+
+watch:
+  enable: true
+  local_dir: /efs/rlvr-experiments/checkpoints
+  pattern: gsm8k_mini_overfit_test_base_step*
+  poll_interval_s: 30
+  gpu_mode: visible
+  task_groups:
+    - gpu: 0
+      benchmarks:
+        - task: gsm8k_cot
+          num_fewshot: 4

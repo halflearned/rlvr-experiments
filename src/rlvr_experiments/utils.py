@@ -49,7 +49,7 @@ def upload_checkpoint_to_s3(
     step: str,
     trace_dir: str | None = None,
 ) -> str:
-    """Upload checkpoint and optionally trace files to S3.
+    """Upload checkpoint and optionally trace files to S3 using boto3.
 
     Args:
         local_path: Local path to the checkpoint directory
@@ -58,93 +58,140 @@ def upload_checkpoint_to_s3(
         trace_dir: Optional path to trace files directory to upload
 
     Returns:
-        S3 path where checkpoint was uploaded
+        S3 path where checkpoint was uploaded, or empty string on failure
     """
     import time
-    import sys
+    import boto3
+    from botocore.config import Config
 
     def log(msg: str) -> None:
         ts = time.strftime("%H:%M:%S")
-        print(f"[{ts}] [upload_checkpoint_to_s3] {msg}", flush=True)
-        sys.stdout.flush()
+        print(f"[{ts}] [s3_upload] {msg}", flush=True)
 
     job_name = get_sagemaker_job_name()
-    s3_path = f"s3://{S3_BUCKET}/{S3_CHECKPOINT_PREFIX}/{job_name}/{run_name}_{step}"
+    s3_prefix = f"{S3_CHECKPOINT_PREFIX}/{job_name}/{run_name}_{step}"
 
-    log(f"STARTING upload: local_path={local_path}, s3_path={s3_path}")
-
-    # List files to upload
-    if os.path.isdir(local_path):
-        files = os.listdir(local_path)
-        total_size = sum(os.path.getsize(os.path.join(local_path, f)) for f in files if os.path.isfile(os.path.join(local_path, f)))
-        log(f"  Local dir has {len(files)} files, total size={total_size/1024/1024:.1f}MB")
-        for f in files[:10]:  # Show first 10 files
-            fpath = os.path.join(local_path, f)
-            if os.path.isfile(fpath):
-                log(f"    {f}: {os.path.getsize(fpath)/1024/1024:.1f}MB")
-    else:
-        log(f"  WARNING: local_path {local_path} is not a directory!")
+    log(f"STARTING upload: {local_path} -> s3://{S3_BUCKET}/{s3_prefix}")
 
     try:
-        log("  Running aws s3 sync (no --quiet, 10min timeout)...")
-        t0 = time.time()
-        # Run without --quiet to see progress/errors, with 10 minute timeout
-        proc = subprocess.Popen(
-            ["aws", "s3", "sync", local_path, s3_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        # Stream output while waiting
-        output_lines = []
-        while True:
-            line = proc.stdout.readline()
-            if not line and proc.poll() is not None:
-                break
-            if line:
-                line = line.strip()
-                output_lines.append(line)
-                # Log every 10th line or important messages
-                if len(output_lines) <= 10 or len(output_lines) % 50 == 0 or "error" in line.lower():
-                    log(f"    [aws s3] {line}")
-            # Check timeout
-            if time.time() - t0 > 600:  # 10 minute timeout
-                proc.kill()
-                log(f"  TIMEOUT after 600s, killed process")
-                return ""
+        # Use boto3 with increased timeout
+        config = Config(connect_timeout=30, read_timeout=60, retries={'max_attempts': 3})
+        s3 = boto3.client('s3', config=config)
 
-        rc = proc.returncode
-        elapsed = time.time() - t0
-        log(f"  aws s3 sync COMPLETE in {elapsed:.2f}s, return code={rc}, {len(output_lines)} lines output")
-        if rc != 0:
-            log(f"  ERROR: non-zero return code. Last 10 lines:")
-            for line in output_lines[-10:]:
-                log(f"    {line}")
+        # List and upload files
+        if not os.path.isdir(local_path):
+            log(f"  ERROR: {local_path} is not a directory")
             return ""
 
-        # Also upload trace files if provided
-        if trace_dir and os.path.isdir(trace_dir):
-            s3_traces = f"s3://{S3_BUCKET}/{S3_CHECKPOINT_PREFIX}/{job_name}/traces"
-            log(f"  Uploading traces to {s3_traces}...")
-            t0 = time.time()
-            subprocess.run(
-                ["aws", "s3", "sync", trace_dir, s3_traces],
-                check=True,
-                capture_output=True,
-                timeout=300,  # 5 minute timeout for traces
-            )
-            log(f"  Traces upload COMPLETE in {time.time()-t0:.2f}s")
+        files = [f for f in os.listdir(local_path) if os.path.isfile(os.path.join(local_path, f))]
+        total_size = sum(os.path.getsize(os.path.join(local_path, f)) for f in files)
+        log(f"  Uploading {len(files)} files, total {total_size/1024/1024:.1f}MB")
 
-        log(f"UPLOAD COMPLETE: {s3_path}")
-        return s3_path
-    except subprocess.TimeoutExpired as e:
-        log(f"UPLOAD TIMEOUT: {e}")
+        t0 = time.time()
+        for i, filename in enumerate(files):
+            filepath = os.path.join(local_path, filename)
+            s3_key = f"{s3_prefix}/{filename}"
+            file_size = os.path.getsize(filepath)
+            log(f"  [{i+1}/{len(files)}] {filename} ({file_size/1024/1024:.1f}MB)")
+            s3.upload_file(filepath, S3_BUCKET, s3_key)
+
+        elapsed = time.time() - t0
+        log(f"  Checkpoint upload COMPLETE in {elapsed:.1f}s")
+
+        # Upload traces if provided
+        if trace_dir and os.path.isdir(trace_dir):
+            trace_prefix = f"{S3_CHECKPOINT_PREFIX}/{job_name}/traces"
+            trace_files = [f for f in os.listdir(trace_dir) if os.path.isfile(os.path.join(trace_dir, f))]
+            log(f"  Uploading {len(trace_files)} trace files...")
+            for filename in trace_files:
+                filepath = os.path.join(trace_dir, filename)
+                s3.upload_file(filepath, S3_BUCKET, f"{trace_prefix}/{filename}")
+            log(f"  Traces upload COMPLETE")
+
+        return f"s3://{S3_BUCKET}/{s3_prefix}"
+
+    except Exception as e:
+        log(f"UPLOAD FAILED: {type(e).__name__}: {e}")
         return ""
-    except subprocess.CalledProcessError as e:
-        log(f"UPLOAD FAILED: {e}")
-        log(f"  stdout: {e.stdout}")
-        log(f"  stderr: {e.stderr}")
-        return ""
+
+
+def upload_file_to_s3(local_path: str, s3_key: str) -> bool:
+    """Upload a single file to S3 using boto3.
+
+    Args:
+        local_path: Local file path
+        s3_key: S3 key (path within bucket)
+
+    Returns:
+        True on success, False on failure
+    """
+    import time
+    import boto3
+    from botocore.config import Config
+
+    def log(msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [s3_upload] {msg}", flush=True)
+
+    if not os.path.isfile(local_path):
+        log(f"ERROR: {local_path} does not exist")
+        return False
+
+    try:
+        config = Config(connect_timeout=30, read_timeout=60, retries={'max_attempts': 3})
+        s3 = boto3.client('s3', config=config)
+        file_size = os.path.getsize(local_path)
+        log(f"Uploading {local_path} ({file_size/1024:.1f}KB) -> s3://{S3_BUCKET}/{s3_key}")
+        s3.upload_file(local_path, S3_BUCKET, s3_key)
+        log(f"  Upload complete")
+        return True
+    except Exception as e:
+        log(f"Upload failed: {type(e).__name__}: {e}")
+        return False
+
+
+def upload_dir_to_s3(local_dir: str, s3_prefix: str) -> bool:
+    """Upload a directory to S3 using boto3.
+
+    Args:
+        local_dir: Local directory path
+        s3_prefix: S3 prefix (path within bucket)
+
+    Returns:
+        True on success, False on failure
+    """
+    import time
+    import boto3
+    from botocore.config import Config
+
+    def log(msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [s3_upload] {msg}", flush=True)
+
+    if not os.path.isdir(local_dir):
+        log(f"ERROR: {local_dir} does not exist or is not a directory")
+        return False
+
+    try:
+        config = Config(connect_timeout=30, read_timeout=60, retries={'max_attempts': 3})
+        s3 = boto3.client('s3', config=config)
+
+        # Walk directory and upload all files
+        files_uploaded = 0
+        for root, dirs, files in os.walk(local_dir):
+            for filename in files:
+                local_path = os.path.join(root, filename)
+                # Compute relative path from local_dir
+                rel_path = os.path.relpath(local_path, local_dir)
+                s3_key = f"{s3_prefix}/{rel_path}"
+                s3.upload_file(local_path, S3_BUCKET, s3_key)
+                files_uploaded += 1
+
+        log(f"Uploaded {files_uploaded} files from {local_dir} -> s3://{S3_BUCKET}/{s3_prefix}")
+        return True
+    except Exception as e:
+        log(f"Upload failed: {type(e).__name__}: {e}")
+        return False
 
 
 def get_checkpoint_dir() -> tuple[str, bool]:

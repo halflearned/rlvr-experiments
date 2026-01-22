@@ -7,6 +7,7 @@ Eval results stream to S3 as they appear.
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,10 @@ def run(cmd: list[str], check: bool = True, env=None):
 
 
 def run_async(cmd: list[str], env=None, log_prefix: str = "") -> subprocess.Popen:
-    """Run command asynchronously, streaming output with prefix."""
+    """Run command asynchronously, streaming output with prefix.
+
+    Uses a bounded queue to avoid blocking the child if stdout printing stalls.
+    """
     print(f"[launcher] Starting async: {' '.join(cmd)}", flush=True)
     proc = subprocess.Popen(
         cmd,
@@ -49,12 +53,60 @@ def run_async(cmd: list[str], env=None, log_prefix: str = "") -> subprocess.Pope
         universal_newlines=True,
     )
 
-    def stream_output():
-        for line in proc.stdout:
+    log_prefix = log_prefix or ""
+    log_path = None
+    prefix_key = log_prefix.strip()
+    if prefix_key.startswith("[train]"):
+        log_path = "/opt/ml/model/train.log"
+    elif prefix_key.startswith("[eval]"):
+        log_path = "/opt/ml/model/eval.log"
+    else:
+        log_path = "/opt/ml/model/launcher_child.log"
+
+    q: queue.Queue[str | None] = queue.Queue(maxsize=1000)
+    dropped = 0
+    dropped_lock = threading.Lock()
+
+    def reader():
+        nonlocal dropped
+        log_file = None
+        try:
+            if log_path:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                log_file = open(log_path, "a", buffering=1)
+            for line in proc.stdout:
+                if log_file:
+                    log_file.write(line)
+                try:
+                    q.put(line, block=False)
+                except queue.Full:
+                    with dropped_lock:
+                        dropped += 1
+        finally:
+            if log_file:
+                log_file.flush()
+                log_file.close()
+            while True:
+                try:
+                    q.put(None, block=False)
+                    break
+                except queue.Full:
+                    time.sleep(0.05)
+
+    def printer():
+        nonlocal dropped
+        while True:
+            line = q.get()
+            if line is None:
+                break
+            with dropped_lock:
+                if dropped:
+                    print(f"{log_prefix}[dropped {dropped} log lines]", flush=True)
+                    dropped = 0
             print(f"{log_prefix}{line}", end="", flush=True)
 
-    thread = threading.Thread(target=stream_output, daemon=True)
-    thread.start()
+    threading.Thread(target=reader, daemon=True).start()
+    threading.Thread(target=printer, daemon=True).start()
     return proc
 
 
