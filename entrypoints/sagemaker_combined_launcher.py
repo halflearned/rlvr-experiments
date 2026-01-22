@@ -185,9 +185,10 @@ def create_eval_watch_config(
         },
 
         "benchmarks": [
-            {"task": "gsm8k_cot", "num_fewshot": 8},
             {"task": "gsm8k_cot", "num_fewshot": 4},
+            {"task": "ifeval", "num_fewshot": 0},
             {"task": "minerva_math", "num_fewshot": 4},
+            {"task": "hendrycks_math", "num_fewshot": 4},
         ],
 
         "watch": {
@@ -198,15 +199,19 @@ def create_eval_watch_config(
             "gpu_mode": "visible",
             "task_groups": [
                 {
-                    "gpu": i,
+                    "gpu": 0,
                     "benchmarks": [
-                        {"task": "gsm8k_cot", "num_fewshot": 8},
                         {"task": "gsm8k_cot", "num_fewshot": 4},
-                    ] if i == 0 else [
+                        {"task": "ifeval", "num_fewshot": 0},
+                    ],
+                },
+                {
+                    "gpu": 1,
+                    "benchmarks": [
                         {"task": "minerva_math", "num_fewshot": 4},
-                    ]
-                }
-                for i in range(len(eval_gpu_list))
+                        {"task": "hendrycks_math", "num_fewshot": 4},
+                    ],
+                },
             ]
         }
     }
@@ -261,6 +266,12 @@ def main():
     if IS_HEAD:
         # Count training GPUs
         train_gpu_count = len(args.train_gpus.split(","))
+
+        # CRITICAL: Set CUDA_VISIBLE_DEVICES before starting Ray
+        # This ensures Ray actors inherit the correct GPU visibility
+        # Without this, DTensor collective operations may hang due to NCCL mismatches
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.train_gpus
+        print(f"[launcher] Set CUDA_VISIBLE_DEVICES={args.train_gpus} before Ray start", flush=True)
 
         # Start Ray with only training GPUs
         start_ray_head(num_gpus=train_gpu_count)

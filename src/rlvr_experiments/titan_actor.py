@@ -222,7 +222,16 @@ class TitanModelRank:
 
     def export_to_hf(self, output_path: str) -> None:
         """Export model to HuggingFace format. All ranks must call (collective for DTensors)."""
+        import time
+        import sys
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [TitanActor.export_to_hf] ENTERING: output_path={output_path}", flush=True)
+        sys.stdout.flush()
+        t0 = time.time()
         self.model.export_to_hf(output_path)
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [TitanActor.export_to_hf] RETURNING after {time.time()-t0:.2f}s", flush=True)
+        sys.stdout.flush()
 
     def save_checkpoint(self, step: int | None = None, last_step: bool = False) -> None:
         """Save a distributed checkpoint. All ranks must call."""

@@ -359,14 +359,34 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         """
         Returns a HuggingFace-style state dict (values may still be DTensors).
         """
+        import time
+        import sys
+
+        def log(msg: str) -> None:
+            ts = time.strftime("%H:%M:%S")
+            print(f"[{ts}] [hf_state_dict] {msg}", flush=True)
+            sys.stdout.flush()
+
+        log("Starting hf_state_dict()...")
+        log(f"  model_parts count: {len(self.model_parts)}")
+
+        t0 = time.time()
+        log("  Gathering titan state from model_parts...")
         titan_state = {
             k: v
             for sd in map(get_model_state_dict, self.model_parts)
             for k, v in sd.items()
         }
+        log(f"  Titan state gathered: {len(titan_state)} keys in {time.time()-t0:.2f}s")
+
         if not self.sd_adapter:
             raise RuntimeError("No StateDictAdapter found for this model.")
+
+        log("  Converting to HF format via sd_adapter.to_hf()...")
+        t0 = time.time()
         hf_sd = self.sd_adapter.to_hf(titan_state)
+        log(f"  to_hf() done: {len(hf_sd)} keys in {time.time()-t0:.2f}s")
+
         return hf_sd
 
     def save_checkpoint(self, step: int | None = None, last_step: bool = False):
@@ -384,64 +404,107 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         Only rank 0 writes; all ranks must call this (collective for DTensors).
         Copies tokenizer/config from the original HF assets path.
         """
+        import sys
+        import time
         from torch.distributed.tensor import DTensor
         import shutil
 
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        logger.debug(f"TitanModel.export_to_hf: starting, output_path={output_path}")
+        def log(msg: str) -> None:
+            """Print with timestamp and flush immediately."""
+            ts = time.strftime("%H:%M:%S")
+            rank_str = f"rank{dist.get_rank()}" if dist.is_initialized() else "rank0"
+            print(f"[{ts}] [export_to_hf] [{rank_str}] {msg}", flush=True)
+            sys.stdout.flush()
 
-        logger.debug("TitanModel.export_to_hf: calling hf_state_dict()...")
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        log(f"STARTING export_to_hf: output_path={output_path}, rank={rank}, world_size={world_size}")
+
+        log("Calling hf_state_dict()...")
+        t0 = time.time()
         hf_sd = self.hf_state_dict()
-        logger.debug(f"TitanModel.export_to_hf: hf_state_dict done, {len(hf_sd)} keys")
+        log(f"hf_state_dict() done in {time.time()-t0:.2f}s, got {len(hf_sd)} keys")
 
         # Materialize DTensors to full tensors (collective operation)
-        logger.debug("TitanModel.export_to_hf: materializing DTensors...")
+        log(f"Starting DTensor materialization for {len(hf_sd)} tensors...")
         materialized = {}
+        dtensor_count = 0
+        regular_count = 0
+        t0 = time.time()
         for i, (k, v) in enumerate(hf_sd.items()):
             if isinstance(v, DTensor):
-                materialized[k] = v.full_tensor().cpu()
+                dtensor_count += 1
+                if i % 10 == 0:
+                    log(f"  Materializing DTensor {i}/{len(hf_sd)}: {k} shape={v.shape} (calling full_tensor)...")
+                t1 = time.time()
+                full = v.full_tensor()
+                if i % 10 == 0:
+                    log(f"    full_tensor() took {time.time()-t1:.2f}s, moving to CPU...")
+                materialized[k] = full.cpu()
+                if i % 10 == 0:
+                    log(f"    .cpu() done, tensor {i} complete")
             else:
+                regular_count += 1
                 materialized[k] = v.cpu() if torch.is_tensor(v) else v
             if i % 50 == 0:
-                logger.debug(f"TitanModel.export_to_hf: materialized {i}/{len(hf_sd)} tensors")
-        logger.debug("TitanModel.export_to_hf: materialization done")
+                elapsed = time.time() - t0
+                log(f"  Progress: {i}/{len(hf_sd)} tensors ({dtensor_count} DTensors, {regular_count} regular) in {elapsed:.1f}s")
+        log(f"Materialization COMPLETE: {dtensor_count} DTensors, {regular_count} regular, total time={time.time()-t0:.2f}s")
+
+        # Barrier to ensure all ranks finished materialization before rank 0 writes
+        if dist.is_initialized():
+            log("Calling dist.barrier() after materialization...")
+            t0 = time.time()
+            dist.barrier()
+            log(f"dist.barrier() done in {time.time()-t0:.2f}s")
 
         # Only rank 0 writes
         if rank == 0:
-            logger.debug(f"TitanModel.export_to_hf: saving to {output_path}...")
+            log(f"Rank 0: Creating output directory {output_path}...")
             os.makedirs(output_path, exist_ok=True)
 
             # Save model weights using safetensors
             from safetensors.torch import save_file
-            logger.debug("TitanModel.export_to_hf: calling save_file...")
+            log(f"Rank 0: Calling save_file() with {len(materialized)} tensors...")
+            t0 = time.time()
             save_file(materialized, os.path.join(output_path, "model.safetensors"))
-            logger.debug("TitanModel.export_to_hf: save_file done")
+            log(f"Rank 0: save_file() done in {time.time()-t0:.2f}s")
 
             # Copy tokenizer and config from original HF assets
             hf_assets = self.job_config.model.hf_assets_path
             if hf_assets and os.path.isdir(hf_assets):
-                logger.debug(f"TitanModel.export_to_hf: copying config files from {hf_assets}...")
+                log(f"Rank 0: Copying config files from {hf_assets}...")
                 for fname in os.listdir(hf_assets):
                     if fname.endswith((".json", ".txt", ".model")):
                         src = os.path.join(hf_assets, fname)
                         dst = os.path.join(output_path, fname)
                         shutil.copy2(src, dst)
+                log("Rank 0: Config files copied")
 
             # Create symlinks for sharded filenames referenced in model.safetensors.index.json
-            # (torchtitan's loader requires the index file, which references sharded names)
             index_path = os.path.join(output_path, "model.safetensors.index.json")
             if os.path.exists(index_path):
+                log("Rank 0: Creating symlinks for sharded filenames...")
                 import json
                 with open(index_path) as f:
                     index_data = json.load(f)
-                # Get unique shard filenames from weight_map
                 shard_files = set(index_data.get("weight_map", {}).values())
                 for shard_name in shard_files:
                     shard_path = os.path.join(output_path, shard_name)
                     if not os.path.exists(shard_path):
                         os.symlink("model.safetensors", shard_path)
+                log("Rank 0: Symlinks created")
 
-            logger.info(f"Exported HuggingFace model to {output_path}")
+            log(f"Rank 0: Export COMPLETE to {output_path}")
+        else:
+            log(f"Rank {rank}: Waiting for rank 0 to finish writing...")
 
-        logger.debug("TitanModel.export_to_hf: done")
+        # Final barrier to ensure all ranks wait for rank 0 to finish
+        if dist.is_initialized():
+            log("Calling final dist.barrier()...")
+            t0 = time.time()
+            dist.barrier()
+            log(f"Final dist.barrier() done in {time.time()-t0:.2f}s")
+
+        log("export_to_hf COMPLETE")
 

@@ -60,32 +60,90 @@ def upload_checkpoint_to_s3(
     Returns:
         S3 path where checkpoint was uploaded
     """
+    import time
+    import sys
+
+    def log(msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [upload_checkpoint_to_s3] {msg}", flush=True)
+        sys.stdout.flush()
+
     job_name = get_sagemaker_job_name()
     s3_path = f"s3://{S3_BUCKET}/{S3_CHECKPOINT_PREFIX}/{job_name}/{run_name}_{step}"
 
-    print(f"[checkpoint] Uploading to {s3_path}")
+    log(f"STARTING upload: local_path={local_path}, s3_path={s3_path}")
+
+    # List files to upload
+    if os.path.isdir(local_path):
+        files = os.listdir(local_path)
+        total_size = sum(os.path.getsize(os.path.join(local_path, f)) for f in files if os.path.isfile(os.path.join(local_path, f)))
+        log(f"  Local dir has {len(files)} files, total size={total_size/1024/1024:.1f}MB")
+        for f in files[:10]:  # Show first 10 files
+            fpath = os.path.join(local_path, f)
+            if os.path.isfile(fpath):
+                log(f"    {f}: {os.path.getsize(fpath)/1024/1024:.1f}MB")
+    else:
+        log(f"  WARNING: local_path {local_path} is not a directory!")
+
     try:
-        subprocess.run(
-            ["aws", "s3", "sync", local_path, s3_path, "--quiet"],
-            check=True,
-            capture_output=True,
+        log("  Running aws s3 sync (no --quiet, 10min timeout)...")
+        t0 = time.time()
+        # Run without --quiet to see progress/errors, with 10 minute timeout
+        proc = subprocess.Popen(
+            ["aws", "s3", "sync", local_path, s3_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
-        print(f"[checkpoint] Upload complete: {s3_path}")
+        # Stream output while waiting
+        output_lines = []
+        while True:
+            line = proc.stdout.readline()
+            if not line and proc.poll() is not None:
+                break
+            if line:
+                line = line.strip()
+                output_lines.append(line)
+                # Log every 10th line or important messages
+                if len(output_lines) <= 10 or len(output_lines) % 50 == 0 or "error" in line.lower():
+                    log(f"    [aws s3] {line}")
+            # Check timeout
+            if time.time() - t0 > 600:  # 10 minute timeout
+                proc.kill()
+                log(f"  TIMEOUT after 600s, killed process")
+                return ""
+
+        rc = proc.returncode
+        elapsed = time.time() - t0
+        log(f"  aws s3 sync COMPLETE in {elapsed:.2f}s, return code={rc}, {len(output_lines)} lines output")
+        if rc != 0:
+            log(f"  ERROR: non-zero return code. Last 10 lines:")
+            for line in output_lines[-10:]:
+                log(f"    {line}")
+            return ""
 
         # Also upload trace files if provided
         if trace_dir and os.path.isdir(trace_dir):
             s3_traces = f"s3://{S3_BUCKET}/{S3_CHECKPOINT_PREFIX}/{job_name}/traces"
-            print(f"[checkpoint] Uploading traces to {s3_traces}")
+            log(f"  Uploading traces to {s3_traces}...")
+            t0 = time.time()
             subprocess.run(
-                ["aws", "s3", "sync", trace_dir, s3_traces, "--quiet"],
+                ["aws", "s3", "sync", trace_dir, s3_traces],
                 check=True,
                 capture_output=True,
+                timeout=300,  # 5 minute timeout for traces
             )
-            print(f"[checkpoint] Traces upload complete")
+            log(f"  Traces upload COMPLETE in {time.time()-t0:.2f}s")
 
+        log(f"UPLOAD COMPLETE: {s3_path}")
         return s3_path
+    except subprocess.TimeoutExpired as e:
+        log(f"UPLOAD TIMEOUT: {e}")
+        return ""
     except subprocess.CalledProcessError as e:
-        print(f"[checkpoint] Upload failed: {e}")
+        log(f"UPLOAD FAILED: {e}")
+        log(f"  stdout: {e.stdout}")
+        log(f"  stderr: {e.stderr}")
         return ""
 
 

@@ -1013,3 +1013,59 @@ This was a critical bug - without it, base model training was fundamentally brok
   - `configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e3-repro.yaml`
   - `configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e4.yaml`
   - `configs/variations/qwen3-1.7B-allenai-ifeval-only-lr5e6.yaml`
+
+---
+
+## 2026-01-22: AllenAI Full Run Evaluation (allenai_full_lr5e6_beta1e3_repro_20260122_082151)
+
+### Setup
+
+**Config**: `configs/variations/qwen3-1.7B-allenai-full-lr5e6-beta1e3-repro.yaml`
+- **Model**: Qwen/Qwen3-1.7B-Base
+- **Dataset**: AllenAI RLVR (GSM8K + MATH + IFEval mixed)
+- **Verifiers**:
+  - GSM8K: `AllenAIGSM8KVerifier` (extracts last number)
+  - MATH: `AllenAIMathVerifier` (flexible extraction: boxed, minerva, dollar signs)
+  - IFEval: `IFEvalVerifier` (instruction constraint checking)
+- **LR**: 5e-6
+- **Beta**: 1e-3 (0.001)
+
+### Evaluation Results (lm_eval benchmarks)
+
+Evaluated checkpoints at steps 100, 200, 300, 400, 500:
+
+| Step | gsm8k flex | gsm8k strict | minerva_math | ifeval | hendrycks |
+|------|------------|--------------|--------------|--------|-----------|
+| 100  | 69.83%     | 51.63%       | 28.56%       | 23.29% | 17.96%    |
+| 200  | 69.60%     | 50.49%       | 28.92%       | 23.66% | 17.76%    |
+| 300  | 69.22%     | 47.08%       | 29.42%       | 24.77% | 17.84%    |
+| 400  | 69.75%     | 45.72%       | 29.94%       | 24.58% | 17.80%    |
+| 500  | 68.76%     | 45.41%       | 29.76%       | 26.43% | 17.98%    |
+
+### Critical Finding: Math Performance Degrading Despite Training
+
+Ran the **exact same verifiers used during training** on the lm_eval outputs (with `--log_samples`) to check if training rewards are actually improving.
+
+**Eval tasks used**: `gsm8k_cot` (4-shot), `minerva_math` (4-shot), `ifeval` (0-shot)
+
+| Metric | Base | Step500 | Delta |
+|--------|------|---------|-------|
+| **GSM8K (AllenAI verifier on gsm8k_cot samples)** | 72.02% | 71.04% | **-0.99%** |
+| **MATH (AllenAI verifier on minerva_math samples)** | 37.84% | 37.04% | **-0.80%** |
+| **IFEval prompt_strict** | 21.26% | 26.25% | **+4.99%** |
+| **IFEval inst_strict** | 32.85% | 37.65% | **+4.80%** |
+
+### Key Insight
+
+Both lm_eval metrics and our training verifiers show the same directional results:
+
+**IFEval is improving** (+5pts) - training is working for instruction following.
+
+**GSM8K and MATH are getting WORSE** (~-1pt each) - training is hurting math performance, even when measured with the exact same criterion we're training on. This is not a verifier mismatch issue - the degradation is real.
+
+### Open Questions
+
+- Why is math getting worse despite positive rewards during training?
+- Is the model learning something harmful from the math training signal?
+- Is the mixed dataset causing interference (IFEval learning hurts math)?
+- Would training on math-only help, or is this a more fundamental issue?

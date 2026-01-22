@@ -516,12 +516,20 @@ async def main():
 
             # Checkpoint
             if checkpoint_interval and trainer.version % checkpoint_interval == 0:
+                import time as _time
                 ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_step{trainer.version}")
-                print(f"[step {trainer.version}] Saving checkpoint to {ckpt_path}")
+                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] CHECKPOINT START: {ckpt_path}", flush=True)
+                t0 = _time.time()
+                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] Calling trainer.export_to_hf()...", flush=True)
                 await trainer.export_to_hf(ckpt_path)
+                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] export_to_hf() returned in {_time.time()-t0:.2f}s", flush=True)
                 if use_s3_checkpoints:
+                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] Calling upload_checkpoint_to_s3()...", flush=True)
+                    t0 = _time.time()
                     upload_checkpoint_to_s3(ckpt_path, run_id, f"step{trainer.version}", runtime.trace_dir)
+                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] upload done in {_time.time()-t0:.2f}s", flush=True)
                     cleanup_local_checkpoint(ckpt_path)
+                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] CHECKPOINT COMPLETE", flush=True)
 
             # Reset accumulation
             accum_count = 0

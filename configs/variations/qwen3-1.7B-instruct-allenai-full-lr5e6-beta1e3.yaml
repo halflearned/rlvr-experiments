@@ -1,11 +1,11 @@
 run:
-  name: allenai_full_lr5e6_beta1e3_repro
+  name: allenai_full_lr5e6_beta1e3_instruct
 
 model:
-  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
 
 tokenizer:
-  pretrained_model_name_or_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  pretrained_model_name_or_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
   use_fast: false
 
 training:
@@ -45,6 +45,7 @@ data:
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
+  # Note: NOT using skip_chat_template - instruct model should use chat template
 
 sampling:
   temperature: 1.
@@ -77,7 +78,7 @@ roles:
       model:
         name: "qwen3"
         flavor: "1.7B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
 
       optimizer:
         name: "AdamW"
@@ -123,7 +124,7 @@ roles:
   - name: reference
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
       max_concurrent_per_replica: 32
       max_num_seqs: 256
       tensor_parallel_size: 1
@@ -139,7 +140,7 @@ roles:
   - name: rollout
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1

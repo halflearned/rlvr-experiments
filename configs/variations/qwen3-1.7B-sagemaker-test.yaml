@@ -1,5 +1,5 @@
 run:
-  name: allenai_full_lr5e6_beta1e3_repro
+  name: sagemaker_test
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,10 +9,11 @@ tokenizer:
   use_fast: false
 
 training:
-  # No max_steps - run for full epoch
+  # Test run - checkpoint every 3 steps for quick testing
+  checkpoint_interval: 3
+  max_steps: 6  # Stop after 6 steps to create 2 checkpoints
   max_staleness: 0
   abort_in_flight: false
-  checkpoint_interval: 20
 
   # MATH problems may need longer completions
   seq_len_buckets: [768, 1280]
@@ -45,9 +46,10 @@ data:
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
+  skip_chat_template: true  # Required for base models
 
 sampling:
-  temperature: 1.
+  temperature: 0.6
   top_p: 0.95
   top_k: 20
   max_tokens: 1024
@@ -143,7 +145,7 @@ roles:
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 3  # Reduced from 5 to 3 (leaving 2 GPUs for eval)
+      data_parallel_size: 3  # 3 GPUs for rollout (leaving 2 for eval)
       max_model_len: 1280
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
