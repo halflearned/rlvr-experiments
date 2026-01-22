@@ -47,6 +47,21 @@ ssh ubuntu@172.31.17.116 "cd /efs/rlvr-experiments && ./scripts/evaluation/launc
 
 ## General Guidelines
 
+### User Communication - TRUST THE USER
+
+When the user says something is stuck, BELIEVE THEM. They have been staring at it for several minutes before telling you. Take IMMEDIATE action - kill the process, check logs, investigate. Do not waste time with "let me check if it's growing" - if the user says it's stuck, it's stuck.
+
+### Don't Kill Runs During Active Conversation
+
+**CRITICAL**: When actively conversing with the user:
+1. **INVESTIGATE THOROUGHLY FIRST** - Read logs, understand the pattern, form a hypothesis
+2. **ASK THE USER** before killing - "Can I kill this run to try X?"
+3. **NEVER overwrite logs** by restarting without understanding the previous failure
+
+When working autonomously (user stepped away, gave blanket permission), take action as needed.
+
+Restarting blindly destroys evidence. Logs are precious. Investigate BEFORE killing.
+
 ### GPU Utilization - MAXIMIZE PARALLELISM
 
 **CRITICAL: Always use ALL available GPUs when running parallel jobs.**
@@ -589,52 +604,51 @@ CUDA_VISIBLE_DEVICES=2 lm_eval ... --tasks gsm8k_cot --num_fewshot 4 &
 # ... etc
 ```
 
-### Baselines (2026-01-20, TP=1, seed=42, temperature=0)
+### Baselines (2026-01-22, TP=1, seed=42, temperature=0)
+
+**CRITICAL: Use appropriate `max_gen_toks` for each benchmark.** The default (256 tokens) causes 10-15% of responses to be truncated mid-reasoning, artificially lowering scores. See NOTES.md for details on this discovery.
+
+| Benchmark | max_gen_toks |
+|-----------|--------------|
+| gsm8k_cot | 1024 |
+| hendrycks_math | 2048 |
+| minerva_math | 2048 |
+| ifeval | 4096 |
 
 #### GSM8K (Math Reasoning)
 
-| Task | Setting | flexible-extract | strict-match |
-|------|---------|------------------|--------------|
-| gsm8k | 4-shot | 68.61% | 59.44% |
-| gsm8k | 8-shot | 70.13% | 69.60% |
-| gsm8k_cot | 4-shot | 69.83% | 51.63% |
-| gsm8k_cot | 8-shot | 73.24% | 67.17% |
+| Task | Setting | max_gen_toks | flexible-extract | strict-match |
+|------|---------|--------------|------------------|--------------|
+| gsm8k_cot | 4-shot | 1024 | **73.09%** | **54.13%** |
 
-**Note**: `gsm8k` uses `#### N` answer format. `gsm8k_cot` uses `The answer is N.` format.
+**Note**: `gsm8k_cot` uses `The answer is N.` format.
 
 #### MATH
 
-| Benchmark | Setting | Metric | Value |
-|-----------|---------|--------|-------|
-| hendrycks_math | 4-shot | exact_match | **17.78%** |
-| minerva_math | 4-shot | exact_match | **28.20%** |
-| minerva_math | 4-shot | math_verify | **39.08%** |
+| Benchmark | Setting | max_gen_toks | Metric | Value |
+|-----------|---------|--------------|--------|-------|
+| hendrycks_math | 4-shot | 2048 | exact_match | **17.94%** |
+| minerva_math | 4-shot | 2048 | exact_match | **30.58%** |
+| minerva_math | 4-shot | 2048 | math_verify | **41.58%** |
 
 **minerva_math breakdown by subject:**
 
 | Subject | exact_match | math_verify |
 |---------|-------------|-------------|
-| prealgebra | 47.30% | 60.85% |
-| algebra | 38.53% | 56.08% |
-| num_theory | 23.33% | 27.96% |
-| geometry | 21.71% | 31.94% |
-| counting_and_prob | 17.30% | 32.49% |
-| precalc | 12.82% | 20.70% |
-| intermediate_algebra | 12.18% | 19.49% |
+| prealgebra | 49.02% | 61.65% |
+| algebra | 41.95% | 59.22% |
+| counting_and_prob | 26.58% | 33.54% |
+| num_theory | 23.52% | 28.89% |
+| geometry | 23.59% | 34.45% |
+| precalc | 17.22% | 28.57% |
+| intermediate_algebra | 15.95% | 22.48% |
 
 #### IFEval (Instruction Following, 0-shot)
 
-| Metric | Value |
-|--------|-------|
-| prompt_level_strict_acc | 21.26% |
-| inst_level_strict_acc | 32.85% |
-
-#### Code Generation
-
-| Benchmark | Setting | pass@1 |
-|-----------|---------|--------|
-| MBPP      | 3-shot  | 55.8%  |
-| HumanEval | 0-shot  | 48.78% |
+| Metric | max_gen_toks | Value |
+|--------|--------------|-------|
+| prompt_level_strict_acc | 4096 | **21.26%** |
+| inst_level_strict_acc | 4096 | **32.85%** |
 
 ## Batch Checkpoint Evaluation
 

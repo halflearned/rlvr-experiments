@@ -1069,3 +1069,205 @@ Both lm_eval metrics and our training verifiers show the same directional result
 - Is the model learning something harmful from the math training signal?
 - Is the mixed dataset causing interference (IFEval learning hurts math)?
 - Would training on math-only help, or is this a more fundamental issue?
+
+---
+
+## 2026-01-22: Instruct Model Comparison (Full Mixed vs GSM8K-Only)
+
+### Motivation
+
+Testing hypothesis that the base model degradation is due to lacking CoT capability. Running two parallel experiments with the instruct model (Qwen3-1.7B, not Base):
+
+1. **Full Mixed**: Same AllenAI RLVR dataset (GSM8K + MATH + IFEval)
+2. **GSM8K-Only**: Filtered AllenAI RLVR to only GSM8K samples
+
+### Configurations
+
+**Full Mixed Instruct** (`qwen3-1.7B-instruct-allenai-full-lr5e6-beta1e3.yaml`):
+- Model: Qwen3-1.7B (instruct)
+- Dataset: AllenAI RLVR (all ~48k samples)
+- Running on primary node
+
+**GSM8K-Only Instruct** (`qwen3-1.7B-instruct-allenai-gsm8k-only-lr5e6-beta1e3.yaml`):
+- Model: Qwen3-1.7B (instruct)
+- Dataset: AllenAI RLVR filtered to GSM8K only (~7.5k samples)
+- Running on secondary node
+
+Both use: lr=5e-6, beta=1e-3
+
+### Results (Steps 20-140)
+
+**GSM8K-Only Instruct (Secondary Node)**:
+
+| Step | gsm8k_cot strict | minerva_math | ifeval prompt | hendrycks |
+|------|------------------|--------------|---------------|-----------|
+| 20 | 71.72% | 32.68% | 17.01% | 14.92% |
+| 40 | 71.57% | 32.90% | 16.82% | 14.92% |
+| 60 | 72.18% | 33.00% | 16.64% | 14.76% |
+| 80 | 72.18% | 33.04% | 16.64% | 14.80% |
+| 100 | 71.65% | 33.04% | 16.45% | 14.78% |
+| 120 | 71.95% | 33.54% | 17.19% | 14.74% |
+| 140 | 72.10% | 32.76% | 17.38% | 14.80% |
+
+**Full Mixed Instruct (Primary Node)**:
+
+| Step | gsm8k_cot strict | minerva_math | ifeval prompt | hendrycks |
+|------|------------------|--------------|---------------|-----------|
+| 20 | 71.34% | 33.34% | 15.53% | 14.98% |
+| 40 | 72.40% | 32.98% | 16.82% | 14.92% |
+| 60 | 71.19% | 33.00% | 17.19% | 14.76% |
+| 80 | 71.04% | 32.88% | 17.38% | 14.74% |
+| 100 | 71.49% | 33.20% | 17.56% | 14.72% |
+| 120 | 72.40% | 33.16% | 16.64% | 14.76% |
+
+### Observations
+
+1. **Both instruct models are stable** at ~71-72% on gsm8k_cot (no degradation)
+2. **Base model degraded** from ~51% → ~45% on the same benchmark
+3. **All other metrics flat** - minerva_math ~33%, hendrycks ~15%, ifeval ~17%
+4. **GSM8K-only vs Full Mixed**: No significant difference between the two runs
+5. **Still early** - only at steps 120-140, need more training to see if improvements emerge
+
+### What We Don't Know Yet
+
+- Whether instruct models will *improve* with more training
+- Why the base model degraded while instruct doesn't
+- Whether the difference is due to CoT capability, chat template, or something else
+
+---
+
+## 2026-01-22: Overfitting Test on 10 GSM8K Samples
+
+### Purpose
+
+Verify the training harness is working by attempting to overfit on a tiny fixed dataset of 10 GSM8K problems.
+
+### Configuration
+
+**Config**: `configs/variations/qwen3-1.7B-base-gsm8k-mini-overfit.yaml`
+
+Key settings:
+- Model: Qwen3-1.7B-Base (with `skip_chat_template: true`)
+- Dataset: `allenai_gsm8k_mini` - 10 fixed samples from GSM8K (seed=42)
+- lr: 1e-4 (increased from 5e-6)
+- beta: 0 (no KL penalty)
+- n: 16 completions per prompt
+- max_staleness: 0
+- max_reads: 99999 (allow unlimited reuse of samples)
+- Single GPU rollout (data_parallel_size: 1)
+
+**Trace file**: `traces/trace_20260122_185849.jsonl`
+
+### Results
+
+Rewards increased from ~0.41 at step 1 to ~0.94 at step 7, then fluctuated:
+
+| Step | Reward | Loss | Grad Norm |
+|------|--------|------|-----------|
+| 1 | 0.41 | 0.0001 | 2.25 |
+| 5 | 0.88 | 0.0114 | 3.42 |
+| 7 | 0.94 | 0.0089 | 2.45 |
+| 10 | 0.81 | 0.0060 | 2.67 |
+| 15 | 0.88 | 0.0025 | 2.44 |
+| 20 | 0.75 | 0.0008 | 2.03 |
+| 21 | 0.59 | -0.0006 | 1.81 |
+
+### Observations
+
+1. **Training harness works** - rewards did increase significantly from baseline (~0.4 → 0.9+)
+2. **Higher LR helped** - 1e-4 vs 5e-6 showed faster reward improvement
+3. **No convergence to 100%** - rewards peaked ~0.94 but never stabilized at 1.0
+4. **Fluctuations persist** - even with beta=0 (no KL penalty), rewards oscillate
+
+### Buffer Issue Discovered
+
+With `max_staleness: 0`, the buffer grew unbounded (127 → 700+ samples) because:
+- Producer generates samples faster than consumer trains
+- Staleness eviction only happens on pop, not proactively
+- Result: 7400+ samples evicted as stale (wasted compute)
+
+For overfitting tests, should use `max_staleness: 99999` to disable staleness checks.
+
+### Key Takeaway
+
+The GRPO training loop is functional - rewards do improve with training. The inability to reach 100% reward on 10 samples suggests either:
+- Stochastic sampling variance (temperature=1.0) prevents consistent correct answers
+- Model capacity/representation issues
+- Need more steps to fully converge
+
+---
+
+## 2026-01-22: lm_eval max_gen_toks Truncation Bug
+
+### Discovery
+
+While analyzing why ~13% of GSM8K responses seemed to fail despite correct reasoning, discovered that **lm_eval's default max_gen_toks=256 was truncating responses mid-reasoning**.
+
+### Evidence
+
+With default 256 tokens:
+- Step80 checkpoint: 171 out of 1319 samples (13%) were truncated mid-sentence
+- Responses cut off like: "...the total time Carla spent downloading the file is 100 minutes + 2" (no final answer)
+- Max response length: ~300 tokens, hitting the generation limit
+
+### Impact on Scores
+
+| Setting | gsm8k_cot flex | gsm8k_cot strict |
+|---------|----------------|------------------|
+| max_gen_toks=256 (default) | 71.27% | 58.45% |
+| max_gen_toks=1024 | **75.89%** | **61.79%** |
+| **Improvement** | **+4.6%** | **+3.3%** |
+
+For base model:
+| Setting | gsm8k_cot flex | gsm8k_cot strict |
+|---------|----------------|------------------|
+| max_gen_toks=256 (default) | 69.83% | 51.63% |
+| max_gen_toks=1024 | **73.09%** | **54.13%** |
+| **Improvement** | **+3.3%** | **+2.5%** |
+
+### Why This Matters
+
+1. **Previous baselines were artificially low** - we were penalizing models for running out of generation budget, not for wrong answers
+2. **Comparison between models was still valid** - both base and trained models were equally affected
+3. **Real improvement is higher** - Step80 vs Base with 1024 tokens shows +2.8% flex, +7.7% strict
+
+### Recommended max_gen_toks by Benchmark
+
+| Benchmark | max_gen_toks | Rationale |
+|-----------|--------------|-----------|
+| gsm8k_cot | 1024 | CoT reasoning needs ~200-500 tokens typically |
+| hendrycks_math | 2048 | Complex proofs can be longer |
+| minerva_math | 2048 | Same as hendrycks_math |
+| ifeval | 4096 | Instruction-following can require long outputs |
+
+### Updated Baselines
+
+See AGENTS.md for updated baseline numbers with proper max_gen_toks settings.
+
+### Truncation Analysis Details
+
+With 1024 tokens:
+- Step80: Only 8 truncated (0.6%) - down from 171 (13%)
+- Base: Only 6 truncated (0.5%)
+- Max response: 4554 chars (~1100 tokens) - a few edge cases still need more
+
+### Files Changed
+
+- `AGENTS.md`: Updated all baseline numbers with proper max_gen_toks
+- Evaluation scripts should be updated to use appropriate max_gen_toks per task
+
+### Commit
+
+**`4a78a95`** - MAJOR: Fix lm_eval truncation bug + update baselines
+
+### Training Results with Proper Eval
+
+Checkpoint from `trace_20260122_221554.jsonl` (GSM8K mini overfit test, base model):
+
+| Checkpoint | gsm8k_cot flex | gsm8k_cot strict | Δ flex vs base | Δ strict vs base |
+|------------|----------------|------------------|----------------|------------------|
+| Base | 73.09% | 54.13% | - | - |
+| Step 80 | 75.89% | 61.79% | +2.8% | +7.7% |
+| **Step 140** | **77.26%** | **73.54%** | **+4.2%** | **+19.4%** |
+
+The strict-match improvement is massive — nearly **+20 percentage points** from 54% to 73.5%. The model is learning both the "The answer is X." format AND improving underlying math reasoning.

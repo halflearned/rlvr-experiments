@@ -25,15 +25,12 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     AllenAI's GSM8K verifier extracts the last number in the response,
     which handles both "So the answer is X." and other formats.
 
-    From ground_truth_utils.py:
-        response = re.sub(r"(\d),(\d)", r"\1\2", prediction)
-        numbers = re.findall(r"[-+]?\d*\.\d+|\d+", response)
-        extracted = numbers[-1] if numbers else response
+    Based on ground_truth_utils.py but with fix for negative integers.
     """
     # Remove commas from numbers
     text = re.sub(r"(\d),(\d)", r"\1\2", text)
-    # Find all numbers
-    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", text)
+    # Match integers and decimals, with optional sign
+    numbers = re.findall(r"[-+]?(?:\d+\.\d+|\d+)", text)
     if numbers:
         return numbers[-1]
     return None
