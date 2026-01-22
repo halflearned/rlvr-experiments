@@ -123,10 +123,24 @@ def submit_job(
     wait: bool = False,
     local: bool = False,
     gpus: str | None = None,
+    eval_config: str | None = None,
+    train_gpus: str = "0,1,2,3,4,5",
+    eval_gpus: str = "6,7",
 ):
-    """Submit a training job to SageMaker."""
+    """Submit a training job to SageMaker.
+
+    Args:
+        config: Training config path
+        eval_config: Optional eval config path. If provided, uses combined launcher
+                    that runs training on train_gpus and eval watcher on eval_gpus
+        train_gpus: GPUs for training (default: "0,1,2,3,4,5")
+        eval_gpus: GPUs for evaluation (default: "6,7")
+    """
     local_uri = f"{DEFAULT_IMAGE_NAME}:{image_tag or datetime.now().strftime('%Y%m%d')}"
     remote_uri = get_image_uri(tag=image_tag, build=build, push=push)
+
+    # Determine which launcher to use
+    use_combined = eval_config is not None
 
     # For local mode with specific GPUs, run docker directly (bypass SageMaker)
     if local and gpus:
@@ -137,6 +151,21 @@ def submit_job(
         num_gpus = len(gpus.split(","))
         # cuDNN fix: PyTorch bundles the correct cuDNN in nvidia/cudnn
         nvidia_libs = "/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib"
+
+        if use_combined:
+            train_num_gpus = len(train_gpus.split(","))
+            entrypoint = (
+                f"python entrypoints/sagemaker_combined_launcher.py "
+                f"--config {config} "
+                f"--eval-config {eval_config} "
+                f"--train-gpus {train_gpus} "
+                f"--eval-gpus {eval_gpus}"
+            )
+            ray_cmd = f"ray start --head --num-gpus={train_num_gpus}"
+        else:
+            entrypoint = f"python entrypoints/train_grpo.py {config}"
+            ray_cmd = f"ray start --head --num-gpus={num_gpus}"
+
         cmd = (
             f"docker run --rm "
             f'--gpus \'"device={gpus}"\' '
@@ -150,7 +179,7 @@ def submit_job(
             f"-e LD_LIBRARY_PATH={nvidia_libs} "
             f"-w /opt/ml/code "
             f"{local_uri} "
-            f"bash -c 'ray start --head --num-gpus={num_gpus} && python entrypoints/train_grpo.py {config}'"
+            f"bash -c '{ray_cmd} && {entrypoint}'"
         )
         print(f"$ {cmd}")
         run_cmd(cmd)
@@ -177,6 +206,23 @@ def submit_job(
     # Create training job via boto3
     sm_client = boto3.client("sagemaker", region_name=REGION)
 
+    # Build hyperparameters based on launcher type
+    if use_combined:
+        hyperparams = {
+            "config": config,
+            "eval-config": eval_config,
+            "train-gpus": train_gpus,
+            "eval-gpus": eval_gpus,
+            "sagemaker_program": "entrypoints/sagemaker_combined_launcher.py",
+            "sagemaker_submit_directory": s3_source_uri,
+        }
+    else:
+        hyperparams = {
+            "config": config,
+            "sagemaker_program": "entrypoints/sagemaker_launcher.py",
+            "sagemaker_submit_directory": s3_source_uri,
+        }
+
     training_job_config = {
         "TrainingJobName": job_name,
         "RoleArn": ROLE,
@@ -184,11 +230,7 @@ def submit_job(
             "TrainingImage": remote_uri,
             "TrainingInputMode": "File",
         },
-        "HyperParameters": {
-            "config": config,
-            "sagemaker_program": "entrypoints/sagemaker_launcher.py",
-            "sagemaker_submit_directory": s3_source_uri,
-        },
+        "HyperParameters": hyperparams,
         "ResourceConfig": {
             "InstanceType": instance_type,
             "InstanceCount": instance_count,
@@ -213,6 +255,10 @@ def submit_job(
     print(f"  Image: {remote_uri}")
     print(f"  Instance: {instance_type} x {instance_count}")
     print(f"  Config: {config}")
+    if use_combined:
+        print(f"  Eval config: {eval_config}")
+        print(f"  Train GPUs: {train_gpus}")
+        print(f"  Eval GPUs: {eval_gpus}")
 
     sm_client.create_training_job(**training_job_config)
 
@@ -241,6 +287,12 @@ def main():
     parser.add_argument("--wait", action="store_true", help="Wait for job to complete")
     parser.add_argument("--local", action="store_true", help="Run locally using Docker")
     parser.add_argument("--gpus", default=None, help="GPU IDs for local mode (e.g., '5,6,7')")
+    parser.add_argument("--eval-config", default=None,
+                        help="Eval config for combined training+eval mode")
+    parser.add_argument("--train-gpus", default="0,1,2,3,4,5",
+                        help="GPUs for training (default: 0,1,2,3,4,5)")
+    parser.add_argument("--eval-gpus", default="6,7",
+                        help="GPUs for evaluation (default: 6,7)")
 
     args = parser.parse_args()
 
@@ -255,6 +307,9 @@ def main():
         wait=args.wait,
         local=args.local,
         gpus=args.gpus,
+        eval_config=args.eval_config,
+        train_gpus=args.train_gpus,
+        eval_gpus=args.eval_gpus,
     )
 
 

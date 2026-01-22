@@ -9,15 +9,10 @@ RUN pip install uv
 RUN uv pip install --system torch==2.9.0 --index-url https://download.pytorch.org/whl/cu128 && \
     uv pip install --system nvidia-cudnn-cu12==9.5.1.17 nvidia-cublas-cu12 nvidia-cusparse-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-nccl-cu12
 
-# Install torchtitan 0.2.0 (latest stable, compatible with torch 2.9)
+# Install torchtitan (needed before other deps to avoid conflicts)
 RUN uv pip install --system torchtitan==0.2.0
 
-# Install main dependencies with specific versions matching our working venv
-# vllm 0.11.2 needs transformers>=4.50, and transformers 4.57.3 works with huggingface_hub<1.0
-RUN uv pip install --system "ray[default]>=2.51.2" \
-    "pyyaml>=6.0.3" "fastapi" "uvicorn" "tomli-w>=1.2.0" "lm-eval>=0.4.9.2"
-
-# Pin huggingface-hub first, then install transformers and vllm
+# Pin huggingface-hub and transformers first to avoid version conflicts with vllm
 RUN uv pip install --system "huggingface-hub==0.36.0"
 RUN uv pip install --system "transformers==4.57.3"
 RUN uv pip install --system "vllm==0.11.2"
@@ -25,8 +20,11 @@ RUN uv pip install --system "vllm==0.11.2"
 # Reinstall sagemaker-training toolkit (may have been removed by dependency upgrades)
 RUN uv pip install --system sagemaker-training
 
-# Install math verification for MATH dataset
-RUN uv pip install --system "math-verify>=0.8.0"
+# Copy and install from pyproject.toml (skipping torch/vllm/torchtitan already installed above)
+COPY pyproject.toml README.md /tmp/pkg/
+COPY src /tmp/pkg/src
+WORKDIR /tmp/pkg
+RUN uv pip install --system .
 
 # SageMaker will copy source to /opt/ml/code and set PYTHONPATH
 WORKDIR /opt/ml/code

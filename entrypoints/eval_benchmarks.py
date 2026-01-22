@@ -107,12 +107,79 @@ def list_local_checkpoint_dirs(base_dir: str, pattern: str) -> list[dict]:
     return checkpoints
 
 
+def list_s3_checkpoint_dirs(s3_prefix: str, pattern: str, cache_dir: str) -> list[dict]:
+    """List S3 checkpoint directories matching a pattern and download them.
+
+    Args:
+        s3_prefix: S3 prefix like s3://bucket/path/to/checkpoints
+        pattern: Pattern to match checkpoint names (e.g., "run_name_step*")
+        cache_dir: Local directory to download checkpoints to
+
+    Returns:
+        List of dicts with name and local path
+    """
+    import fnmatch
+    import re
+
+    # Parse S3 URI
+    if not s3_prefix.startswith("s3://"):
+        return []
+
+    parts = s3_prefix[5:].split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if not prefix.endswith("/"):
+        prefix += "/"
+
+    try:
+        result = subprocess.run(
+            ["aws", "s3", "ls", f"s3://{bucket}/{prefix}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        return []
+
+    checkpoints = []
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        # S3 ls output format: "PRE dirname/" for directories
+        match = re.match(r"\s*PRE\s+(.+)/", line)
+        if match:
+            dirname = match.group(1)
+            if fnmatch.fnmatch(dirname, pattern):
+                s3_path = f"s3://{bucket}/{prefix}{dirname}"
+                local_path = os.path.join(cache_dir, dirname)
+
+                # Download if not already present
+                if not os.path.exists(local_path):
+                    print(f"[eval] Downloading checkpoint: {s3_path}", flush=True)
+                    os.makedirs(local_path, exist_ok=True)
+                    try:
+                        subprocess.run(
+                            ["aws", "s3", "sync", s3_path, local_path, "--quiet"],
+                            check=True,
+                        )
+                    except subprocess.CalledProcessError as e:
+                        print(f"[eval] Failed to download {s3_path}: {e}", flush=True)
+                        continue
+
+                checkpoints.append({"name": dirname, "path": local_path})
+
+    return sorted(checkpoints, key=lambda x: x["name"])
+
+
 def ensure_safetensors_name(checkpoint_path: str) -> None:
     """Ensure vLLM-compatible safetensors filename exists."""
     model_file = os.path.join(checkpoint_path, "model.safetensors")
     target_file = os.path.join(checkpoint_path, "model-00001-of-00001.safetensors")
     if os.path.exists(model_file) and not os.path.exists(target_file):
-        os.symlink("model.safetensors", target_file)
+        try:
+            os.symlink("model.safetensors", target_file)
+        except FileExistsError:
+            pass  # Another thread created it
 
 
 def parse_gpu_list(value) -> list[int]:
@@ -230,9 +297,9 @@ def run_lm_eval(
         return {"error": result.stderr}
 
     # Find and load the results JSON
-    # lm_eval outputs to output_path/results_*.json
+    # lm_eval outputs to output_path/<model_path_encoded>/results_*.json
     results_dir = Path(output_path)
-    results_files = list(results_dir.glob("results_*.json"))
+    results_files = list(results_dir.glob("**/results_*.json"))
     if results_files:
         with open(results_files[-1]) as f:
             return json.load(f)
@@ -299,8 +366,9 @@ def main():
         print(f"[eval] Markdown summary saved to: {markdown_path}", flush=True)
 
         csv_path = os.path.join(local_output_dir, f"results.csv")
-        generate_csv_summary(all_results, csv_path)
-        print(f"[eval] CSV summary saved to: {csv_path}", flush=True)
+        # Use generate_csv_from_jsons to include all results across watcher restarts
+        num_rows = generate_csv_from_jsons(local_output_dir, csv_path)
+        print(f"[eval] CSV summary saved to: {csv_path} ({num_rows} rows)", flush=True)
 
         if output_is_s3:
             upload_to_s3(local_output_dir, output_dir)
@@ -317,9 +385,19 @@ def main():
         watch_cfg["enable"] = True
 
     if watch_cfg.get("enable"):
+        # Support both local_dir and s3_prefix for watch mode
         local_dir = watch_cfg.get("local_dir")
-        if not local_dir:
-            raise ValueError("watch.local_dir must be set for watch mode")
+        s3_prefix = watch_cfg.get("s3_prefix")
+        if not local_dir and not s3_prefix:
+            raise ValueError("watch.local_dir or watch.s3_prefix must be set for watch mode")
+
+        # For S3 mode, create a local cache directory
+        if s3_prefix:
+            s3_cache_dir = os.path.join(local_output_dir, "s3_checkpoint_cache")
+            os.makedirs(s3_cache_dir, exist_ok=True)
+            print(f"[eval] S3 watch mode: {s3_prefix}", flush=True)
+            print(f"[eval] Local cache: {s3_cache_dir}", flush=True)
+
         pattern = watch_cfg.get("pattern", "*")
         poll_interval = int(watch_cfg.get("poll_interval_s", 300))
 
@@ -404,7 +482,10 @@ def main():
             )
             thread.start()
 
-        print(f"[eval] Watch mode enabled: {local_dir}/{pattern}", flush=True)
+        if s3_prefix:
+            print(f"[eval] Watch mode enabled (S3): {s3_prefix}/{pattern}", flush=True)
+        else:
+            print(f"[eval] Watch mode enabled: {local_dir}/{pattern}", flush=True)
         print(f"[eval] Poll interval: {poll_interval}s", flush=True)
         print(f"[eval] Task groups: {task_groups}", flush=True)
 
@@ -412,7 +493,11 @@ def main():
         while True:
             now = time.time()
             if now >= next_poll:
-                checkpoints = list_local_checkpoint_dirs(local_dir, pattern)
+                # List checkpoints from either S3 or local
+                if s3_prefix:
+                    checkpoints = list_s3_checkpoint_dirs(s3_prefix, pattern, s3_cache_dir)
+                else:
+                    checkpoints = list_local_checkpoint_dirs(local_dir, pattern)
                 for ckpt in checkpoints:
                     ckpt_name = ckpt["name"]
                     ckpt_path = ckpt["path"]
@@ -592,11 +677,98 @@ def extract_metric(task_results: dict, task: str, metric: str) -> float | None:
     return None
 
 
+def generate_csv_from_jsons(results_dir: str, output_path: str):
+    """Regenerate CSV from all JSON result files in the directory.
+
+    This ensures the CSV always reflects all results, even across watcher restarts.
+    """
+    import re
+
+    results_dir = Path(results_dir)
+    rows = []
+    seen = set()  # Deduplicate (step, task, metric) tuples
+
+    key_metrics = {
+        "gsm8k": [("exact_match,strict-match", "exact_match_strict"), ("exact_match,flexible-extract", "exact_match_flex")],
+        "gsm8k_cot": [("exact_match,strict-match", "exact_match_strict"), ("exact_match,flexible-extract", "exact_match_flex")],
+        "hendrycks_math": [("exact_match,none", "exact_match")],
+        "minerva_math": [("exact_match,none", "exact_match"), ("math_verify,none", "math_verify")],
+        "ifeval": [("prompt_level_strict_acc,none", "prompt_strict"), ("inst_level_strict_acc,none", "inst_strict")],
+        "mbpp": [("pass@1,none", "pass_at_1")],
+        "humaneval": [("pass@1,none", "pass_at_1")],
+    }
+
+    for results_file in results_dir.glob('**/results_*.json'):
+        path_str = str(results_file)
+
+        step_match = re.search(r'step(\d+)', path_str)
+        step = int(step_match.group(1)) if step_match else 0
+
+        # Determine task from path
+        task_key = None
+        for t in ['gsm8k_cot', 'gsm8k', 'minerva_math', 'hendrycks_math', 'ifeval', 'mbpp', 'humaneval']:
+            if f'/{t}_' in path_str or f'/{t}/' in path_str:
+                shot_match = re.search(rf'{t}_(\d+)shot', path_str)
+                if shot_match:
+                    task_key = f"{t}_{shot_match.group(1)}shot"
+                else:
+                    task_key = t
+                break
+
+        if not task_key:
+            continue
+
+        try:
+            with open(results_file) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            continue
+
+        results = data.get('results', {})
+
+        # Determine base task for metric lookup
+        base_task = task_key.split('_')[0] if task_key.startswith('gsm8k') else task_key.rsplit('_', 1)[0] if task_key.endswith('shot') else task_key
+        if base_task == 'gsm8k' and 'cot' in task_key:
+            base_task = 'gsm8k_cot'
+
+        metrics_to_extract = key_metrics.get(base_task, [("exact_match,none", "exact_match")])
+
+        for lm_eval_key, csv_metric_name in metrics_to_extract:
+            value = None
+            for task_name, metrics in results.items():
+                if isinstance(metrics, dict) and lm_eval_key in metrics:
+                    value = metrics[lm_eval_key]
+                    break
+
+            if value is not None:
+                key = (step, task_key, csv_metric_name)
+                if key not in seen:
+                    seen.add(key)
+                    rows.append({
+                        "step": step,
+                        "task": task_key,
+                        "metric": csv_metric_name,
+                        "value": f"{value:.4f}" if isinstance(value, float) else str(value),
+                    })
+
+    rows.sort(key=lambda r: (r["step"], r["task"], r["metric"]))
+
+    with open(output_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=["step", "task", "metric", "value"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return len(rows)
+
+
 def generate_csv_summary(results: dict, output_path: str):
     """Generate a CSV file summarizing all results.
 
     Format: step,checkpoint,task,metric,value
     Sorted by step number, then task, then metric.
+
+    NOTE: This only uses in-memory results. For persistent CSV across restarts,
+    use generate_csv_from_jsons() instead.
     """
     import re
 

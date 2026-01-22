@@ -1,0 +1,42 @@
+# Eval watch config for SageMaker training jobs
+# This polls S3 for checkpoints and streams results back to S3
+# Used with: python submit.py config.yaml --eval-config configs/eval/lm_eval_sagemaker_watch.yaml
+
+seed: 42
+
+# Output will be set dynamically by the launcher based on job name
+# output_dir: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/eval_results/{job_name}
+
+vllm:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  gpu_memory_utilization: 0.8
+  max_model_len: 4096
+
+benchmarks:
+  - task: gsm8k_cot
+    num_fewshot: 8
+  - task: gsm8k_cot
+    num_fewshot: 4
+  - task: minerva_math
+    num_fewshot: 4
+
+watch:
+  enable: true
+  # s3_prefix will be set dynamically by the launcher
+  # s3_prefix: s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/{job_name}
+  # pattern will be set dynamically based on run name
+  # pattern: run_name_step*
+  poll_interval_s: 60
+  gpu_mode: visible
+  task_groups:
+    - gpu: 0
+      benchmarks:
+        - task: gsm8k_cot
+          num_fewshot: 8
+        - task: gsm8k_cot
+          num_fewshot: 4
+    - gpu: 1
+      benchmarks:
+        - task: minerva_math
+          num_fewshot: 4
