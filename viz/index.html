@@ -464,6 +464,36 @@
             color: #8b949e;
         }
 
+        /* Completion Length Quantile Panels */
+        .quantile-panel {
+            flex: 1;
+            min-width: 180px;
+            max-width: 300px;
+            display: flex;
+            flex-direction: column;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .quantile-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #f0f6fc;
+            padding: 6px 10px;
+            background: #21262d;
+            border-bottom: 1px solid #30363d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .quantile-canvas {
+            flex: 1;
+            width: 100%;
+            min-height: 120px;
+        }
+
         /* Rollout Modal */
         .modal-backdrop {
             position: fixed;
@@ -1085,16 +1115,16 @@
 
         <!-- Panel 8: Length by Correctness (per dataset) -->
         <div class="panel" style="display: grid; grid-template-columns: 4fr 1fr; gap: 1px; padding: 0; background: #30363d; overflow: hidden;">
-            <!-- Placeholder for future per-dataset histograms -->
+            <!-- Per-dataset quantile plots over time -->
             <div style="background: #0d1117; padding: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;">
                 <div class="panel-header">
                     <div>
-                        <div class="panel-title">Length by Correctness</div>
-                        <div class="panel-subtitle">Per-dataset histograms (coming soon)</div>
+                        <div class="panel-title">Completion Length by Correctness</div>
+                        <div class="panel-subtitle">Response length quantiles over training steps (green=correct, red=wrong)</div>
                     </div>
                 </div>
-                <div class="panel-content" style="display: flex; align-items: center; justify-content: center;">
-                    <span style="color: #6e7681; font-size: 12px;">Dataset breakdown requires trace enhancement</span>
+                <div class="panel-content" id="completion-len-quantiles-container" style="display: flex; gap: 8px; overflow-x: auto;">
+                    <span style="color: #6e7681; font-size: 12px; margin: auto;">Waiting for data...</span>
                 </div>
             </div>
             <!-- Overall histogram -->
@@ -1153,6 +1183,6 @@
 
     <div class="tooltip" id="tooltip"></div>
 
-    <script src="heartbeat.js?v=43"></script>
+    <script src="heartbeat.js?v=44"></script>
 </body>
 </html>

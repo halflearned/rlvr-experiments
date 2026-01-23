@@ -126,6 +126,7 @@ class BatchStats:
     padded_completion_len: int  # Final padded length
     finish_reasons: dict[str, int]  # e.g. {"stop": 10, "length": 6}
     rewards: list[float]
+    datasets: list[str]  # Per-completion dataset name
 
     @classmethod
     def from_samples(
@@ -139,6 +140,7 @@ class BatchStats:
         completion_lens = []
         finish_reasons: dict[str, int] = {}
         rewards = []
+        datasets = []
 
         for s in samples:
             r = s.rollout
@@ -149,6 +151,7 @@ class BatchStats:
                 completion_lens.append(comp_len)
                 reason = r.finish_reasons[i]
                 finish_reasons[reason] = finish_reasons.get(reason, 0) + 1
+                datasets.append(s.dataset)
             rewards.extend(s.rewards)
 
         return cls(
@@ -158,10 +161,16 @@ class BatchStats:
             padded_completion_len=padded_completion_len,
             finish_reasons=finish_reasons,
             rewards=rewards,
+            datasets=datasets,
         )
 
-    def trace(self, tracer) -> None:
-        """Emit all batch statistics to tracer."""
+    def trace(self, tracer, step: int | None = None) -> None:
+        """Emit all batch statistics to tracer.
+
+        Args:
+            tracer: The tracer instance to emit events to.
+            step: Optional training step number to include in events.
+        """
         n = len(self.seq_lens)
         seq_padding_tokens = [self.padded_seq_len - l for l in self.seq_lens]
         completion_padding_tokens = [self.padded_completion_len - l for l in self.completion_lens]
@@ -177,6 +186,7 @@ class BatchStats:
             "completion_lens": self.completion_lens,
             "seq_padding_tokens": seq_padding_tokens,
             "completion_padding_tokens": completion_padding_tokens,
+            **({"step": step} if step is not None else {}),
         })
 
         tracer.counter("batch.finish_reasons", self.finish_reasons)
@@ -184,6 +194,8 @@ class BatchStats:
         tracer.counter("batch.reward_vs_len", {
             "rewards": self.rewards,
             "completion_lens": self.completion_lens,
+            "datasets": self.datasets,
+            **({"step": step} if step is not None else {}),
         })
 
         tracer.counter("rewards", {

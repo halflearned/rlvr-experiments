@@ -490,7 +490,7 @@ async def main():
             # --- Logging ---
             avg_reward = batch.rewards.mean().item()
             rw_metrics = reward_stats.get_metrics()
-            stats.trace(tracer)
+            stats.trace(tracer, step=trainer.version)
             tracer.counter("metrics", {"loss": avg_loss, "grad_norm": grad_norm, "avg_reward": avg_reward})
             tracer.counter("grpo.debug", grpo_debug)
             titan_metrics = await trainer.log_metrics(avg_loss, grad_norm, accum_ntokens)

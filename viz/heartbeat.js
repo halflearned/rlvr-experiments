@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 33');
+console.log('[heartbeat.js] Script loaded, version 34');
 
 class HeartbeatViz {
     constructor() {
@@ -88,6 +88,10 @@ class HeartbeatViz {
         this.lagBreakdown = [];  // [{step, lag_0: N, lag_1: M, ...}, ...]
         this.datasetBreakdown = [];  // [{step, math: N, ifeval: M, ...}, ...]
         this.tokenBreakdown = [];  // [{step, math: N, ifeval: M, ...}, ...] - tokens per dataset
+
+        // Per-step quantile data for completion lengths by dataset and correctness
+        // Structure: { dataset: { correct: [{step, p25, p50, p75, p90}], wrong: [...] } }
+        this.completionLenQuantiles = {};
 
         // Hover state for quantile charts
         this.quantileHover = {
@@ -766,6 +770,9 @@ class HeartbeatViz {
         // Reset scatter data
         this.rewardVsLen = [];
 
+        // Reset per-step quantile data
+        this.completionLenQuantiles = {};
+
         // For utilization tracking
         this.vllmSpans = [];  // {replica, slot, ts, dur}
         this.trainerSpans = [];  // {ts, dur}
@@ -877,14 +884,58 @@ class HeartbeatViz {
                         }
                     }
                 }
-                // Reward vs completion length scatter data
+                // Reward vs completion length scatter data + per-step quantiles by dataset/correctness
                 if (event.name === 'batch.reward_vs_len') {
                     if (event.rewards && event.completion_lens) {
                         const rewards = event.rewards;
                         const lens = event.completion_lens;
+                        const datasets = event.datasets || [];
+                        const step = event.step;
                         const n = Math.min(rewards.length, lens.length);
+
+                        // Scatter data (existing)
                         for (let i = 0; i < n; i++) {
                             this.rewardVsLen.push({ reward: rewards[i], len: lens[i] });
+                        }
+
+                        // Per-step quantiles by dataset and correctness
+                        if (step !== undefined && datasets.length === n) {
+                            // Group lengths by dataset and correctness
+                            const byDataset = {};  // { dataset: { correct: [...], wrong: [...] } }
+                            for (let i = 0; i < n; i++) {
+                                const ds = datasets[i] || 'unknown';
+                                const correct = rewards[i] > 0;
+                                if (!byDataset[ds]) {
+                                    byDataset[ds] = { correct: [], wrong: [] };
+                                }
+                                if (correct) {
+                                    byDataset[ds].correct.push(lens[i]);
+                                } else {
+                                    byDataset[ds].wrong.push(lens[i]);
+                                }
+                            }
+
+                            // Compute quantiles for each dataset/correctness group
+                            for (const [ds, groups] of Object.entries(byDataset)) {
+                                if (!this.completionLenQuantiles[ds]) {
+                                    this.completionLenQuantiles[ds] = { correct: [], wrong: [] };
+                                }
+                                for (const correctness of ['correct', 'wrong']) {
+                                    const values = groups[correctness];
+                                    if (values.length > 0) {
+                                        values.sort((a, b) => a - b);
+                                        const q = (p) => values[Math.min(Math.floor(p * values.length), values.length - 1)];
+                                        this.completionLenQuantiles[ds][correctness].push({
+                                            step,
+                                            p25: q(0.25),
+                                            p50: q(0.50),
+                                            p75: q(0.75),
+                                            p90: q(0.90),
+                                            count: values.length,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1160,6 +1211,7 @@ class HeartbeatViz {
         this.renderRecommendations();
         this.renderRewardVsLen();
         this.renderBatchBreakdown();
+        this.renderCompletionLenQuantiles();
     }
 
     renderRunConfig() {
@@ -3321,6 +3373,191 @@ class HeartbeatViz {
             ctx.fillText(dsName, legendX + 10, height - 4);
             legendX += 50;
         }
+    }
+
+    /**
+     * Render completion length quantiles over time, one panel per dataset.
+     * Shows p25-p75 band and p50 line for correct (green) vs wrong (red) responses.
+     */
+    renderCompletionLenQuantiles() {
+        const datasets = Object.keys(this.completionLenQuantiles);
+        if (datasets.length === 0) return;
+
+        // Sort datasets consistently
+        const datasetOrder = ['gsm8k', 'math', 'mbpp', 'ifeval', 'humaneval', 'apps'];
+        datasets.sort((a, b) => {
+            const ai = datasetOrder.indexOf(a);
+            const bi = datasetOrder.indexOf(b);
+            if (ai === -1 && bi === -1) return a.localeCompare(b);
+            if (ai === -1) return 1;
+            if (bi === -1) return -1;
+            return ai - bi;
+        });
+
+        // Get container
+        const container = document.getElementById('completion-len-quantiles-container');
+        if (!container) return;
+
+        // Clear old canvases
+        container.innerHTML = '';
+
+        // Create one canvas per dataset
+        for (const ds of datasets) {
+            const data = this.completionLenQuantiles[ds];
+            if (!data.correct.length && !data.wrong.length) continue;
+
+            // Create canvas element
+            const wrapper = document.createElement('div');
+            wrapper.className = 'quantile-panel';
+            wrapper.innerHTML = `
+                <div class="quantile-title">${ds}</div>
+                <canvas id="quantile-canvas-${ds}" class="quantile-canvas"></canvas>
+            `;
+            container.appendChild(wrapper);
+
+            // Render after DOM update
+            setTimeout(() => this.renderSingleDatasetQuantiles(ds), 0);
+        }
+    }
+
+    renderSingleDatasetQuantiles(datasetName) {
+        const canvas = document.getElementById(`quantile-canvas-${datasetName}`);
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const width = rect.width;
+        const height = rect.height;
+
+        if (width <= 0 || height <= 0) return;
+
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Clear
+        ctx.fillStyle = '#0d1117';
+        ctx.fillRect(0, 0, width, height);
+
+        const data = this.completionLenQuantiles[datasetName];
+        if (!data) return;
+
+        const padding = { left: 35, right: 10, top: 10, bottom: 20 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        // Merge and sort all steps
+        const allSteps = new Set();
+        for (const pt of data.correct) allSteps.add(pt.step);
+        for (const pt of data.wrong) allSteps.add(pt.step);
+        const sortedSteps = [...allSteps].sort((a, b) => a - b);
+
+        if (sortedSteps.length === 0) {
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '12px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No data', width / 2, height / 2);
+            return;
+        }
+
+        // Find max value for y-axis
+        let maxVal = 0;
+        for (const pt of data.correct) maxVal = Math.max(maxVal, pt.p90);
+        for (const pt of data.wrong) maxVal = Math.max(maxVal, pt.p90);
+        maxVal = Math.max(maxVal, 100);  // At least 100 tokens on y-axis
+
+        const minStep = sortedSteps[0];
+        const maxStep = sortedSteps[sortedSteps.length - 1];
+        const stepRange = maxStep - minStep || 1;
+
+        // Scale functions
+        const stepToX = (step) => padding.left + ((step - minStep) / stepRange) * plotWidth;
+        const valToY = (val) => padding.top + plotHeight - (val / maxVal) * plotHeight;
+
+        // Colors
+        const correctColor = '#3fb950';  // green
+        const wrongColor = '#f85149';    // red
+
+        // Draw for each correctness type
+        for (const [correctness, color] of [['correct', correctColor], ['wrong', wrongColor]]) {
+            const pts = data[correctness];
+            if (pts.length === 0) continue;
+
+            // Sort by step
+            pts.sort((a, b) => a.step - b.step);
+
+            // Draw p25-p75 band (filled area)
+            ctx.fillStyle = color + '30';  // Semi-transparent
+            ctx.beginPath();
+            // Forward pass (p75)
+            for (let i = 0; i < pts.length; i++) {
+                const x = stepToX(pts[i].step);
+                const y = valToY(pts[i].p75);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            // Backward pass (p25)
+            for (let i = pts.length - 1; i >= 0; i--) {
+                const x = stepToX(pts[i].step);
+                const y = valToY(pts[i].p25);
+                ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw p50 line
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            for (let i = 0; i < pts.length; i++) {
+                const x = stepToX(pts[i].step);
+                const y = valToY(pts[i].p50);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Draw p90 line (dashed)
+            ctx.strokeStyle = color + '80';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            for (let i = 0; i < pts.length; i++) {
+                const x = stepToX(pts[i].step);
+                const y = valToY(pts[i].p90);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Y-axis labels
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(maxVal.toString(), padding.left - 4, padding.top + 8);
+        ctx.fillText('0', padding.left - 4, padding.top + plotHeight);
+
+        // X-axis labels (step range)
+        ctx.textAlign = 'left';
+        ctx.fillText(minStep.toString(), padding.left, height - 4);
+        ctx.textAlign = 'right';
+        ctx.fillText(maxStep.toString(), width - padding.right, height - 4);
+
+        // Legend at top-right
+        ctx.font = '9px -apple-system, sans-serif';
+        const legendY = padding.top + 8;
+        ctx.fillStyle = correctColor;
+        ctx.fillRect(width - 80, legendY - 6, 8, 8);
+        ctx.fillStyle = '#8b949e';
+        ctx.textAlign = 'left';
+        ctx.fillText('correct', width - 70, legendY);
+        ctx.fillStyle = wrongColor;
+        ctx.fillRect(width - 80, legendY + 10, 8, 8);
+        ctx.fillStyle = '#8b949e';
+        ctx.fillText('wrong', width - 70, legendY + 16);
     }
 }
 

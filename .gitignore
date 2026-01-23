@@ -1,6 +1,7 @@
 docs/
 eval_results/
 external/
+**/*.md
 secrets.env
 assets/
 .venv
