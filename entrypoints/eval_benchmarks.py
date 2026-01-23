@@ -261,6 +261,7 @@ def run_lm_eval(
     output_path: str,
     seed: int = 42,
     gpu_id: int | None = None,
+    max_gen_toks: int | None = None,
 ) -> dict:
     """Run lm_eval on a single task and return results."""
     # Build model args string
@@ -275,6 +276,12 @@ def run_lm_eval(
 
     model_args_str = ",".join(model_args)
 
+    # Build gen_kwargs with max_gen_toks to avoid truncation
+    # Default 256 causes 10-15% of responses to be cut off mid-reasoning
+    gen_kwargs = "temperature=0"
+    if max_gen_toks is not None:
+        gen_kwargs += f",max_gen_toks={max_gen_toks}"
+
     # Build command
     cmd = [
         sys.executable, "-m", "lm_eval",
@@ -283,7 +290,7 @@ def run_lm_eval(
         "--tasks", task,
         "--batch_size", "auto",
         "--seed", str(seed),
-        "--gen_kwargs", "temperature=0",
+        "--gen_kwargs", gen_kwargs,
         "--output_path", output_path,
     ]
 
@@ -464,6 +471,15 @@ def main():
                 return visible_gpus[requested_id]
             return requested_id
 
+        # Load max_gen_toks config to avoid truncation (default 256 causes 10-15% cut off)
+        max_gen_toks_cfg = config.get("max_gen_toks", {})
+
+        def get_max_gen_toks(task: str) -> int | None:
+            """Get max_gen_toks for a task from config."""
+            if task in max_gen_toks_cfg:
+                return max_gen_toks_cfg[task]
+            return max_gen_toks_cfg.get("default")
+
         def worker(gpu_id: int, worker_benchmarks: list[dict], work_queue: queue.Queue) -> None:
             resolved_gpu_id = resolve_gpu_id(gpu_id)
             while True:
@@ -490,6 +506,7 @@ def main():
                         output_path=eval_output_dir,
                         seed=seed,
                         gpu_id=resolved_gpu_id,
+                        max_gen_toks=get_max_gen_toks(task),
                     )
                     results_queue.put((ckpt_name, result_key, results))
 
@@ -556,6 +573,15 @@ def main():
                     write_summaries()
                     pending_tasks.pop(ckpt_name, None)
 
+    # Load max_gen_toks config for non-watch mode
+    max_gen_toks_cfg = config.get("max_gen_toks", {})
+
+    def get_max_gen_toks_nonwatch(task: str) -> int | None:
+        """Get max_gen_toks for a task from config."""
+        if task in max_gen_toks_cfg:
+            return max_gen_toks_cfg[task]
+        return max_gen_toks_cfg.get("default")
+
     # Run evaluations (non-watch mode)
     for ckpt in checkpoints:
         ckpt_name = ckpt["name"]
@@ -592,6 +618,7 @@ def main():
                 vllm_config=vllm_config,
                 output_path=eval_output_dir,
                 seed=seed,
+                max_gen_toks=get_max_gen_toks_nonwatch(task),
             )
 
             all_results["results"][ckpt_name][result_key] = results
