@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k_only
+  name: qwen3_17b_gsm8k_direct
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -31,15 +31,11 @@ verifier:
 loss:
   beta: 0.001  # 1e-3
   eps: 0.2
-  C: 400
+  C: 768
 
 data:
-  dataset: mixed
-  datasets:
-    - name: gsm8k
-      split: train
-      weight: 1
-  seed: 42
+  dataset: gsm8k
+  split: train
 
 data_iter:
   system_prompt: ""

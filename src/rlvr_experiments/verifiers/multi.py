@@ -45,7 +45,8 @@ class MultiVerifier:
         """
         self._verifiers: dict[str, Any] = {
             "math": MathVerifier(timeout=math_timeout, max_workers=math_max_workers),
-            "gsm8k": GSM8KVerifier(format_weight=gsm8k_format_weight),
+            # Match gsm8k-only runs (MathVerifier via math_verify) for identical reward routing.
+            "gsm8k": MathVerifier(timeout=math_timeout, max_workers=math_max_workers),
             "minerva_math": MinervaMathVerifier(),
             "ifeval": IFEvalVerifier(timeout=ifeval_timeout),
             "humaneval": HumanEvalVerifier(),
@@ -104,6 +105,10 @@ class MultiVerifier:
                 score = verifier.verify(c, p["answer"])
             elif verifier_type in ("ifeval", "allenai_gsm8k", "allenai_math"):
                 score = verifier.verify(c, p.get("ground_truth", ""))
+            elif verifier_type in ("gsm8k", "minerva_math"):
+                # These verifiers return list[float], not tuple
+                scores_result = await verifier.verify_completions(p, [c])
+                score = scores_result[0] if scores_result else 0.0
             else:
                 # Code verifiers - verify_completions returns (scores, durations)
                 scores_result, _ = await verifier.verify_completions(p, [c])
@@ -140,6 +145,10 @@ class MultiVerifier:
                 score = verifier.verify(c, p["answer"])
             elif verifier_type in ("ifeval", "allenai_gsm8k", "allenai_math"):
                 score = verifier.verify(c, p.get("ground_truth", ""))
+            elif verifier_type in ("gsm8k", "minerva_math"):
+                # These verifiers return list[float], not tuple
+                scores_result = await verifier.verify_completions(p, [c])
+                score = scores_result[0] if scores_result else 0.0
             else:
                 # Code verifiers - verify_completions returns (scores, durations)
                 scores_result, _ = await verifier.verify_completions(p, [c])
