@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_base_allenai
+  name: qwen3_17b
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -17,10 +17,9 @@ training:
   # MATH problems may need longer completions
   # seq_len_buckets is TOTAL seq length (prompt + completion)
   # - GSM8K: ~256 prompt + 512 completion = 768
-  # - MATH: ~256 prompt + 1024 completion = 1280
-  # - IFEval: ~512 prompt + 2048 completion = 2560
-  seq_len_buckets: [768, 1280, 2560]
-  completion_len_buckets: [512, 1024, 2048]
+  # - MATH / IFEval can be longer, just add in buckets of 512 increments
+  seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+  completion_len_buckets: [512, 1024, 1536, 2048]
 
   prompts_per_rollout_sync: 64
   prompts_per_reference_sync: 9999999
@@ -30,7 +29,9 @@ training:
   completions_per_micro_batch:
     768: 64
     1280: 16
-    2560: 8
+    1536: 8
+    2048: 4  # TODO: could this be 8? 
+    2560: 4
 
 verifier:
   num_workers: 4
@@ -38,15 +39,20 @@ verifier:
 loss:
   beta: 0.001  # 1e-3
   eps: 0.2
+  C: 2048
 
 data:
   dataset: mixed
-  mode: weighted
-  seed: 42
   datasets:
-    # AllenAI RLVR dataset - all three tasks (GSM8K, MATH, IFEval)
-    - name: allenai_rlvr
-      weight: 1.0
+    - name: gsm8k
+      split: train
+      weight: 0.2
+    - name: math
+      split: train
+      weight: 0.4
+    - name: ifeval
+      weight: 0.4
+  seed: 42
 
 data_iter:
   system_prompt: ""

@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
 from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy, load_ifeval, load_mixed, DATASET_LOADERS
-from rlvr_experiments.losses import GRPOLoss, compute_advantages
+from rlvr_experiments.losses import DrGRPOLoss, compute_drgrpo_advantages
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import log_sample
@@ -122,7 +122,7 @@ async def main():
     else:
         data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
 
-    loss_fn = GRPOLoss(**plan.loss)
+    loss_fn = DrGRPOLoss(**plan.loss)
     reward_stats = RewardStats()
 
     # =========================================================================
@@ -157,9 +157,6 @@ async def main():
     # Sampling params (strip logprobs for generation)
     sampling_params = {**plan.sampling, "logprobs": 0}
     policy_temperature = sampling_params.get("temperature", 1.0)
-    # TODO: re-enable deterministic seeding with per-request seed variation
-    # if "seed" not in sampling_params:
-    #     sampling_params["seed"] = seed
     rollout_max_model_len = plan.roles.get("rollout").config.get("max_model_len")
     rollout_timeout_s = plan.training.get("rollout_timeout_s", 9999)
 
@@ -454,7 +451,7 @@ async def main():
             accum_count += 1
 
             # Compute GRPO advantages (normalized within each prompt's completions)
-            advantages = compute_advantages(batch.rewards, group_size=completions_per_prompt)
+            advantages = compute_drgrpo_advantages(batch.rewards, group_size=completions_per_prompt)
 
             # Forward/backward pass
             with trace_span("forward_backward"):
@@ -528,21 +525,12 @@ async def main():
 
             # Checkpoint
             if checkpoint_interval and trainer.version % checkpoint_interval == 0:
-                import time as _time
                 ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_step{trainer.version}")
-                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] CHECKPOINT START: {ckpt_path}", flush=True)
-                t0 = _time.time()
-                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] Calling trainer.export_to_hf()...", flush=True)
                 await trainer.export_to_hf(ckpt_path)
-                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] export_to_hf() returned in {_time.time()-t0:.2f}s", flush=True)
                 if use_s3_checkpoints:
-                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] Uploading checkpoint to S3...", flush=True)
-                    t0 = _time.time()
                     upload_checkpoint_to_s3(ckpt_path, run_id, f"step{trainer.version}", runtime.trace_dir)
-                    print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] S3 upload done in {_time.time()-t0:.2f}s", flush=True)
                     cleanup_local_checkpoint(ckpt_path)
-                print(f"[{_time.strftime('%H:%M:%S')}] [step {trainer.version}] CHECKPOINT COMPLETE", flush=True)
-
+                
             # Reset accumulation
             accum_count = 0
             accum_loss = 0.0

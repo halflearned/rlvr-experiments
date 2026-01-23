@@ -1,5 +1,5 @@
 run:
-  name: qwen3_1_7b_sequential
+  name: qwen3_17b_batch128
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,70 +9,64 @@ tokenizer:
   use_fast: false
 
 training:
-  num_epochs: 1
+  # No max_steps, no max epoch, just run
   max_staleness: 0
   abort_in_flight: false
-  checkpoint_interval: 50
+  checkpoint_interval: 20
 
-  # Fixed bucket sizes to avoid torch.compile recompilations
+  # MATH problems may need longer completions
   # seq_len_buckets is TOTAL seq length (prompt + completion)
-  # Multiple buckets for mixed datasets:
-  # - GSM8K/MBPP: ~256 prompt + 512 completion = 768
-  # - MATH: ~256 prompt + 1024 completion = 1280
-  # - IFEval: ~512 prompt + 2048 completion = 2560
-  seq_len_buckets: [768, 1280, 2560]
-  completion_len_buckets: [512, 1024, 2048]
+  # - GSM8K: ~256 prompt + 512 completion = 768
+  # - MATH / IFEval can be longer, just add in buckets of 512 increments
+  seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+  completion_len_buckets: [512, 1024, 1536, 2048]
 
-  # Batching config
-  prompts_per_rollout_sync: 16
-  prompts_per_reference_sync: 64
-  prompts_per_optim_step: 16
+  prompts_per_rollout_sync: 128
+  prompts_per_reference_sync: 9999999
+  prompts_per_optim_step: 128
   prompts_per_forward_backward: 2
-  # Micro-batch size varies by completion length bucket for better GPU utilization
-  # Shorter sequences can fit more samples per micro-batch
+  # Micro-batch keys must match seq_len_buckets
   completions_per_micro_batch:
     768: 64
     1280: 16
-    2560: 8
-  max_concurrent_tasks: 4
+    1536: 8
+    2048: 4  # TODO: could this be 8? 
+    2560: 4
 
 verifier:
   num_workers: 4
 
 loss:
-  beta: 0.05
+  beta: 0.001  # 1e-3
   eps: 0.2
+  C: 2048
 
 data:
   dataset: mixed
-  mode: sequential
   datasets:
     - name: gsm8k
       split: train
-      count: 3200  # 200 steps
+      weight: 0.2
     - name: math
       split: train
-      count: 3200  # 200 steps
-    - name: mbpp
-      split: train
-      count: 374  # 27 steps
+      weight: 0.4
     - name: ifeval
-      count: 3200  # 200 steps
+      weight: 0.4
   seed: 42
 
-# Mixed datasets have different system prompts per sample, so leave empty here
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
+  skip_chat_template: true 
+
 
 sampling:
-  temperature: 0.6
+  temperature: 1.
   top_p: 0.95
   top_k: 20
-  max_tokens: 2048
-  n: 16
+  max_tokens: 1024  # will actually change per dataset
+  n: 8
   logprobs: 0
-
 
 buffer:
   max_reads: 1
@@ -85,7 +79,7 @@ roles:
       trainable: true
 
       profiling:
-        enable_profiling: true
+        enable_profiling: false
         save_traces_folder: "profile_trace"
         profile_freq: 10
 
@@ -101,7 +95,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000005  
+        lr: 0.000001  # 1e-6
         eps: 0.0001
 
       lr_scheduler:
@@ -109,9 +103,9 @@ roles:
         decay_ratio: 0.0
 
       training:
-        seq_len: 2560
-        dtype: "bfloat16"
-        mixed_precision_param: "bfloat16"
+        seq_len: 2560  # Must match max(seq_len_buckets)
+        dtype: "float16"
+        mixed_precision_param: "float16"
         mixed_precision_reduce: "float32"
 
       parallelism:
@@ -128,7 +122,7 @@ roles:
         initial_load_in_hf: true
         interval: 500
         last_save_model_only: false
-        export_dtype: "bfloat16"
+        export_dtype: "float16"
         async_mode: "disabled"
 
       activation_checkpoint:
@@ -140,8 +134,6 @@ roles:
         components:
           - "model"
 
-
-  # Reference model as vLLM - much faster than Titan for logprobs-only workload
   - name: reference
     kind: vllm
     config:
@@ -149,38 +141,33 @@ roles:
       max_concurrent_per_replica: 32
       max_num_seqs: 256
       tensor_parallel_size: 1
-      data_parallel_size: 1
+      data_parallel_size: 2
       max_model_len: 2561  # seq_len_buckets[-1] + 1 for logprobs
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
-      enable_prefix_caching: false  # Prefix caching may interfere with prompt_logprobs
+      enable_prefix_caching: false
       enable_chunked_prefill: true
-
 
   - name: rollout
     kind: vllm
-
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 5
-      max_model_len: 2560
+      data_parallel_size: 2 
+      max_model_len: 2560  # Match max(seq_len_buckets)
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: true
       enable_chunked_prefill: true
 
-
-
 sync:
   chunk_mb: 100
-
   wiring:
     - src: trainer
       dst: reference

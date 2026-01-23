@@ -1,0 +1,36 @@
+seed: 42
+output_dir: /efs/rlvr-experiments/eval_results/qwen3_17b_batch128_watch
+
+vllm:
+  tensor_parallel_size: 1
+  dtype: bfloat16
+  gpu_memory_utilization: 0.8
+  max_model_len: 4096
+
+# max_gen_toks per task to avoid truncation (see NOTES.md for details)
+max_gen_toks:
+  gsm8k_cot: 1024
+  hendrycks_math: 2048
+  minerva_math: 2048
+  ifeval: 4096
+  default: 1024
+
+watch:
+  enable: true
+  local_dir: /efs/rlvr-experiments/checkpoints
+  pattern: qwen3_17b_batch128_20260123_074915_step*
+  poll_interval_s: 30
+  gpu_mode: visible
+  task_groups:
+    - gpu: 0
+      benchmarks:
+        - task: gsm8k_cot
+          num_fewshot: 4
+        - task: ifeval
+          num_fewshot: 0
+    - gpu: 1
+      benchmarks:
+        - task: minerva_math
+          num_fewshot: 4
+        - task: hendrycks_math
+          num_fewshot: 4
