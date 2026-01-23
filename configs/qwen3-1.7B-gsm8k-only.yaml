@@ -31,14 +31,11 @@ verifier:
 loss:
   beta: 0.001  # 1e-3
   eps: 0.2
-  C: 400
+  C: 170
 
 data:
-  dataset: mixed
-  datasets:
-    - name: gsm8k
-      split: train
-      weight: 1
+  dataset: gsm8k
+  split: train
   seed: 42
 
 data_iter:
@@ -81,7 +78,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001  # 1e-6
+        lr: 0.00001  # 1e-5
         eps: 0.0001
 
       lr_scheduler:
