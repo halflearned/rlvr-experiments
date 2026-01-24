@@ -92,7 +92,7 @@ async def sync_titan_to_vllm(trainer, vllm, chunk_mb=100, src_rank=0, wire_dtype
         trainer_version: Current trainer version - samples generated after this sync will be tagged with this version.
     """
     with trace_span("sync.waiting_for_vllm_pause"):
-        await vllm.stop(abort=abort_in_flight)
+        await vllm.stop(abort=abort_in_flight, reset_router=True)
 
     try:
         channel = f"{trainer.name}_to_{vllm.name}"

@@ -292,6 +292,15 @@ class LoadAwareRouter:
         """Get current in-flight counts (for metrics)."""
         return list(self._in_flight)
 
+    async def reset(self) -> None:
+        """Clear router state after a pause/sync."""
+        async with self._not_full:
+            num_replicas = len(self._in_flight)
+            self._in_flight = [0] * num_replicas
+            self._occupied_slots = [set() for _ in range(num_replicas)]
+            # Wake any waiters so they can re-acquire with fresh state.
+            self._not_full.notify_all()
+
 
 class VLLMHandle:
     """Handle for one or more vLLM instances (data parallel replicas)."""
@@ -326,17 +335,26 @@ class VLLMHandle:
         results = await asyncio.gather(*[a.abort_all.remote() for a in self._actors])
         return sum(results)
 
-    async def stop(self, abort: bool = False) -> None:
+    async def stop(self, abort: bool = False, reset_router: bool = False) -> None:
         """Stop accepting new generation requests.
 
         Args:
             abort: If True, abort in-flight requests instead of waiting for them.
+            reset_router: If True, clear router state after all in-flight requests finish.
         """
         self._pause_generation += 1
         self._paused.clear()  # Close the gate for new requests
         if abort:
             await self.abort_all()
         await self._in_flight_zero.wait()  # Wait for in-flight requests to finish
+        loads = self._router.get_load()
+        if any(loads):
+            logger.warning(f"[vllm.stop] router loads non-zero after drain: {loads}")
+        else:
+            logger.info(f"[vllm.stop] router loads after drain: {loads}")
+        if reset_router:
+            await self._router.reset()
+            logger.info(f"[vllm.stop] router reset complete: {self._router.get_load()}")
 
     def resume(self) -> None:
         """Resume accepting generation requests after sync."""
