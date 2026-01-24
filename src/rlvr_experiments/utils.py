@@ -195,19 +195,79 @@ def upload_dir_to_s3(local_dir: str, s3_prefix: str) -> bool:
 
 
 def get_checkpoint_dir() -> tuple[str, bool]:
-    """Get checkpoint directory and whether to use S3 uploads.
+    """Get checkpoint directory and whether to use S3 uploads for checkpoints.
+
+    On SageMaker: saves to SM_MODEL_DIR, which is automatically uploaded to S3 at job end.
+    Locally: saves to /efs/rlvr-experiments/checkpoints.
 
     Returns:
-        Tuple of (checkpoint_dir, use_s3_checkpoints)
+        Tuple of (checkpoint_dir, upload_checkpoints_to_s3)
+        - upload_checkpoints_to_s3 is always False now (SageMaker handles it at job end)
     """
     if is_sagemaker():
-        checkpoint_dir = tempfile.mkdtemp(prefix="ckpt_")
-        print(f"[checkpoint] SageMaker mode: saving to temp dir {checkpoint_dir}, uploading to S3")
-        return checkpoint_dir, True
+        # Use SM_MODEL_DIR - SageMaker will upload this to S3 when job completes
+        checkpoint_dir = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")
+        print(f"[checkpoint] SageMaker mode: saving to {checkpoint_dir} (uploaded at job end)")
+        return checkpoint_dir, False  # Don't upload checkpoints manually
     else:
         checkpoint_dir = "/efs/rlvr-experiments/checkpoints"
         print(f"[checkpoint] Local mode: saving to {checkpoint_dir}")
         return checkpoint_dir, False
+
+
+def upload_traces_to_s3(trace_dir: str, run_name: str) -> bool:
+    """Upload trace and log files to S3 for monitoring.
+
+    Call this periodically during training to upload traces and rollout logs.
+    Only uploads on SageMaker.
+
+    Args:
+        trace_dir: Directory containing trace files (e.g., runtime.trace_dir)
+        run_name: Name of the training run
+
+    Returns:
+        True on success, False on failure
+    """
+    if not is_sagemaker():
+        return True  # No-op for local runs
+
+    import time
+    import boto3
+    from botocore.config import Config
+
+    def log(msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [s3_traces] {msg}", flush=True)
+
+    job_name = get_sagemaker_job_name()
+    s3_prefix = f"{S3_CHECKPOINT_PREFIX}/{job_name}/traces"
+
+    try:
+        config = Config(connect_timeout=30, read_timeout=60, retries={'max_attempts': 3})
+        s3 = boto3.client('s3', config=config)
+
+        files_uploaded = 0
+        total_size = 0
+
+        if not os.path.isdir(trace_dir):
+            log(f"Trace dir {trace_dir} does not exist")
+            return False
+
+        for filename in os.listdir(trace_dir):
+            filepath = os.path.join(trace_dir, filename)
+            if os.path.isfile(filepath):
+                s3_key = f"{s3_prefix}/{filename}"
+                file_size = os.path.getsize(filepath)
+                s3.upload_file(filepath, S3_BUCKET, s3_key)
+                files_uploaded += 1
+                total_size += file_size
+
+        log(f"Uploaded {files_uploaded} files ({total_size/1024:.1f}KB) -> s3://{S3_BUCKET}/{s3_prefix}")
+        return True
+
+    except Exception as e:
+        log(f"Upload failed: {type(e).__name__}: {e}")
+        return False
 
 
 def cleanup_local_checkpoint(path: str) -> None:

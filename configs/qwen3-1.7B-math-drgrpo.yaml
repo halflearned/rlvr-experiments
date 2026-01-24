@@ -10,9 +10,10 @@ tokenizer:
 
 training:
   # No max_steps, no max epoch, just run
+  num_epochs: 2
+  checkpoint_interval: 50
   max_staleness: 0
   abort_in_flight: false
-  checkpoint_interval: 20
 
   # MATH problems may need longer completions
   # seq_len_buckets is TOTAL seq length (prompt + completion)
@@ -21,9 +22,9 @@ training:
   seq_len_buckets: [768, 1280]
   completion_len_buckets: [512, 1024]
 
-  prompts_per_rollout_sync: 64
+  prompts_per_rollout_sync: 128
   prompts_per_reference_sync: 9999999
-  prompts_per_optim_step: 64
+  prompts_per_optim_step: 128
   prompts_per_forward_backward: 2
   # Micro-batch keys must match seq_len_buckets
   completions_per_micro_batch:
@@ -37,9 +38,10 @@ verifier:
   num_workers: 4
 
 loss:
+  name: drgrpo
   beta: 0.001  # 1e-3
   eps: 0.2
-  C: 2048
+  C: 300
 
 data:
   dataset: math
@@ -148,7 +150,7 @@ roles:
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 2 
+      data_parallel_size: 3
       max_model_len: 2560  # Match max(seq_len_buckets)
       gpu_memory_utilization: 0.90
       dtype: "float16"

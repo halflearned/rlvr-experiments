@@ -23,7 +23,7 @@ from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
-from rlvr_experiments.utils import set_seed, get_checkpoint_dir, upload_checkpoint_to_s3, cleanup_local_checkpoint
+from rlvr_experiments.utils import set_seed, get_checkpoint_dir, upload_traces_to_s3
 from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier, IFEvalVerifier, MultiVerifier
 
 DATASETS = {
@@ -146,7 +146,7 @@ async def main():
     max_steps = plan.training.get("max_steps")
     abort_in_flight = plan.training.get("abort_in_flight", True)
     checkpoint_interval = plan.training.get("checkpoint_interval", 50)
-    checkpoint_dir, use_s3_checkpoints = get_checkpoint_dir()
+    checkpoint_dir, _ = get_checkpoint_dir()
 
     # Batching
     schedule = _compute_schedule(plan.training)
@@ -537,14 +537,15 @@ async def main():
                     trainer_version=trainer.version,
                 )
 
-            # Checkpoint
+            # Checkpoint (saves to SM_MODEL_DIR on SageMaker, uploaded at job end)
             if checkpoint_interval and trainer.version % checkpoint_interval == 0:
                 ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_step{trainer.version}")
                 await trainer.export_to_hf(ckpt_path)
-                if use_s3_checkpoints:
-                    upload_checkpoint_to_s3(ckpt_path, run_id, f"step{trainer.version}", runtime.trace_dir)
-                    cleanup_local_checkpoint(ckpt_path)
-                
+
+            # Upload traces to S3 every 10 steps (for monitoring progress)
+            if trainer.version % 10 == 0:
+                upload_traces_to_s3(runtime.trace_dir, run_id)
+
             # Reset accumulation
             accum_count = 0
             accum_loss = 0.0
@@ -565,13 +566,13 @@ async def main():
     print("\n=== Training complete ===")
     await rollout.stop(abort=True)
 
-    # Save final checkpoint
+    # Save final checkpoint (to SM_MODEL_DIR on SageMaker, uploaded at job end)
     final_ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_final")
     print(f"Saving final checkpoint to {final_ckpt_path}")
     await trainer.export_to_hf(final_ckpt_path)
-    if use_s3_checkpoints:
-        upload_checkpoint_to_s3(final_ckpt_path, run_id, "final", runtime.trace_dir)
-        cleanup_local_checkpoint(checkpoint_dir)
+
+    # Final trace upload
+    upload_traces_to_s3(runtime.trace_dir, run_id)
 
     # Run summary
     run_elapsed = time.perf_counter() - run_start_time

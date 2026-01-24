@@ -10,9 +10,12 @@ tokenizer:
 
 training:
   # No max_steps, no max epoch, just run
+  num_epochs: 2
+  checkpoint_interval: 50
+
   max_staleness: 0
+  
   abort_in_flight: false
-  checkpoint_interval: 20
 
   # MATH problems may need longer completions
   # seq_len_buckets is TOTAL seq length (prompt + completion)

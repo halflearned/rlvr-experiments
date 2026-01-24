@@ -230,12 +230,21 @@ def submit_job(
             "sagemaker_submit_directory": s3_source_uri,
         }
 
+    # Metric definitions for CloudWatch - scraped from training logs
+    # Note: "reward_all" is displayed as "metric" to be non-descript
+    metric_definitions = [
+        {"Name": "step", "Regex": r"step=(\d+)"},
+        {"Name": "metric", "Regex": r"reward_all=([\d.]+)"},
+        {"Name": "loss", "Regex": r"loss=([-\d.]+)"},
+    ]
+
     training_job_config = {
         "TrainingJobName": job_name,
         "RoleArn": ROLE,
         "AlgorithmSpecification": {
             "TrainingImage": remote_uri,
             "TrainingInputMode": "File",
+            "MetricDefinitions": metric_definitions,
         },
         "HyperParameters": hyperparams,
         "ResourceConfig": {
