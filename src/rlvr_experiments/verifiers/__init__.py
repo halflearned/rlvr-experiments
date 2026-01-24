@@ -40,6 +40,7 @@ from .math import MathVerifier
 from .gsm8k import GSM8KVerifier
 from .minerva_math import MinervaMathVerifier
 from .ifeval import IFEvalVerifier
+from .if_multi_constraints import IFMultiConstraintsVerifier
 from .allenai import AllenAIGSM8KVerifier, AllenAIMathVerifier
 from .multi import MultiVerifier
 from .distributed import VerifierPool
@@ -65,6 +66,7 @@ __all__ = [
     "AllenAIMathVerifier",
     # IFEval verifier
     "IFEvalVerifier",
+    "IFMultiConstraintsVerifier",
     # Multi-verifier (for mixed datasets)
     "MultiVerifier",
     # Distributed

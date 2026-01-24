@@ -13,7 +13,20 @@ import torch
 from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
-from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy, load_ifeval, load_mixed, DATASET_LOADERS
+from rlvr_experiments.data import (
+    DataIterator,
+    load_apps,
+    load_mbpp,
+    load_humaneval,
+    load_gsm8k,
+    load_math,
+    load_deepscaler,
+    load_dummy,
+    load_ifeval,
+    load_if_multi_constraints,
+    load_mixed,
+    DATASET_LOADERS,
+)
 from rlvr_experiments.losses import (
     GRPOLoss, DrGRPOLoss,
     compute_grpo_advantages, compute_drgrpo_advantages,
@@ -24,7 +37,16 @@ from rlvr_experiments.sample_logger import log_sample
 from rlvr_experiments.syncing import sync_titan_to_vllm
 from rlvr_experiments.tracer import trace_span
 from rlvr_experiments.utils import set_seed, get_checkpoint_dir, upload_traces_to_s3
-from rlvr_experiments.verifiers import VerifierPool, APPSVerifier, MBPPVerifier, HumanEvalVerifier, MathVerifier, IFEvalVerifier, MultiVerifier
+from rlvr_experiments.verifiers import (
+    VerifierPool,
+    APPSVerifier,
+    MBPPVerifier,
+    HumanEvalVerifier,
+    MathVerifier,
+    IFEvalVerifier,
+    IFMultiConstraintsVerifier,
+    MultiVerifier,
+)
 
 DATASETS = {
     "apps": (load_apps, APPSVerifier),
@@ -32,8 +54,10 @@ DATASETS = {
     "mbpp": (load_mbpp, MBPPVerifier),
     "gsm8k": (load_gsm8k, MathVerifier),
     "math": (load_math, MathVerifier),
+    "deepscaler": (load_deepscaler, MathVerifier),
     "dummy": (load_dummy, MathVerifier),
     "ifeval": (load_ifeval, IFEvalVerifier),
+    "if_multi_constraints": (load_if_multi_constraints, IFMultiConstraintsVerifier),
     "mixed": (load_mixed, MultiVerifier),
 }
 

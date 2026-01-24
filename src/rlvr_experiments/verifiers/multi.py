@@ -10,6 +10,7 @@ from .math import MathVerifier
 from .gsm8k import GSM8KVerifier
 from .minerva_math import MinervaMathVerifier
 from .ifeval import IFEvalVerifier
+from .if_multi_constraints import IFMultiConstraintsVerifier
 from .code import HumanEvalVerifier, MBPPVerifier, APPSVerifier
 from .allenai import AllenAIGSM8KVerifier, AllenAIMathVerifier
 
@@ -49,6 +50,7 @@ class MultiVerifier:
             "gsm8k": MathVerifier(timeout=math_timeout, max_workers=math_max_workers),
             "minerva_math": MinervaMathVerifier(),
             "ifeval": IFEvalVerifier(timeout=ifeval_timeout),
+            "if_multi_constraints": IFMultiConstraintsVerifier(timeout=ifeval_timeout),
             "humaneval": HumanEvalVerifier(),
             "mbpp": MBPPVerifier(),
             "apps": APPSVerifier(),
@@ -103,7 +105,7 @@ class MultiVerifier:
             # Use single-item verify for math/ifeval/AllenAI, verify_completions for code
             if verifier_type in ("math", "hendrycks_math"):
                 score = verifier.verify(c, p["answer"])
-            elif verifier_type in ("ifeval", "allenai_gsm8k", "allenai_math"):
+            elif verifier_type in ("ifeval", "if_multi_constraints", "allenai_gsm8k", "allenai_math"):
                 score = verifier.verify(c, p.get("ground_truth", ""))
             elif verifier_type in ("gsm8k", "minerva_math"):
                 # These verifiers return list[float], not tuple
@@ -143,7 +145,7 @@ class MultiVerifier:
             # Use single-item verify for math/ifeval/AllenAI, verify_completions for code
             if verifier_type in ("math", "hendrycks_math"):
                 score = verifier.verify(c, p["answer"])
-            elif verifier_type in ("ifeval", "allenai_gsm8k", "allenai_math"):
+            elif verifier_type in ("ifeval", "if_multi_constraints", "allenai_gsm8k", "allenai_math"):
                 score = verifier.verify(c, p.get("ground_truth", ""))
             elif verifier_type in ("gsm8k", "minerva_math"):
                 # These verifiers return list[float], not tuple

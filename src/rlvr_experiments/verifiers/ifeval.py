@@ -124,8 +124,46 @@ def validate_title(text: str) -> bool:
     return len(matches) > 0
 
 
-def validate_choice(text: str, options: list) -> bool:
-    return any(text in option for option in options)
+def validate_choice(text: str, options) -> bool:
+    def _norm(s: str) -> str:
+        return " ".join(s.strip().lower().split())
+
+    # Normalize response once
+    response = _norm(text)
+    if not response:
+        return False
+
+    # Normalize options into a list of strings
+    opt_list: list[str] = []
+    if isinstance(options, str):
+        # Try common separators first (most lenient)
+        raw = options
+        separators = [",", "/", "|", ";", " or "]
+        parts = [raw]
+        for sep in separators:
+            if sep in raw:
+                parts = []
+                for chunk in raw.split(sep):
+                    parts.append(chunk)
+                raw = " ".join(parts)
+        opt_list = [p.strip() for p in parts if p.strip()]
+    elif isinstance(options, (list, tuple, set)):
+        opt_list = [str(o).strip() for o in options if str(o).strip()]
+    else:
+        # Fallback: treat anything else as a single option string
+        opt_list = [str(options).strip()] if options is not None else []
+
+    if not opt_list:
+        return False
+
+    for opt in opt_list:
+        norm_opt = _norm(opt)
+        if not norm_opt:
+            continue
+        # Most lenient: allow either direction substring match
+        if response == norm_opt or response in norm_opt or norm_opt in response:
+            return True
+    return False
 
 
 def validate_highlighted_sections(text: str, N: int) -> bool:

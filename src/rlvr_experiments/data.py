@@ -40,6 +40,9 @@ IFEVAL_SYSTEM_PROMPT = ""
 IFEVAL_ASSISTANT_PREFIX = ""
 IFEVAL_MAX_COMPLETION_LEN = 2048
 
+# DeepScaleR: Math reasoning
+DEEPSCALER_MAX_COMPLETION_LEN = 1024
+
 
 def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     """
@@ -345,6 +348,73 @@ def load_math(
     return ds.map(preprocess)
 
 
+def load_deepscaler(split: str = "train") -> ray.data.Dataset:
+    """
+    Load DeepScaleR-Preview-Dataset as a Ray Dataset.
+
+    Each row contains:
+    - problem: math problem text
+    - answer: final answer string
+    - solution: worked solution (unused for verification)
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
+    """
+    import os
+    import subprocess
+
+    # Check for S3 cache first (for SageMaker VPC environments without internet)
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/deepscaler_{split}/"
+    local_cache = f"/tmp/deepscaler_{split}_cache"
+
+    use_local_cache = False
+    if os.path.exists(local_cache):
+        print(f"[load_deepscaler] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_deepscaler] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            print(f"[load_deepscaler] Loaded from S3 cache")
+            use_local_cache = True
+        except Exception as e:
+            print(f"[load_deepscaler] S3 cache not available ({e}), loading from HuggingFace Hub")
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        items = list(hf_dataset)
+    else:
+        hf_dataset = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split=split)
+        items = list(hf_dataset)
+
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        prompt = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
+        prompt_id = f"deepscaler_{row['_idx']}"
+        return {
+            "prompt": prompt,
+            "problem": {
+                "answer": row["answer"],
+                "prompt_id": prompt_id,
+                "verifier_type": "math",
+                "dataset_name": "deepscaler",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": DEEPSCALER_MAX_COMPLETION_LEN,
+            },
+        }
+
+    return ds.map(preprocess)
+
+
 def load_apps(
     split: str = "train",
     difficulty: list[str] | None = None,
@@ -518,6 +588,82 @@ def load_ifeval(split: str = "train") -> ray.data.Dataset:
                 "prompt_id": prompt_id,
                 "verifier_type": "ifeval",
                 "dataset_name": "ifeval",
+                "system_prompt": IFEVAL_SYSTEM_PROMPT,
+                "assistant_prefix": IFEVAL_ASSISTANT_PREFIX,
+                "max_completion_len": IFEVAL_MAX_COMPLETION_LEN,
+            },
+        }
+
+    return ds.map(preprocess)
+
+
+def load_if_multi_constraints(split: str = "train") -> ray.data.Dataset:
+    """
+    Load IF_multi_constraints_upto5 dataset as a Ray Dataset.
+
+    This dataset contains multi-constraint instruction-following prompts. Each
+    row provides a ground_truth field with a list of instruction IDs and kwargs.
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict containing ground_truth JSON for use with
+    IFMultiConstraintsVerifier.
+    """
+    import os
+    import subprocess
+
+    # Check for S3 cache first (for SageMaker VPC environments without internet)
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/if_multi_constraints_{split}/"
+    local_cache = f"/tmp/if_multi_constraints_{split}_cache"
+
+    use_local_cache = False
+    if os.path.exists(local_cache):
+        print(f"[load_if_multi_constraints] Loading from local cache: {local_cache}")
+        use_local_cache = True
+    else:
+        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            print(f"[load_if_multi_constraints] Trying S3 cache: {s3_cache}")
+            os.makedirs(local_cache, exist_ok=True)
+            subprocess.run(
+                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
+                check=True, capture_output=True
+            )
+            print(f"[load_if_multi_constraints] Loaded from S3 cache")
+            use_local_cache = True
+        except Exception as e:
+            print(f"[load_if_multi_constraints] S3 cache not available ({e}), loading from HuggingFace Hub")
+
+    if use_local_cache:
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        items = list(hf_dataset)
+    else:
+        hf_dataset = load_dataset("allenai/IF_multi_constraints_upto5", split=split)
+        items = list(hf_dataset)
+
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        # Extract user message content from messages list
+        messages = row["messages"]
+        user_content = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                user_content = msg["content"]
+                break
+
+        prompt_id = f"if_multi_{row['_idx']}"
+
+        return {
+            "prompt": user_content,
+            "problem": {
+                "ground_truth": row["ground_truth"],
+                "constraint_type": row["constraint_type"],
+                "constraint": row["constraint"],
+                "prompt_id": prompt_id,
+                "verifier_type": "if_multi_constraints",
+                "dataset_name": "if_multi_constraints",
                 "system_prompt": IFEVAL_SYSTEM_PROMPT,
                 "assistant_prefix": IFEVAL_ASSISTANT_PREFIX,
                 "max_completion_len": IFEVAL_MAX_COMPLETION_LEN,
@@ -773,10 +919,12 @@ def load_allenai_gsm8k_mini(
 DATASET_LOADERS = {
     "gsm8k": load_gsm8k,
     "math": load_math,
+    "deepscaler": load_deepscaler,
     "humaneval": load_humaneval,
     "mbpp": load_mbpp,
     "apps": load_apps,
     "ifeval": load_ifeval,
+    "if_multi_constraints": load_if_multi_constraints,
     "dummy": load_dummy,
     "allenai_rlvr": load_allenai_rlvr,
     "allenai_gsm8k_mini": load_allenai_gsm8k_mini,
