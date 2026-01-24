@@ -162,14 +162,9 @@ class Runtime:
         (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2))
 
         # Expose run dir to other components (e.g., checkpoint dir resolver)
+        # Note: get_checkpoint_dir() in utils.py uses RLVR_RUN_DIR to route saves
+        # Do NOT override plan.roles checkpoint.folder here - it breaks initial_load_in_hf
         os.environ["RLVR_RUN_DIR"] = str(run_dir)
-
-        # Force checkpoints to land under this run directory
-        for role in plan.roles.values():
-            if role.kind == "titan":
-                ckpt_cfg = role.config.get("checkpoint", {})
-                ckpt_cfg["folder"] = str(checkpoints_dir)
-                role.config["checkpoint"] = ckpt_cfg
 
         # Initialize tracing with stable filenames inside run_dir
         trace_path = getattr(plan, "trace_path", None) or str(traces_dir / "trace.jsonl")
