@@ -143,13 +143,16 @@ class GRPOLoss(torch.nn.Module):
                 kl_mean = kl_t[valid].mean().item()
                 kl_max = kl_t[valid].max().item()
                 ratio_max = ratio[valid].max().item()
+                # Entropy approximation: mean negative logprob of selected tokens at rollout time
+                entropy_mean = -old_lp[valid].mean().item()
             else:
-                kl_mean = kl_max = ratio_max = 0.0
+                kl_mean = kl_max = ratio_max = entropy_mean = 0.0
 
             self._last_debug = {
                 "kl_mean": kl_mean,
                 "kl_max": kl_max,
                 "ratio_max": ratio_max,
+                "entropy_mean": entropy_mean,
             }
             print(f"[GRPO DEBUG] {self._last_debug}")
 
@@ -225,12 +228,15 @@ class DrGRPOLoss(torch.nn.Module):
                 kl_mean = kl_t[valid].mean().item()
                 kl_max = kl_t[valid].max().item()
                 ratio_max = ratio[valid].max().item()
+                # Entropy approximation: mean negative logprob of selected tokens at rollout time
+                entropy_mean = -old_lp[valid].mean().item()
             else:
-                kl_mean = kl_max = ratio_max = 0.0
+                kl_mean = kl_max = ratio_max = entropy_mean = 0.0
             self._last_debug = {
                 "kl_mean": kl_mean,
                 "kl_max": kl_max,
                 "ratio_max": ratio_max,
+                "entropy_mean": entropy_mean,
             }
             print(f"[GRPO DEBUG] {self._last_debug}")
 
