@@ -7,7 +7,7 @@
 body {
     font-family: 'Roboto', sans-serif;
     font-weight: 300;
-    font-size: 18px;
+    font-size: 15px;
     line-height: 1.6;
     color: #333;
     background: #fff;
@@ -30,14 +30,14 @@ header {
 
 h1 {
     font-family: 'Roboto', sans-serif;
-    font-size: 42px;
+    font-size: 32px;
     font-weight: 300;
-    margin: 0 0 12px;
+    margin: 0 0 10px;
     color: #1a1a1a;
 }
 
 .subtitle {
-    font-size: 20px;
+    font-size: 16px;
     color: #666;
     margin: 0;
     font-style: italic;
@@ -45,17 +45,17 @@ h1 {
 
 h2 {
     font-family: 'Roboto', sans-serif;
-    font-size: 28px;
+    font-size: 22px;
     font-weight: 400;
-    margin: 48px 0 16px;
+    margin: 40px 0 14px;
     color: #1a1a1a;
 }
 
 h3 {
     font-family: 'Roboto', sans-serif;
-    font-size: 20px;
+    font-size: 17px;
     font-weight: 400;
-    margin: 32px 0 12px;
+    margin: 28px 0 10px;
     color: #333;
 }
 
@@ -345,7 +345,7 @@ section.explanation p {
     width: 100%;
     border-collapse: collapse;
     font-family: 'Roboto', sans-serif;
-    font-size: 14px;
+    font-size: 13px;
 }
 
 .results-table thead {
@@ -355,10 +355,10 @@ section.explanation p {
 
 .results-table th {
     font-weight: 500;
-    padding: 8px 12px;
+    padding: 6px 10px;
     text-align: center;
     font-family: 'Source Code Pro', monospace;
-    font-size: 12px;
+    font-size: 11px;
 }
 
 .results-table tbody {
@@ -381,8 +381,8 @@ section.explanation p {
 }
 
 .table-caption {
-    margin-top: 12px;
-    font-size: 13px;
+    margin-top: 10px;
+    font-size: 12px;
     color: #555;
     text-align: center;
 }
@@ -393,9 +393,9 @@ section.explanation p {
 
 h4 {
     font-family: 'Roboto', sans-serif;
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 500;
-    margin: 24px 0 12px;
+    margin: 20px 0 10px;
     color: #333;
 }
 
@@ -411,10 +411,40 @@ li {
 
 code {
     font-family: 'Source Code Pro', monospace;
-    font-size: 14px;
+    font-size: 12px;
     background: #f0f0f0;
-    padding: 2px 6px;
+    padding: 2px 5px;
     border-radius: 3px;
+}
+
+/* Appendix - smaller font */
+.appendix {
+    font-size: 13px;
+}
+
+.appendix h2 {
+    font-size: 20px;
+}
+
+.appendix h3 {
+    font-size: 15px;
+}
+
+.appendix .results-table {
+    font-size: 12px;
+}
+
+.appendix .results-table th {
+    font-size: 10px;
+}
+
+.appendix .table-caption {
+    font-size: 11px;
+}
+
+/* References */
+#references {
+    font-size: 13px;
 }
 
 /* Responsive */
