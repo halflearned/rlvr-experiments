@@ -14,7 +14,10 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
 from rlvr_experiments.data import DataIterator, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_dummy, load_ifeval, load_mixed, DATASET_LOADERS
-from rlvr_experiments.losses import DrGRPOLoss, compute_drgrpo_advantages
+from rlvr_experiments.losses import (
+    GRPOLoss, DrGRPOLoss,
+    compute_grpo_advantages, compute_drgrpo_advantages,
+)
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
 from rlvr_experiments.sample_logger import log_sample
@@ -122,7 +125,18 @@ async def main():
     else:
         data_iter = DataIterator(load_fn(**data_cfg), tokenizer=tokenizer, **plan.data_iter)
 
-    loss_fn = DrGRPOLoss(**plan.loss)
+    # Select loss class based on config (default: drgrpo for backwards compatibility)
+    loss_cfg = dict(plan.loss)
+    loss_name = loss_cfg.pop("name", "drgrpo")
+    if loss_name == "grpo":
+        loss_fn = GRPOLoss(**loss_cfg)
+        compute_advantages = compute_grpo_advantages
+    elif loss_name == "drgrpo":
+        loss_fn = DrGRPOLoss(**loss_cfg)
+        compute_advantages = compute_drgrpo_advantages
+    else:
+        raise ValueError(f"Unknown loss name: {loss_name}. Must be 'grpo' or 'drgrpo'.")
+    print(f"[init] Using loss: {loss_name}")
     reward_stats = RewardStats()
 
     # =========================================================================
@@ -451,7 +465,7 @@ async def main():
             accum_count += 1
 
             # Compute GRPO advantages (normalized within each prompt's completions)
-            advantages = compute_drgrpo_advantages(batch.rewards, group_size=completions_per_prompt)
+            advantages = compute_advantages(batch.rewards, group_size=completions_per_prompt)
 
             # Forward/backward pass
             with trace_span("forward_backward"):

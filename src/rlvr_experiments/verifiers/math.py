@@ -1,16 +1,65 @@
 import multiprocessing as mp
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError
 
 
+def _extract_last_number(text: str) -> str | None:
+    """Extract the last number from text (fallback extraction)."""
+    # Remove commas between digits (e.g., "1,234" -> "1234")
+    text = re.sub(r"(\d),(\d)", r"\1\2", text)
+    # Match integers and decimals, with optional sign
+    numbers = re.findall(r"[-+]?(?:\d+\.\d+|\d+)", text)
+    if numbers:
+        return numbers[-1]
+    return None
+
+
+def _normalize_number(s: str) -> str | None:
+    """Normalize a number string for comparison."""
+    if s is None:
+        return None
+    s = s.strip().lstrip("+")
+    try:
+        f = float(s)
+        if f == int(f):
+            return str(int(f))
+        return s
+    except ValueError:
+        return None
+
+
 # Module-level function for subprocess execution (must be picklable)
-def _verify_single(response: str, target: str) -> float:
-    """Verify a single response against target. Runs in subprocess."""
+def _verify_single(response: str, target: str, fallback_extraction: bool = True) -> float:
+    """Verify a single response against target. Runs in subprocess.
+
+    Args:
+        response: Model's generated response
+        target: Gold answer
+        fallback_extraction: If True, fall back to last-number extraction when
+                            math_verify.parse() returns None for the response
+    """
     from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
     try:
         extraction_config = [LatexExtractionConfig(), ExprExtractionConfig()]
         gold = parse(target, extraction_config=extraction_config)
         answer = parse(response, extraction_config=extraction_config)
+
+        # If math_verify couldn't parse response, try fallback extraction
+        if answer is None and fallback_extraction:
+            pred_num = _extract_last_number(response)
+            if pred_num is not None:
+                # Try parsing the extracted number
+                answer = parse(pred_num, extraction_config=extraction_config)
+                # If still can't parse, try direct numeric comparison
+                if answer is None and gold is not None:
+                    gold_num = _extract_last_number(target)
+                    if gold_num is not None:
+                        pred_norm = _normalize_number(pred_num)
+                        gold_norm = _normalize_number(gold_num)
+                        if pred_norm is not None and gold_norm is not None and pred_norm == gold_norm:
+                            return 1.0
+
         if gold is None or answer is None:
             return 0.0
         return 1.0 if verify(gold, answer) else 0.0

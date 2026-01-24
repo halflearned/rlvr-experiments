@@ -1400,3 +1400,15 @@ The format drift is a feature, not a bug - the model optimized exactly what we r
 - Trace: `traces/trace_20260123_021337.jsonl`
 - Checkpoints: `checkpoints/qwen3_17b_gsm8k_only_20260123_021337_step{20,40,...,240}/`
 - Eval results: `eval_results/repro_watch/qwen3_17b_gsm8k_only_20260123_021337_step*/`
+
+
+### TODOS
+
+FRIDAY:
+- Dr GRPO implementation / confirm it works
+- Non-GSM8k datasets
+- Add entropy computation
+
+SATURDAY:
+- Staleness b (sagemaker)
+- LLM-as-a-judge
