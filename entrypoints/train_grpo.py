@@ -116,8 +116,8 @@ async def main():
     # =========================================================================
     runtime = await Runtime.from_plan(args.config)
     plan = runtime.plan
-    run_name = plan.run.get("name", "grpo_run")
-    run_id = f"{run_name}_{runtime.run_timestamp}"  # Unique run identifier
+    run_name = runtime.run_name or "grpo_run"
+    run_id = run_name  # run_name already includes timestamp
 
     # Set random seed for reproducibility
     seed = plan.run.get("seed", 42)

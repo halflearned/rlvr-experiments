@@ -197,6 +197,7 @@ def upload_dir_to_s3(local_dir: str, s3_prefix: str) -> bool:
 def get_checkpoint_dir() -> tuple[str, bool]:
     """Get checkpoint directory and whether to use S3 uploads for checkpoints.
 
+    If RLVR_RUN_DIR is set: saves to <RLVR_RUN_DIR>/checkpoints.
     On SageMaker: saves to SM_MODEL_DIR, which is automatically uploaded to S3 at job end.
     Locally: saves to /efs/rlvr-experiments/checkpoints.
 
@@ -204,6 +205,12 @@ def get_checkpoint_dir() -> tuple[str, bool]:
         Tuple of (checkpoint_dir, upload_checkpoints_to_s3)
         - upload_checkpoints_to_s3 is always False now (SageMaker handles it at job end)
     """
+    run_dir = os.environ.get("RLVR_RUN_DIR")
+    if run_dir:
+        checkpoint_dir = os.path.join(run_dir, "checkpoints")
+        print(f"[checkpoint] Using run dir: saving to {checkpoint_dir}")
+        return checkpoint_dir, False
+
     if is_sagemaker():
         # Use SM_MODEL_DIR - SageMaker will upload this to S3 when job completes
         checkpoint_dir = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")

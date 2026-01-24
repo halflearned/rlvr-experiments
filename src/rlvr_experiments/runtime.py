@@ -3,6 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import json
+import shutil
+import subprocess
+import tarfile
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict
@@ -56,6 +61,8 @@ class Runtime:
     channel_ports: Dict[str, int]       # channel_name -> sync port
     namespace: int
     buffer: Any
+    run_name: str = ""                  # run folder name (config + timestamp)
+    run_dir: str = ""                   # absolute path to run folder
     run_timestamp: str = ""             # unique timestamp for this run (YYYYMMDD_HHMMSS)
 
     @property
@@ -77,36 +84,110 @@ class Runtime:
 
         plan = load_plan(plan_path)
 
-        # Initialize tracing - use temp dir for SageMaker (will be uploaded to S3 by train script)
-        # otherwise use config or default local path
-        import tempfile
-        model_dir = os.environ.get("SM_MODEL_DIR")
-        if model_dir:
-            # SageMaker: use temp directory, traces will be uploaded to S3 alongside checkpoints
-            trace_base = tempfile.mkdtemp(prefix="traces_")
-            default_trace_path = os.path.join(trace_base, "trace.jsonl")
-        else:
-            default_trace_path = "traces/trace.jsonl"
-        trace_path = getattr(plan, "trace_path", None) or default_trace_path
-        # Migrate old .json extension to .jsonl
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        config_stem = Path(plan_path).stem.replace(" ", "_")
+        run_name = f"{config_stem}_{timestamp}"
+
+        results_root = Path(os.environ.get("SM_MODEL_DIR", "results")).resolve()
+
+        # Ensure unique run dir if a collision somehow occurs
+        run_dir = results_root / run_name
+        if run_dir.exists():
+            suffix = 1
+            while (results_root / f"{run_name}_{suffix}").exists():
+                suffix += 1
+            run_name = f"{run_name}_{suffix}"
+            run_dir = results_root / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Standard run subfolders
+        traces_dir = run_dir / "traces"
+        checkpoints_dir = run_dir / "checkpoints"
+        patches_dir = run_dir / "patches"
+        traces_dir.mkdir(parents=True, exist_ok=True)
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        patches_dir.mkdir(parents=True, exist_ok=True)
+
+        # Persist config and a place for notes
+        config_dst = run_dir / "config.yaml"
+        try:
+            shutil.copyfile(plan_path, config_dst)
+        except Exception as e:
+            print(f"[runtime] WARNING: failed to copy config to {config_dst}: {e}")
+        results_md = run_dir / "RESULTS.md"
+        if not results_md.exists():
+            results_md.write_text("")
+
+        # Capture repo state for reproducibility
+        repo_root = None
+        git_info: dict[str, object] = {}
+        try:
+            repo_root = subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"], cwd=Path.cwd(), text=True
+            ).strip()
+            git_info["root"] = repo_root
+            git_info["commit"] = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True
+            ).strip()
+            git_info["branch"] = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, text=True
+            ).strip()
+            status = subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=repo_root, text=True
+            )
+            (patches_dir / "git_status.txt").write_text(status)
+
+            diff = subprocess.check_output(["git", "diff"], cwd=repo_root, text=True)
+            (patches_dir / "git_diff.patch").write_text(diff)
+            diff_cached = subprocess.check_output(["git", "diff", "--cached"], cwd=repo_root, text=True)
+            (patches_dir / "git_diff_cached.patch").write_text(diff_cached)
+
+            untracked = [line[3:].strip() for line in status.splitlines() if line.startswith("?? ")]
+            (patches_dir / "git_untracked.txt").write_text("\n".join(untracked))
+            if untracked:
+                tar_path = patches_dir / "untracked.tar.gz"
+                with tarfile.open(tar_path, "w:gz") as tar:
+                    for rel_path in untracked:
+                        abs_path = Path(repo_root) / rel_path
+                        if abs_path.exists():
+                            tar.add(abs_path, arcname=rel_path)
+                git_info["untracked_archive"] = str(tar_path)
+        except Exception as e:
+            print(f"[runtime] WARNING: failed to capture git state: {e}")
+
+        run_meta = {
+            "run_name": run_name,
+            "timestamp": timestamp,
+            "config_path": str(Path(plan_path).resolve()),
+            "results_root": str(results_root),
+            "run_dir": str(run_dir),
+            "host": socket.gethostname(),
+            "sm_model_dir": os.environ.get("SM_MODEL_DIR"),
+            "git": git_info,
+        }
+        (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2))
+
+        # Expose run dir to other components (e.g., checkpoint dir resolver)
+        os.environ["RLVR_RUN_DIR"] = str(run_dir)
+
+        # Force checkpoints to land under this run directory
+        for role in plan.roles.values():
+            if role.kind == "titan":
+                ckpt_cfg = role.config.get("checkpoint", {})
+                ckpt_cfg["folder"] = str(checkpoints_dir)
+                role.config["checkpoint"] = ckpt_cfg
+
+        # Initialize tracing with stable filenames inside run_dir
+        trace_path = getattr(plan, "trace_path", None) or str(traces_dir / "trace.jsonl")
         if trace_path.endswith(".json"):
             trace_path = trace_path[:-5] + ".jsonl"
-
-        # Add timestamp suffix to avoid overwriting previous traces
-        # e.g., traces/trace.jsonl -> traces/trace_20260106_143052.jsonl
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if trace_path.endswith(".jsonl"):
-            trace_path = trace_path[:-6] + f"_{timestamp}.jsonl"
-        else:
-            trace_path = f"{trace_path}_{timestamp}"
-
-        trace_dir = os.path.dirname(trace_path) or "."
-        os.makedirs(trace_dir, exist_ok=True)
+        if not os.path.isabs(trace_path):
+            trace_path = str(run_dir / trace_path)
 
         init_global_tracer(trace_path)
-        sample_path = os.path.join(trace_dir, f"samples_{timestamp}.jsonl")
+        sample_path = str(traces_dir / "samples.jsonl")
         init_sample_logger(sample_path)
-        rollout_path = os.path.join(trace_dir, f"rollouts_{timestamp}.jsonl")
+        rollout_path = str(traces_dir / "rollouts.jsonl")
         init_rollout_logger(rollout_path)
         print(f"[runtime] tracing to {trace_path}")
         print(f"[runtime] sample logging to {sample_path}")
@@ -116,7 +197,6 @@ class Runtime:
         tracer = get_tracer()
         if tracer:
             # Extract key config values for the overview panel
-            run_name = plan.run.get("name", "unnamed") if hasattr(plan, "run") else "unnamed"
             model_path = plan.model.get("path", "") if hasattr(plan, "model") else ""
             dataset = plan.data.get("dataset", "") if hasattr(plan, "data") else ""
             batch_size = plan.data_iter.get("batch_size", 0) if hasattr(plan, "data_iter") else 0
@@ -168,7 +248,6 @@ class Runtime:
             ray.init(address="auto", runtime_env=runtime_env)
         host = ray.util.get_node_ip_address()
 
-        run_name = plan.run.get("name", "unnamed_run")
         titan_roles = sorted([n for n, r in plan.roles.items() if r.kind == "titan"])
         channel_names = sorted([ch.name for ch in plan.channels.values()])
 
@@ -197,6 +276,8 @@ class Runtime:
             channel_ports=channel_ports,
             namespace=0,  # No longer used, kept for compatibility
             buffer=buffer,
+            run_name=run_name,
+            run_dir=str(run_dir),
             run_timestamp=timestamp,
         )
 

@@ -35,9 +35,10 @@ verifier:
   num_workers: 4
 
 loss:
-  name: grpo
+  name: drgrpo
   beta: 0.001  # 1e-3
   eps: 0.2
+  C: 500
 
 data:
   dataset: mixed
