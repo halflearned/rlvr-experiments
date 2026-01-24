@@ -8,16 +8,27 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+    <!-- KaTeX for math rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+        onload="renderMathInElement(document.body, {
+            delimiters: [
+                {left: '$$', right: '$$', display: true},
+                {left: '$', right: '$', display: false}
+            ],
+            throwOnError: false
+        });"></script>
 </head>
 <body>
     <article>
         <header>
             <h1>RLVR Experiments</h1>
-            <p class="subtitle">Subtitle</p>
+            <p class="subtitle">Subtitle goes here</p>
         </header>
 
         <section class="intro">
-            <p> text text </p>
+            <p>Text text</p>
         </section>
 
         <section id="system-architecture">
@@ -25,7 +36,8 @@
             <p>TODO: Description of the system architecture.</p>
         </section>
 
-        <details class="visualization-details" open>
+        <!-- EMBED: pipeline-animation -->
+        <details class="visualization-details">
             <summary>Pipeline animation</summary>
             <section class="visualization">
                 <div class="controls">
@@ -63,15 +75,34 @@
             </section>
         </details>
 
-
         <section id="experiments">
             <h2>2. Experiments</h2>
+            <p>
+                All experiments run here use the <a href="https://arxiv.org/abs/2503.20783">GRPO Done Right</a> variation of the original GRPO implementation:
+            </p>
+
+            $$
+            J_{\text{DrGRPO}}
+            =
+            \frac{1}{G} \sum_{i=1}^{G} \sum_{t=1}^{|o_i|}
+            \left\{ \min \left[
+                \frac{ \pi_{\theta}(o_t | q, o_{\lt t}) }{ \pi_{\theta_{\text{old}}}(o_t | q, o_{\lt t})  } \hat{A}_{i,t}
+                ,
+                \text{clip}\left(
+                    \frac{ \pi_{\theta}(o_t | q, o_{\lt t}) }{ \pi_{\theta_{\text{old}}}(o_t | q, o_{\lt t})  },
+                    1 - \varepsilon,
+                    1 + \varepsilon
+                 \right)
+                \hat{A}_{i,t}
+             \right] \right\}
+            \tag{1}
+            $$
 
             <section id="staleness">
                 <h3>2.1 Staleness</h3>
-                <p> text text </p>
-                <!-- Combined staleness diagrams (collapsible) -->
-                <details class="staleness-details" open>
+
+                <!-- EMBED: staleness-diagrams -->
+                <details class="staleness-details">
                     <summary>Staleness diagrams</summary>
                     <div class="staleness-diagrams-combined">
                         <div class="diagrams-stack">
@@ -193,7 +224,7 @@
 
                                 <!-- Annotation -->
                                 <line x1="110" y1="35" x2="110" y2="95" stroke="#f85149" stroke-width="1.5"/>
-                                <text x="110" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#f85149" text-anchor="middle">optim→deadlock</text>
+                                <text x="110" y="30" font-family="Roboto, sans-serif" font-size="6" fill="#f85149" text-anchor="middle">optim&rarr;deadlock</text>
 
                                 <!-- Time axis (only on bottom diagram) -->
                                 <line x1="40" y1="100" x2="285" y2="100" stroke="#999" stroke-width="0.5"/>
@@ -219,12 +250,13 @@
                         <div class="diagram-caption-item">
                             <strong>Starvation</strong><br>
                             <code>staleness=0, optim=8, sync=16</code><br>
-                            At t=8, trainer needs v1 but rollout is at v0 → deadlock.
+                            At t=8, trainer needs v1 but rollout is at v0 &rarr; deadlock.
                         </div>
+                    </div>
                     </div>
                 </details>
 
-                <h4>Results</h4>
+                <!-- EMBED: staleness-results-table -->
                 <div class="results-table-container">
                     <table class="results-table">
                         <thead>
@@ -290,6 +322,30 @@
                     solves it), while high pass@k indicates an "easy" prompt.
                 </p>
 
+                <p>
+                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
+                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
+                    in ascending order (hard-to-easy).
+                </p>
+
+                <h4>Results</h4>
+                <p>TODO: Curriculum vs random ordering comparison.</p>
+            </section>
+        </section>
+
+        <section id="appendix" class="appendix">
+            <h2>Appendix</h2>
+
+            <section id="datasets">
+                <h3>Dataset, verifiers, benchmarks.</h3>
+                <p>GSM8k:</p>
+                <p>MATH:</p>
+            </section>
+
+            <section id="passk-rates">
+                <h3>Base model pass@k rates</h3>
+
+                <!-- EMBED: passk-table -->
                 <div class="results-table-container">
                     <table class="results-table">
                         <thead>
@@ -344,16 +400,11 @@
                     </table>
                     <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
                 </div>
-
-                <p>
-                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
-                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
-                    in ascending order (hard-to-easy).
-                </p>
-
-                <h4>Results</h4>
-                <p>TODO: Curriculum vs random ordering comparison.</p>
             </section>
+        </section>
+
+        <section id="references">
+            <h2>References</h2>
         </section>
     </article>
 

@@ -1,5 +1,6 @@
 docs/
 eval_results/
+results/
 external/
 **/*.md
 secrets.env
@@ -42,7 +43,7 @@ mini/
 manifests/
 dataset/
 outputs/
-
+results/
 
 gqa/
 

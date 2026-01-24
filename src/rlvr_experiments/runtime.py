@@ -144,14 +144,8 @@ class Runtime:
 
             untracked = [line[3:].strip() for line in status.splitlines() if line.startswith("?? ")]
             (patches_dir / "git_untracked.txt").write_text("\n".join(untracked))
-            if untracked:
-                tar_path = patches_dir / "untracked.tar.gz"
-                with tarfile.open(tar_path, "w:gz") as tar:
-                    for rel_path in untracked:
-                        abs_path = Path(repo_root) / rel_path
-                        if abs_path.exists():
-                            tar.add(abs_path, arcname=rel_path)
-                git_info["untracked_archive"] = str(tar_path)
+            # Skip archiving untracked files - too slow for large dirs like results/, checkpoints/
+            # The list in git_untracked.txt is sufficient for reproducibility
         except Exception as e:
             print(f"[runtime] WARNING: failed to capture git state: {e}")
 

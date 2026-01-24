@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b
+  name: qwen3_17b_gsm8k
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,27 +9,21 @@ tokenizer:
   use_fast: false
 
 training:
-  # No max_steps, no max epoch, just run
-  num_epochs: 2
-  checkpoint_interval: 50
   max_staleness: 0
   abort_in_flight: false
+  checkpoint_interval: 20
 
-  # MATH problems may need longer completions
-  # seq_len_buckets is TOTAL seq length (prompt + completion)
-  # - GSM8K: ~256 prompt + 512 completion = 768
-  # - MATH / IFEval can be longer, just add in buckets of 512 increments
-  seq_len_buckets: [768, 1280]
-  completion_len_buckets: [512, 1024]
+  # GSM8K only - single bucket for 512 token completions
+  # ~256 prompt + 512 completion = 768 total
+  seq_len_buckets: [768]
+  completion_len_buckets: [512]
 
-  prompts_per_rollout_sync: 128
+  prompts_per_rollout_sync: 64
   prompts_per_reference_sync: 9999999
-  prompts_per_optim_step: 128
+  prompts_per_optim_step: 64
   prompts_per_forward_backward: 2
-  # Micro-batch keys must match seq_len_buckets
   completions_per_micro_batch:
     768: 64
-    1280: 16
 
 verifier:
   num_workers: 4
@@ -38,31 +32,22 @@ loss:
   name: drgrpo
   beta: 0.001  # 1e-3
   eps: 0.2
-  C: 500
+  C: 1
 
 data:
-  dataset: mixed
-  datasets:
-    - name: gsm8k
-      split: train
-      weight: 0.5
-    - name: math
-      split: train
-      weight: 0.5
-      level: [3, 4, 5]
-  seed: 42
+  dataset: gsm8k
+  split: train
 
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
-  skip_chat_template: true 
-
+  skip_chat_template: true
 
 sampling:
   temperature: 1.
   top_p: 0.95
   top_k: 20
-  max_tokens: 2048
+  max_tokens: 512
   n: 8
   logprobs: 0
 
@@ -93,7 +78,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00001  
+        lr: 0.0000000000000000001  # 5e-6
         eps: 0.0001
 
       lr_scheduler:
@@ -101,7 +86,7 @@ roles:
         decay_ratio: 0.0
 
       training:
-        seq_len: 2560  # Must match max(seq_len_buckets)
+        seq_len: 768  # Must match max(seq_len_buckets)
         dtype: "float16"
         mixed_precision_param: "float16"
         mixed_precision_reduce: "float32"
@@ -120,7 +105,7 @@ roles:
         initial_load_in_hf: true
         interval: 500
         last_save_model_only: false
-        export_dtype: "float16"
+        export_dtype: "bfloat16"
         async_mode: "disabled"
 
       activation_checkpoint:
@@ -140,7 +125,7 @@ roles:
       max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 2
-      max_model_len: 2561  # seq_len_buckets[-1] + 1 for logprobs
+      max_model_len: 769  # seq_len_buckets[-1] + 1 for logprobs
       gpu_memory_utilization: 0.90
       dtype: "float16"
       logprobs_mode: "raw_logprobs"
@@ -155,8 +140,8 @@ roles:
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 4
-      max_model_len: 2560  # Match max(seq_len_buckets)
+      data_parallel_size: 2
+      max_model_len: 768
       gpu_memory_utilization: 0.90
       dtype: "float16"
       logprobs_mode: "raw_logprobs"
