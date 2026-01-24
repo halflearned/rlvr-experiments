@@ -30,6 +30,21 @@ def _normalize_number(s: str) -> str | None:
 
 
 # Module-level function for subprocess execution (must be picklable)
+def _parse_with_fallback(text: str, extraction_config: list):
+    """Parse text, trying bare LaTeX first, then wrapped in $ delimiters.
+
+    Some datasets provide gold answers as bare LaTeX (e.g., \frac{\pi}{3})
+    without math delimiters. math_verify needs $...$ or \(...\) to parse
+    expressions containing symbols like \pi or \sqrt.
+    """
+    from math_verify import parse
+    result = parse(text, extraction_config=extraction_config)
+    if not result:
+        # Try wrapping in $ delimiters for bare LaTeX
+        result = parse(f"${text}$", extraction_config=extraction_config)
+    return result
+
+
 def _verify_single(response: str, target: str, fallback_extraction: bool = True) -> float:
     """Verify a single response against target. Runs in subprocess.
 
@@ -42,7 +57,7 @@ def _verify_single(response: str, target: str, fallback_extraction: bool = True)
     from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
     try:
         extraction_config = [LatexExtractionConfig(), ExprExtractionConfig()]
-        gold = parse(target, extraction_config=extraction_config)
+        gold = _parse_with_fallback(target, extraction_config)
         answer = parse(response, extraction_config=extraction_config)
 
         # If math_verify couldn't parse response, try fallback extraction

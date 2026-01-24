@@ -337,7 +337,7 @@ def load_math(
             "problem": {
                 "answer": row["solution"],
                 "prompt_id": prompt_id,
-                "verifier_type": "minerva_math",
+                "verifier_type": "math",
                 "dataset_name": "math",
                 "system_prompt": MATH_SYSTEM_PROMPT,
                 "assistant_prefix": MATH_ASSISTANT_PREFIX,
@@ -616,7 +616,8 @@ def load_if_multi_constraints(split: str = "train") -> ray.data.Dataset:
     local_cache = f"/tmp/if_multi_constraints_{split}_cache"
 
     use_local_cache = False
-    if os.path.exists(local_cache):
+    # Check if local cache exists AND has the required files
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
         print(f"[load_if_multi_constraints] Loading from local cache: {local_cache}")
         use_local_cache = True
     else:
@@ -628,8 +629,15 @@ def load_if_multi_constraints(split: str = "train") -> ray.data.Dataset:
                 ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
                 check=True, capture_output=True
             )
-            print(f"[load_if_multi_constraints] Loaded from S3 cache")
-            use_local_cache = True
+            # Verify the download actually got files
+            if os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+                print(f"[load_if_multi_constraints] Loaded from S3 cache")
+                use_local_cache = True
+            else:
+                # S3 sync succeeded but no files - bucket is empty or doesn't exist
+                import shutil
+                shutil.rmtree(local_cache, ignore_errors=True)
+                print(f"[load_if_multi_constraints] S3 cache empty, loading from HuggingFace Hub")
         except Exception as e:
             print(f"[load_if_multi_constraints] S3 cache not available ({e}), loading from HuggingFace Hub")
 
