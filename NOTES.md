@@ -1402,11 +1402,213 @@ The format drift is a feature, not a bug - the model optimized exactly what we r
 - Eval results: `eval_results/repro_watch/qwen3_17b_gsm8k_only_20260123_021337_step*/`
 
 
+---
+
+## 2026-01-24: MATH Training Success (GRPO, Base Model)
+
+### Summary
+
+Successful GRPO training on the MATH dataset with Qwen3-1.7B-Base. Using our MATH verifier (which does symbolic equivalence checking), the model improved from **30.24% → 44.76%** (+14.5 percentage points) after just 80 steps.
+
+### Configuration
+
+**Config**: `configs/qwen3-1.7B-math-grpo.yaml`
+
+```yaml
+model: Qwen3-1.7B-Base
+dataset: math (train split)
+loss: grpo (std-normalized advantages, per-response length normalization)
+lr: 5e-6
+beta: 0.001
+n: 8 completions per prompt
+prompts_per_optim_step: 128
+skip_chat_template: true
+```
+
+### Evaluation Method
+
+Ran `hendrycks_math` 0-shot with `--log_samples` and `max_gen_toks=2048`, then verified outputs with our `MathVerifier` (which does `\boxed{}` extraction + sympy symbolic equivalence).
+
+Note: The lm_eval `hendrycks_math exact_match` metric only shows ~0.7-0.9% for both models because it uses strict string matching. Our verifier captures the true mathematical correctness.
+
+### Results
+
+| Model | hendrycks_math exact_match | Our MATH Verifier |
+|-------|---------------------------|-------------------|
+| **Qwen3-1.7B-Base** | 0.88% | **30.24%** |
+| **GRPO step80** | 0.70% | **44.76%** |
+| **Improvement** | -0.18% | **+14.52%** |
+
+### Key Takeaways
+
+1. **MATH training works** - Clear improvement in mathematical reasoning after 80 steps
+2. **Verifier choice matters** - lm_eval's exact_match is misleading; need symbolic equivalence checking
+3. **Format drift** - exact_match slightly decreased because the model may be using different formatting, but mathematical correctness improved substantially
+4. **Consistent with GSM8K results** - Similar pattern to our GSM8K success where the model learns the task but may drift on format
+
+### Files
+
+- Config: `configs/qwen3-1.7B-math-grpo.yaml`
+- Trace: `traces/trace_20260123_233245.jsonl`
+- Checkpoint: `checkpoints/qwen3_17b_20260123_233245_step80/`
+- Eval results: `eval_results/grpo_step80_math_0shot/`
+
+---
+
+---
+
+## 2026-01-24: IF_multi_constraints Pass@k Evaluation (Base Model)
+
+### Summary
+
+Evaluated Qwen3-1.7B-Base on 100 randomly sampled prompts from the `IF_multi_constraints_upto5` dataset. Each prompt has 2-5 constraints that must be satisfied. Generated 32 completions per prompt using vLLM.
+
+### Verifier Behavior
+
+The `IFMultiConstraintsVerifier` returns **average constraint satisfaction** (not all-or-nothing):
+```python
+return sum(rewards) / len(rewards)  # e.g., 3/5 constraints = 0.6
+```
+
+This provides a smoother training signal since the model gets partial credit for each satisfied constraint.
+
+### Results
+
+| Metric | Value |
+|--------|-------|
+| **Average Reward (pass@1)** | **24.24%** |
+| pass@2 | 36.60% |
+| pass@4 | 50.52% |
+| pass@8 | 62.44% |
+| pass@16 | 70.85% |
+| pass@32 | 81.00% |
+
+### Additional Statistics
+
+- Problems with at least 1 completion scoring > 0: 81/100 (81%)
+- Problems with all 32 completions perfect (1.0): 1/100 (1%)
+- All 100 samples had constraint_type = "multi" (multi-constraint prompts)
+
+### Comparison: All-or-Nothing vs Average Constraint Satisfaction
+
+Initially tested with all-or-nothing scoring (return 1.0 only if ALL constraints pass):
+
+| Metric | All-or-Nothing | Average Constraint |
+|--------|----------------|-------------------|
+| Average Reward | 8.62% | **24.24%** |
+| pass@32 | 25.00% | **81.00%** |
+
+The average constraint satisfaction metric is more informative for RL training since:
+1. Provides gradient signal even when not all constraints are met
+2. More stable learning (fewer 0-reward samples)
+3. Better measures incremental progress
+
+### Constraint Types
+
+All 100 samples were labeled as "multi" constraint type, meaning they contain multiple instruction-following constraints (e.g., word count limits, keyword inclusion, formatting requirements, etc.).
+
+### Files
+
+- Eval script: `scripts/adhoc/if_multi_constraints_passk_eval.py`
+- Aggregation script: `scripts/adhoc/compute_if_multi_constraints_passk.py`
+- Launch script: `scripts/adhoc/launch_if_multi_constraints_eval.sh`
+- Results: `experiments/if_multi_constraints_passk/aggregated_results.json`
+
+---
+
+---
+
+## 2026-01-24: DrGRPO Learning Rate Sweep (GSM8K + MATH)
+
+### Summary
+
+Ran 4 SageMaker jobs testing different learning rates for DrGRPO training on GSM8K + MATH mixed dataset (50/50 split). **Conclusion: lr=5e-5 was too aggressive (model collapsed), but lr=1e-5 and lower showed no improvement in training rewards.**
+
+### Configuration
+
+All jobs used the same base config with different learning rates:
+- **Model**: Qwen3-1.7B-Base
+- **Dataset**: GSM8K (50%) + MATH L3-5 (50%)
+- **Loss**: DrGRPO (beta=0.001, eps=0.2, C=500)
+- **Training**: 2 epochs, checkpoint every 50 steps
+- **Sampling**: n=8 completions, temperature=1.0, top_p=0.95
+
+### Jobs Submitted
+
+| LR | Job Name | Status |
+|----|----------|--------|
+| 5e-5 | annotations-adhoc-20260124-082656 | Completed (collapsed) |
+| 1e-5 | annotations-adhoc-20260124-090413 | Completed (resubmit) |
+| 5e-6 | annotations-adhoc-20260124-082714 | Completed |
+| 1e-6 | annotations-adhoc-20260124-082724 | Completed |
+
+### Checkpoints Available
+
+**Only lr=5e-5 saved checkpoints to S3** (step50, step100, final). The other three jobs completed but only have trace files - no model checkpoints were saved.
+
+### Evaluation Results (lr=5e-5, GSM8K Pass@1)
+
+Used `scripts/test_gsm8k_pass_rate.py` with our MathVerifier (100 samples, greedy decoding):
+
+| Checkpoint | Pass@1 | Median completion length (incorrect) |
+|------------|--------|--------------------------------------|
+| Step 50 | **34%** | 1 token |
+| Step 100 | 8% | 1 token |
+| Final | 4.64% | 1 token |
+
+**Reference**: Base model should get ~54% pass@1 on GSM8K with our verifier.
+
+### Analysis
+
+**lr=5e-5 (too aggressive)**:
+- Model collapsed during training
+- Trace shows grad_norm spiking to 148 late in training
+- Mode collapse: median completion length of 1 token for incorrect responses
+- Step 50 (34%) was best but still below baseline (54%)
+
+**lr=1e-5, 5e-6, 1e-6 (too conservative)**:
+- Traces show flat or declining training rewards
+- No checkpoints saved to evaluate
+- Training likely too slow to see improvement within 2 epochs
+
+### Trace Files
+
+All trace files downloaded to `traces/`:
+
+| LR | Trace File |
+|----|------------|
+| 5e-5 | `drgrpo_lr5e5_trace.jsonl` (273MB) |
+| 1e-5 | `drgrpo_lr1e5_trace.jsonl` (182MB) |
+| 5e-6 | `drgrpo_lr5e6_trace.jsonl` (169MB) |
+| 1e-6 | `drgrpo_lr1e6_trace.jsonl` (165MB) |
+
+### Conclusions
+
+1. **lr=5e-5 is too high** - Causes training instability and model collapse
+2. **lr=1e-6 to 1e-5 may be too low** - No visible improvement in training rewards
+3. **Sweet spot likely between 1e-5 and 5e-5** - Need to test intermediate values (e.g., 2e-5, 3e-5)
+4. **DrGRPO may need different hyperparameters than GRPO** - The C=500 clipping and other DrGRPO-specific parameters may interact differently with learning rate
+
+### Next Steps
+
+- Try intermediate learning rates (2e-5, 3e-5)
+- Ensure checkpoints are saved for all runs
+- Consider longer training (more epochs) with lower learning rates
+- Analyze trace files to understand training dynamics at each LR
+
+### Files
+
+- Configs: `configs/variations/qwen3-1.7B-gsm8k-math-drgrpo-lr{5e5,1e5,5e6,1e6}.yaml`
+- Checkpoints: `/efs/rlvr-experiments/checkpoints/drgrpo_lr5e5/` (step50, step100, final)
+- Job log: `docs/job_log.md`
+
+---
+
 ### TODOS
 
 FRIDAY:
-- Dr GRPO implementation / confirm it works
-- Non-GSM8k datasets
+- ~~Dr GRPO implementation / confirm it works~~ ✅ Done (configurable via `loss.name: drgrpo` or `loss.name: grpo`)
+- ~~Non-GSM8k datasets~~ ✅ Done (MATH working)
 - Add entropy computation
 
 SATURDAY:

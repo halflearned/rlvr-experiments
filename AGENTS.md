@@ -47,6 +47,10 @@ ssh ubuntu@172.31.17.116 "cd /efs/rlvr-experiments && ./scripts/evaluation/launc
 
 ## General Guidelines
 
+### Training Config Variables - DO NOT SUGGEST CHANGES
+
+**NEVER suggest changing `max_staleness`.** This is a key experimental variable being ablated. If a run fails due to sync issues, the problem is the sync mechanism itself - not the staleness setting. Diagnose the actual root cause (e.g., vLLM workers dying, sync timing issues) rather than suggesting config workarounds.
+
 ### User Communication - TRUST THE USER
 
 When the user says something is stuck, BELIEVE THEM. They have been staring at it for several minutes before telling you. Take IMMEDIATE action - kill the process, check logs, investigate. Do not waste time with "let me check if it's growing" - if the user says it's stuck, it's stuck.
@@ -122,6 +126,25 @@ Example:
 ```bash
 lm_eval --model vllm ... 2>&1 | tee /tmp/eval_gsm8k_base.log
 ```
+
+### Run Artifacts (train_grpo)
+Training runs create a self-contained run folder at startup:
+
+- **Location**:
+  - SageMaker: `$SM_MODEL_DIR/<config_stem>_<YYYYMMDD-HHMMSS>/`
+  - Local: `results/<config_stem>_<YYYYMMDD-HHMMSS>/`
+- **Structure**:
+  - `config.yaml` (exact config used)
+  - `RESULTS.md` (notes scratchpad)
+  - `run.json` (metadata: host, timestamps, git info, etc.)
+  - `patches/` (`git_status.txt`, `git_diff.patch`, `git_diff_cached.patch`, `git_untracked.txt`, optional `untracked.tar.gz`)
+  - `traces/` (`trace.jsonl`, `samples.jsonl`, `rollouts.jsonl`)
+  - `checkpoints/` (all checkpoints for this run)
+
+Notes:
+- Trace/rollout files no longer include timestamps in their filenames; the run folder itself is unique.
+- `RLVR_RUN_DIR` is set internally so checkpoints/traces route into this folder.
+- Existing S3 uploads for traces/rollouts continue unchanged.
 
 ### Package Management
 - Use `uv add <package>` to add dependencies (updates pyproject.toml)

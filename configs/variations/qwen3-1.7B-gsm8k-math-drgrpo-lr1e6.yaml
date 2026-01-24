@@ -1,11 +1,11 @@
 run:
-  name: qwen3_17b
+  name: drgrpo_lr1e6
 
 model:
-  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  path: "Qwen/Qwen3-1.7B-Base"
 
 tokenizer:
-  pretrained_model_name_or_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  pretrained_model_name_or_path: "Qwen/Qwen3-1.7B-Base"
   use_fast: false
 
 training:
@@ -19,8 +19,8 @@ training:
   # seq_len_buckets is TOTAL seq length (prompt + completion)
   # - GSM8K: ~256 prompt + 512 completion = 768
   # - MATH / IFEval can be longer, just add in buckets of 512 increments
-  seq_len_buckets: [768, 1280, 1536, 2048, 2560]
-  completion_len_buckets: [512, 1024, 1536, 2048]
+  seq_len_buckets: [768, 1280]
+  completion_len_buckets: [512, 1024]
 
   prompts_per_rollout_sync: 128
   prompts_per_reference_sync: 9999999
@@ -30,9 +30,6 @@ training:
   completions_per_micro_batch:
     768: 64
     1280: 16
-    1536: 8
-    2048: 4  # TODO: could this be 8? 
-    2560: 4
 
 verifier:
   num_workers: 4
@@ -41,15 +38,24 @@ loss:
   name: drgrpo
   beta: 0.001  # 1e-3
   eps: 0.2
-  C: 50
+  C: 500
 
 data:
-  dataset: if_multi_constraints
+  dataset: mixed
+  datasets:
+    - name: gsm8k
+      split: train
+      weight: 0.5
+    - name: math
+      split: train
+      weight: 0.5
+      level: [3, 4, 5]
+  seed: 42
 
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
-  skip_chat_template: true 
+  skip_chat_template: true
 
 
 sampling:
@@ -83,11 +89,11 @@ roles:
       model:
         name: "qwen3"
         flavor: "1.7B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+        hf_assets_path: "Qwen/Qwen3-1.7B-Base"
 
       optimizer:
         name: "AdamW"
-        lr: 0.00001  
+        lr: 0.000001
         eps: 0.0001
 
       lr_scheduler:
@@ -129,7 +135,7 @@ roles:
   - name: reference
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "Qwen/Qwen3-1.7B-Base"
       max_concurrent_per_replica: 32
       max_num_seqs: 256
       tensor_parallel_size: 1
@@ -145,7 +151,7 @@ roles:
   - name: rollout
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "Qwen/Qwen3-1.7B-Base"
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
