@@ -137,6 +137,22 @@ def submit_job(
         train_gpus: GPUs for training (default: "0,1,2,3,4,5")
         eval_gpus: GPUs for evaluation (default: "6,7")
     """
+    # Convert config paths to relative paths (SageMaker extracts source to /opt/ml/code/)
+    def make_relative(path: str | None) -> str | None:
+        if path is None:
+            return None
+        p = Path(path)
+        if p.is_absolute():
+            try:
+                return str(p.relative_to(PROJECT_DIR))
+            except ValueError:
+                # Path is not under PROJECT_DIR, use as-is
+                return path
+        return path
+
+    config = make_relative(config)
+    eval_config = make_relative(eval_config)
+
     local_uri = f"{DEFAULT_IMAGE_NAME}:{image_tag or datetime.now().strftime('%Y%m%d')}"
     remote_uri = get_image_uri(tag=image_tag, build=build, push=push)
 

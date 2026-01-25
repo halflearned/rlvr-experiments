@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 34');
+console.log('[heartbeat.js] Script loaded, version 38');
 
 class HeartbeatViz {
     constructor() {
@@ -119,6 +119,9 @@ class HeartbeatViz {
             const file = e.target.files[0];
             if (file) this.loadFile(file);
         });
+
+        // Setup trace selector
+        this.setupTraceSelector();
 
         // Setup canvases
         this.setupCanvases();
@@ -448,6 +451,294 @@ class HeartbeatViz {
                 });
             }
         });
+    }
+
+    setupTraceSelector() {
+        const btn = document.getElementById('trace-selector-btn');
+        const dropdown = document.getElementById('trace-dropdown');
+        const currentTraceName = document.getElementById('current-trace-name');
+
+        if (!btn || !dropdown) return;
+
+        // Favorites loaded from server on each dropdown open
+        this.traceFavorites = new Set();
+
+        // Toggle dropdown on button click
+        btn.addEventListener('click', async () => {
+            const isOpen = dropdown.classList.contains('open');
+            if (isOpen) {
+                dropdown.classList.remove('open');
+            } else {
+                // Fetch available traces and populate dropdown
+                await this.populateTraceDropdown();
+                dropdown.classList.add('open');
+            }
+        });
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!btn.contains(e.target) && !dropdown.contains(e.target)) {
+                dropdown.classList.remove('open');
+            }
+        });
+
+        // Update current trace name from /trace/info
+        this.updateCurrentTraceName();
+    }
+
+    async updateCurrentTraceName() {
+        const currentTraceName = document.getElementById('current-trace-name');
+        if (!currentTraceName) return;
+
+        try {
+            const response = await fetch('/trace/info');
+            if (response.ok) {
+                const info = await response.json();
+                if (info.path) {
+                    // Show just the filename or last part of path
+                    const parts = info.path.split('/');
+                    currentTraceName.textContent = parts.slice(-2).join('/');
+                    currentTraceName.title = info.path;  // Full path on hover
+                }
+            }
+        } catch (e) {
+            console.log('[updateCurrentTraceName] Failed:', e);
+        }
+    }
+
+    async populateTraceDropdown() {
+        const dropdown = document.getElementById('trace-dropdown');
+        if (!dropdown) return;
+
+        dropdown.innerHTML = '<div class="trace-dropdown-item">Loading...</div>';
+
+        try {
+            // Fetch favorites, current trace info, and traces list in parallel
+            const [favResponse, infoResponse, response] = await Promise.all([
+                fetch('/favorites'),
+                fetch('/trace/info'),
+                fetch('/traces')
+            ]);
+
+            // Load favorites from server
+            if (favResponse.ok) {
+                const favList = await favResponse.json();
+                this.traceFavorites = new Set(favList);
+            }
+
+            const info = infoResponse.ok ? await infoResponse.json() : {};
+            const currentPath = info.path || '';
+
+            if (!response.ok) {
+                dropdown.innerHTML = '<div class="trace-dropdown-item">Failed to load traces</div>';
+                return;
+            }
+
+            const traces = await response.json();
+            if (traces.length === 0) {
+                dropdown.innerHTML = '<div class="trace-dropdown-item">No traces found</div>';
+                return;
+            }
+
+            dropdown.innerHTML = '';
+
+            // Add path input field at the top
+            const inputDiv = document.createElement('div');
+            inputDiv.className = 'trace-path-input';
+            inputDiv.innerHTML = `
+                <input type="text" id="trace-path-manual" placeholder="Enter server path, e.g. results/run_123/traces/trace.jsonl">
+                <button id="trace-path-load">Load</button>
+            `;
+            dropdown.appendChild(inputDiv);
+
+            // Handle manual path input
+            const pathInput = inputDiv.querySelector('#trace-path-manual');
+            const loadBtn = inputDiv.querySelector('#trace-path-load');
+
+            const loadManualPath = () => {
+                const path = pathInput.value.trim();
+                if (path) this.switchTrace(path);
+            };
+
+            loadBtn.addEventListener('click', loadManualPath);
+            pathInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') loadManualPath();
+            });
+
+            // Prevent dropdown from closing when clicking input
+            inputDiv.addEventListener('click', (e) => e.stopPropagation());
+
+            // Split traces into favorites and others
+            const favorites = traces.filter(t => this.traceFavorites.has(t.path));
+            const others = traces.filter(t => !this.traceFavorites.has(t.path));
+
+            // Helper to create a trace item
+            const createTraceItem = (trace) => {
+                const item = document.createElement('div');
+                item.className = 'trace-dropdown-item';
+                if (trace.path === currentPath) {
+                    item.classList.add('active');
+                }
+
+                const isFavorite = this.traceFavorites.has(trace.path);
+
+                // Format the path (show relative path)
+                const pathParts = trace.path.split('/');
+                const displayPath = pathParts.slice(-3).join('/');
+
+                // Format size and time
+                const sizeMB = (trace.size / (1024 * 1024)).toFixed(1);
+                const date = new Date(trace.mtime * 1000);
+                const timeStr = date.toLocaleString();
+
+                item.innerHTML = `
+                    <div class="trace-row">
+                        <button class="favorite-btn ${isFavorite ? 'is-favorite' : ''}" title="${isFavorite ? 'Remove from favorites' : 'Add to favorites'}">
+                            ${isFavorite ? '★' : '☆'}
+                        </button>
+                        <div class="trace-info">
+                            <div class="trace-path">${displayPath}</div>
+                            <div class="trace-meta">${sizeMB} MB · ${timeStr}</div>
+                        </div>
+                    </div>
+                `;
+
+                // Handle favorite toggle
+                const favBtn = item.querySelector('.favorite-btn');
+                favBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await this.toggleFavorite(trace.path);
+                    // Refresh dropdown
+                    this.populateTraceDropdown();
+                });
+
+                // Handle trace selection (click on item, not the star)
+                item.addEventListener('click', (e) => {
+                    if (!e.target.closest('.favorite-btn')) {
+                        this.switchTrace(trace.path);
+                    }
+                });
+
+                return item;
+            };
+
+            // Add favorites section if there are any
+            if (favorites.length > 0) {
+                const favHeader = document.createElement('div');
+                favHeader.className = 'trace-section-header';
+                favHeader.textContent = 'Favorites';
+                dropdown.appendChild(favHeader);
+
+                for (const trace of favorites) {
+                    dropdown.appendChild(createTraceItem(trace));
+                }
+            }
+
+            // Add recent traces section
+            if (others.length > 0) {
+                const recentHeader = document.createElement('div');
+                recentHeader.className = 'trace-section-header';
+                recentHeader.textContent = favorites.length > 0 ? 'Recent' : 'Available Traces';
+                dropdown.appendChild(recentHeader);
+
+                for (const trace of others) {
+                    dropdown.appendChild(createTraceItem(trace));
+                }
+            }
+        } catch (e) {
+            console.error('[populateTraceDropdown] Failed:', e);
+            dropdown.innerHTML = '<div class="trace-dropdown-item">Error loading traces</div>';
+        }
+    }
+
+    async toggleFavorite(path) {
+        const isFavorite = this.traceFavorites.has(path);
+        const endpoint = isFavorite ? '/favorites/remove' : '/favorites/add';
+
+        try {
+            const response = await fetch(`${endpoint}?path=${encodeURIComponent(path)}`, {
+                method: 'POST'
+            });
+            if (response.ok) {
+                if (isFavorite) {
+                    this.traceFavorites.delete(path);
+                } else {
+                    this.traceFavorites.add(path);
+                }
+                console.log(`[toggleFavorite] ${path} is now ${this.traceFavorites.has(path) ? 'favorited' : 'unfavorited'}`);
+            }
+        } catch (e) {
+            console.error('[toggleFavorite] Failed:', e);
+        }
+    }
+
+    async switchTrace(path) {
+        const dropdown = document.getElementById('trace-dropdown');
+        if (dropdown) dropdown.classList.remove('open');
+
+        console.log(`[switchTrace] Switching to: ${path}`);
+
+        try {
+            const response = await fetch(`/reload?path=${encodeURIComponent(path)}`);
+            if (!response.ok) {
+                const text = await response.text();
+                console.error(`[switchTrace] Failed: ${text}`);
+                alert(`Failed to switch trace: ${text}`);
+                return;
+            }
+
+            // Reset all state and reload
+            this.resetState();
+            await this.loadDefaultTrace();
+            this.updateCurrentTraceName();
+
+        } catch (e) {
+            console.error('[switchTrace] Error:', e);
+            alert(`Error switching trace: ${e.message}`);
+        }
+    }
+
+    resetState() {
+        // Reset all visualization state for a fresh load
+        this.data = null;
+        this.events = [];
+        this.minTs = 0;
+        this.maxTs = 0;
+
+        // Reset lazy loading state
+        this.spansLoaded = false;
+        this.spansOffset = 0;
+        this.hasMoreSpans = true;
+        this.bufferLoaded = false;
+        this.bufferOffset = 0;
+        this.hasMoreBuffer = true;
+
+        // Reset metrics
+        for (const key in this.metrics) {
+            this.metrics[key] = [];
+        }
+
+        // Reset histograms
+        for (const key in this.histograms) {
+            this.histograms[key].fill(0);
+        }
+
+        // Reset other data structures
+        this.rewardVsLen = [];
+        this.lagBreakdown = [];
+        this.datasetBreakdown = [];
+        this.tokenBreakdown = [];
+        this.completionLenQuantiles = {};
+
+        // Reset zoom
+        this.metricZoom = {};
+        this.timeZoom = { xMin: 0, xMax: 1 };
+        this.fatesScrollOffset = 0;
+
+        // Clear timeline spans
+        this.timelineSpans = [];
+
+        console.log('[resetState] State reset complete');
     }
 
     async loadDefaultTrace() {

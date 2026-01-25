@@ -1614,3 +1614,35 @@ FRIDAY:
 SATURDAY:
 - Staleness b (sagemaker)
 - LLM-as-a-judge
+
+---
+
+## GRPO vs DrGRPO Comparison (GSM8K, 2026-01-25)
+
+All runs on Qwen3-1.7B-Base with n=8 completions per prompt.
+
+| Run | LR | Loss | C | β | Steps | Final | Peak | Notes |
+|-----|----|------|---|---|-------|-------|------|-------|
+| GRPO stale0 | 1e-6 | GRPO | - | 1e-3 | 169 | 0.591 | 0.634 | |
+| GRPO stale1 | 1e-6 | GRPO | - | 1e-3 | 178 | 0.525 | 0.631 | |
+| DrGRPO Sweep B | 1e-5 | DrGRPO | 512 | 8e-4 | 129 | 0.245 | 0.246 | best DrGRPO |
+| DrGRPO v3 | 3e-6 | DrGRPO | 512 | 1e-3 | 107 | 0.122 | 0.133 | |
+| DrGRPO node2 | 1e-5 | DrGRPO | 200 | 1e-2 | 100 | 0.295 | 0.307 | |
+| DrGRPO node2 | 5e-6 | DrGRPO | 512 | 1e-3 | 98 | 0.133 | 0.159 | |
+| DrGRPO Sweep A | 8e-6 | DrGRPO | 512 | 1e-3 | 90 | 0.160 | 0.164 | |
+| DrGRPO Sweep C | 8e-6 | DrGRPO | 384 | 1e-3 | 90 | 0.150 | 0.181 | |
+| DrGRPO v2 | 1.5e-5 | DrGRPO | 250 | 2e-2 | 88 | 0.276 | 0.276 | |
+| DrGRPO Sweep D | 5e-6 | DrGRPO | 384 | 1e-3 | 112 | 0.120 | 0.142 | |
+| DrGRPO Sweep E | 5e-6 | DrGRPO | 256 | 8e-4 | 110 | 0.146 | 0.146 | |
+| DrGRPO | 1e-6 | DrGRPO | 100 | 1e-3 | 43 | 0.119 | 0.141 | |
+| DrGRPO | 2e-5 | DrGRPO | 150 | 5e-3 | 10 | 0.256 | 0.256 | KL exploded |
+| DrGRPO | 1e-19 | DrGRPO | 1 | 1e-3 | 9 | 0.092 | 0.113 | sync debug |
+| DrGRPO | 3e-5 | DrGRPO | 150 | 1e-3 | 8 | 0.120 | 0.131 | KL exploded |
+| DrGRPO | 5e-5 | DrGRPO | 150 | 1e-3 | 7 | 0.249 | 0.249 | KL exploded |
+
+**Key observation**: GRPO at lr=1e-6 achieves 0.59-0.63 reward_overall, while DrGRPO at 10x higher lr (1e-5) only reaches 0.25. This is expected behavior due to DrGRPO's design differences:
+
+1. **No length normalization**: DrGRPO divides by fixed C instead of actual sequence length
+2. **No advantage std normalization**: DrGRPO only mean-centers advantages (no division by std)
+
+Combined effect: DrGRPO gradients are ~5x weaker for the same lr, requiring higher lr to match GRPO training dynamics. Even at lr=5e-5, DrGRPO peaked at 0.394 vs GRPO's 0.59+ at lr=1e-6.

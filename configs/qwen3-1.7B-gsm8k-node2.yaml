@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k
+  name: qwen3_17b_gsm8k_node2_v2
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -30,9 +30,9 @@ verifier:
 
 loss:
   name: drgrpo
-  beta: 0.005 
+  beta: 0.001  # Match successful GRPO run
   eps: 0.2
-  C: 150
+  C: 512       # High clipping threshold
 
 data:
   dataset: gsm8k
@@ -78,7 +78,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00002  # 5e-6
+        lr: 0.000005  # 5e-6 (slightly higher than v3's 3e-6)
         eps: 0.0001
 
       lr_scheduler:

@@ -20,6 +20,26 @@ import os
 import sys
 from urllib.parse import urlparse, parse_qs
 
+# Server-side favorites file
+FAVORITES_FILE = os.path.join(os.path.dirname(__file__), ".trace_favorites.json")
+
+
+def load_favorites():
+    """Load favorites from disk."""
+    if os.path.exists(FAVORITES_FILE):
+        try:
+            with open(FAVORITES_FILE, "r") as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, IOError):
+            pass
+    return set()
+
+
+def save_favorites(favorites):
+    """Save favorites to disk."""
+    with open(FAVORITES_FILE, "w") as f:
+        json.dump(list(favorites), f, indent=2)
+
 def find_latest_trace(traces_dir="traces"):
     """Find the most recently modified trace file."""
     pattern = os.path.join(traces_dir, "trace_*.jsonl")
@@ -92,21 +112,46 @@ def parse_args():
 args = parse_args()
 PORT = args.port
 
+# Mutable state for hot-reloading traces
+class TraceState:
+    trace_file = None
+    rollout_file = None
+
 # Find trace file
 if args.trace_file:
-    TRACE_FILE = args.trace_file
+    TraceState.trace_file = args.trace_file
 else:
-    TRACE_FILE = find_latest_trace()
+    TraceState.trace_file = find_latest_trace()
 
-if TRACE_FILE and not os.path.exists(TRACE_FILE):
-    print(f"Error: Trace file not found: {TRACE_FILE}")
+if TraceState.trace_file and not os.path.exists(TraceState.trace_file):
+    print(f"Error: Trace file not found: {TraceState.trace_file}")
     sys.exit(1)
 
 # Find corresponding rollout file
-ROLLOUT_FILE = find_rollout_file(TRACE_FILE)
+TraceState.rollout_file = find_rollout_file(TraceState.trace_file)
 
 # Change to project root so trace files are accessible
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def list_trace_files(traces_dir="traces"):
+    """List all trace files in a directory, sorted by modification time (newest first)."""
+    # Look in various locations for trace files
+    patterns = [
+        os.path.join(traces_dir, "trace*.jsonl"),
+        os.path.join(traces_dir, "*trace*.jsonl"),  # e.g., sweep_B_trace.jsonl
+        os.path.join("results", "*", "traces", "trace*.jsonl"),
+        os.path.join("results", "*", "traces", "*trace*.jsonl"),
+        os.path.join("results", "*", "*trace*.jsonl"),  # e.g., results/sweep_traces/sweep_B_trace.jsonl
+    ]
+    files = []
+    for pattern in patterns:
+        files.extend(glob.glob(pattern))
+    # Dedupe (in case multiple patterns match same file)
+    files = list(set(files))
+    # Sort by modification time, newest first
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -120,7 +165,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         #   (no filter)      - Full trace (legacy, slow for large files)
         parsed = urlparse(self.path)
         if parsed.path == "/trace":
-            if TRACE_FILE and os.path.exists(TRACE_FILE):
+            if TraceState.trace_file and os.path.exists(TraceState.trace_file):
                 query = parse_qs(parsed.query)
                 filter_type = query.get("filter", [None])[0]
 
@@ -132,7 +177,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if filter_type == "metrics":
                     # Send counter and meta events (small), skip spans and buffer
                     # Buffer events are fetched separately with ?filter=buffer
-                    with open(TRACE_FILE, "r") as f:
+                    with open(TraceState.trace_file, "r") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
@@ -149,7 +194,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     limit = int(query.get("limit", [5000])[0])
                     buffer_count = 0
                     sent_count = 0
-                    with open(TRACE_FILE, "r") as f:
+                    with open(TraceState.trace_file, "r") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
@@ -168,7 +213,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     limit = int(query.get("limit", [50000])[0])
                     span_count = 0
                     sent_count = 0
-                    with open(TRACE_FILE, "r") as f:
+                    with open(TraceState.trace_file, "r") as f:
                         for line in f:
                             line = line.strip()
                             if not line:
@@ -182,7 +227,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                 span_count += 1
                 else:
                     # Full trace (legacy)
-                    with open(TRACE_FILE, "rb") as f:
+                    with open(TraceState.trace_file, "rb") as f:
                         self.wfile.write(f.read())
             else:
                 self.send_error(404, "No trace file configured")
@@ -195,12 +240,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             info = {
-                "path": TRACE_FILE,
-                "exists": TRACE_FILE and os.path.exists(TRACE_FILE),
+                "path": TraceState.trace_file,
+                "exists": TraceState.trace_file and os.path.exists(TraceState.trace_file),
             }
             if info["exists"]:
-                info["size"] = os.path.getsize(TRACE_FILE)
-                info["mtime"] = os.path.getmtime(TRACE_FILE)
+                info["size"] = os.path.getsize(TraceState.trace_file)
+                info["mtime"] = os.path.getmtime(TraceState.trace_file)
             self.wfile.write(json.dumps(info).encode())
             return
 
@@ -215,7 +260,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing prompt_id parameter")
                 return
 
-            record = lookup_rollout(ROLLOUT_FILE, prompt_id, version)
+            record = lookup_rollout(TraceState.rollout_file, prompt_id, version)
             if record:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -226,7 +271,115 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, f"Rollout not found for prompt_id={prompt_id}")
             return
 
+        # Serve /traces to list available trace files
+        if parsed.path == "/traces":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            traces = list_trace_files()
+            # Include metadata for each trace
+            result = []
+            for path in traces[:50]:  # Limit to 50 most recent
+                try:
+                    stat = os.stat(path)
+                    result.append({
+                        "path": path,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    })
+                except OSError:
+                    continue
+            self.wfile.write(json.dumps(result).encode())
+            return
+
+        # Serve /reload?path=... to switch to a different trace file
+        if parsed.path == "/reload":
+            query = parse_qs(parsed.query)
+            new_path = query.get("path", [None])[0]
+
+            if not new_path:
+                self.send_error(400, "Missing path parameter")
+                return
+
+            if not os.path.exists(new_path):
+                self.send_error(404, f"Trace file not found: {new_path}")
+                return
+
+            # Update the trace state
+            TraceState.trace_file = new_path
+            TraceState.rollout_file = find_rollout_file(new_path)
+
+            print(f"[reload] Switched to: {new_path}")
+            if TraceState.rollout_file:
+                print(f"[reload] Rollout file: {TraceState.rollout_file}")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "trace_file": TraceState.trace_file,
+                "rollout_file": TraceState.rollout_file,
+            }).encode())
+            return
+
+        # Serve /favorites to get/set favorite traces (server-side persistence)
+        if parsed.path == "/favorites":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            favorites = load_favorites()
+            self.wfile.write(json.dumps(list(favorites)).encode())
+            return
+
         return super().do_GET()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+
+        # POST /favorites/add?path=... to add a favorite
+        if parsed.path == "/favorites/add":
+            query = parse_qs(parsed.query)
+            path = query.get("path", [None])[0]
+            if not path:
+                self.send_error(400, "Missing path parameter")
+                return
+
+            favorites = load_favorites()
+            favorites.add(path)
+            save_favorites(favorites)
+            print(f"[favorites] Added: {path}")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "favorites": list(favorites)}).encode())
+            return
+
+        # POST /favorites/remove?path=... to remove a favorite
+        if parsed.path == "/favorites/remove":
+            query = parse_qs(parsed.query)
+            path = query.get("path", [None])[0]
+            if not path:
+                self.send_error(400, "Missing path parameter")
+                return
+
+            favorites = load_favorites()
+            favorites.discard(path)
+            save_favorites(favorites)
+            print(f"[favorites] Removed: {path}")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "favorites": list(favorites)}).encode())
+            return
+
+        self.send_error(404, "Not found")
 
     def end_headers(self):
         # Enable CORS for local development
@@ -234,13 +387,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
 print(f"Serving RLVR Heartbeat at http://localhost:{PORT}/viz/")
-if TRACE_FILE:
-    print(f"Trace file: {TRACE_FILE}")
+if TraceState.trace_file:
+    print(f"Trace file: {TraceState.trace_file}")
     print(f"  Available at http://localhost:{PORT}/trace")
 else:
     print("No trace file found - use 'Load trace' button in UI")
-if ROLLOUT_FILE:
-    print(f"Rollout file: {ROLLOUT_FILE}")
+if TraceState.rollout_file:
+    print(f"Rollout file: {TraceState.rollout_file}")
     print(f"  Available at http://localhost:{PORT}/rollout?prompt_id=...")
 print("Press Ctrl+C to stop")
 

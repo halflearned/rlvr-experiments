@@ -355,6 +355,170 @@
             background: #30363d;
         }
 
+        /* Trace selector dropdown */
+        .trace-selector {
+            position: relative;
+            margin-right: 12px;
+        }
+
+        .trace-selector-btn {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .trace-selector-btn:hover {
+            background: #30363d;
+        }
+
+        .trace-selector-btn .current-trace {
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #58a6ff;
+        }
+
+        .trace-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 4px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            min-width: 400px;
+            max-height: 400px;
+            overflow-y: auto;
+            z-index: 1000;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+
+        .trace-dropdown.open {
+            display: block;
+        }
+
+        .trace-dropdown-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #21262d;
+            font-size: 12px;
+        }
+
+        .trace-dropdown-item:hover {
+            background: #21262d;
+        }
+
+        .trace-dropdown-item:last-child {
+            border-bottom: none;
+        }
+
+        .trace-dropdown-item .trace-path {
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #58a6ff;
+            margin-bottom: 2px;
+        }
+
+        .trace-dropdown-item .trace-meta {
+            color: #8b949e;
+            font-size: 11px;
+        }
+
+        .trace-dropdown-item.active {
+            background: #1f6feb20;
+        }
+
+        .trace-dropdown-item.active .trace-path {
+            color: #79c0ff;
+        }
+
+        .trace-path-input {
+            padding: 8px 12px;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            gap: 6px;
+        }
+
+        .trace-path-input input {
+            flex: 1;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 6px 8px;
+            color: #c9d1d9;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+        }
+
+        .trace-path-input input:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+
+        .trace-path-input button {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .trace-path-input button:hover {
+            background: #30363d;
+        }
+
+        /* Favorites section */
+        .trace-section-header {
+            padding: 6px 12px;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b949e;
+            background: #0d1117;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .trace-dropdown-item .trace-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .trace-dropdown-item .trace-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .trace-dropdown-item .favorite-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px;
+            opacity: 0.4;
+            transition: opacity 0.15s;
+        }
+
+        .trace-dropdown-item .favorite-btn:hover {
+            opacity: 1;
+        }
+
+        .trace-dropdown-item .favorite-btn.is-favorite {
+            opacity: 1;
+            color: #f0c040;
+        }
+
         /* Tooltip */
         .tooltip {
             position: absolute;
@@ -672,9 +836,18 @@
                 <span class="label">Buffer</span>
                 <span class="value" id="buffer-size">-</span>
             </div>
-            <div class="file-input-wrapper">
+            <div class="trace-selector">
+                <button class="trace-selector-btn" id="trace-selector-btn">
+                    <span>Trace:</span>
+                    <span class="current-trace" id="current-trace-name">-</span>
+                    <span>▼</span>
+                </button>
+                <div class="trace-dropdown" id="trace-dropdown"></div>
+            </div>
+            <!-- Local file picker - hidden by default, useful when running locally -->
+            <div class="file-input-wrapper" style="display: none;" id="local-file-picker">
                 <input type="file" id="trace-file" accept=".json,.jsonl">
-                <button class="file-input-btn">Load trace</button>
+                <button class="file-input-btn">Local file</button>
             </div>
         </div>
     </div>

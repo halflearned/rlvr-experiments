@@ -7,7 +7,9 @@
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+    <!-- D3.js for plots -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
     <!-- KaTeX for math rendering -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -32,53 +34,98 @@
         </section>
 
         <section id="system-architecture">
-            <h2>1. System Architecture</h2>
+            <h3>System overview</h3>
             <p>TODO: Description of the system architecture.</p>
+
+            <h3>Setting up components</h3>
+
+            <h3>Producer loop</h3>
+            <p>
+                The producer runs dozens of async workers concurrently, all competing for prompts from the data iterator. Each worker independently shepherds one prompt through the full pipeline: generation, verification, reference logprobs, then buffer.
+            </p>
+            <p>
+                The producer has no visibility into the trainer's progress—it just keeps generating until the data is exhausted, pausing only during weight syncs. If a sample doesn't provide enough variation (all-wrong or all-correct) it is <em>filtered out</em> and not attempted again until the next epoch.
+            </p>
+
+            <figure>
+                <img src="figures/producer.jpg" alt="Producer loop diagram">
+            </figure>
+
+            <h3>Consumer loop</h3>
+            <p>
+                The consumer is a standard training loop: pull samples, batch them, forward/backward, optimizer step. Only two things are different. First, samples are checked for <em>staleness</em>: if the trainer has moved too far ahead of the weights used for generation, the sample is (lazily) evicted and the prompt is re-queued for generation within this epoch. Note this is a second source of inefficiency. Second, after each optimizer step the trainer version increments, and consumed prompts are marked done so they won't be sampled again this epoch.
+            </p>
+
+            <figure>
+                <img src="figures/consumer.png" alt="Consumer loop diagram">
+            </figure>
+
+            <h3>Weight sync</h3>
+            <p>
+                This is how the trainer's updated weights get to the rollout engine and reference model. The main challenge is copying efficiently when the trainer and rollout models may have weights sharded differently—the trainer might use FSDP-style sharding across 8 GPUs while the rollout uses tensor parallelism across 2. Different packages handle this differently. For example, <a href="#">torchforge</a> uses a fast filesystem, while tlr has a double-buffer scheme...
+            </p>
+            <p>
+                Our strategy is to avoid disk entirely, relying on NCCL communication channels to broadcast weights directly between GPU memory. At initialization time, we create NCCL communicator groups (borrowing vLLM's StatelessProcessGroup class). This allows us to create overlapping "worlds" shared by each trainer-receiver pair.
+            </p>
+            <ol>
+                <li>Pause the rollout engine: block new requests behind an asyncio Event, and either wait for in-flight requests to drain (default) or abort them.</li>
+                <li>Prepare the trainer for sync. Each trainer rank builds two things: a parameter map from HuggingFace parameter names to their local DTensor references, and a chunk plan—a list of (parameter name, offset, size) tuples dividing weights into ~100MB pieces. The chunk plan is sent to vLLM workers over Ray so both sides know how to pack and unpack.</li>
+                <li>For each chunk: all trainer ranks participate in an all-gather to reconstruct full tensors from their shards (required because DTensor only exposes all-gather, not gather-to-one). Only rank 0 packs the result into a flat buffer and broadcasts over NCCL; vLLM workers receive into their own buffer and unpack into local model parameters, resharding as needed for their own parallelism layout.</li>
+                <li>Update the rollout engine's trainer version so newly generated samples are tagged correctly.</li>
+                <li>Resume generation: set the Event, blocked workers continue.</li>
+            </ol>
+            <p>
+                With this strategy we complete the entire weight transfer for Qwen3-32B in 3 seconds (compare to torchforge which reportedly takes 52 seconds).
+            </p>
+
+            <h3>Visualization</h3>
+
+            <h3>Putting it together</h3>
+
+            <!-- EMBED: pipeline-animation -->
+            <details class="visualization-details">
+                <summary>Pipeline animation</summary>
+                <section class="visualization">
+                    <div class="controls">
+                        <button id="prev-btn" title="Previous step">&larr;</button>
+                        <input type="range" id="time-slider" min="0" max="100" value="0">
+                        <button id="next-btn" title="Next step">&rarr;</button>
+                        <span id="time-display">0.0s</span>
+                        <button id="play-btn" title="Play/Pause">&#9654;</button>
+                    </div>
+
+                    <div class="graphs">
+                        <div class="graph-container">
+                            <h3>Pipeline Timeline</h3>
+                            <canvas id="timeline-canvas"></canvas>
+                        </div>
+
+                        <div class="graph-container">
+                            <h3>Buffer Dynamics</h3>
+                            <canvas id="buffer-canvas"></canvas>
+                        </div>
+
+                        <div class="graph-container">
+                            <h3>Sample Fates</h3>
+                            <canvas id="fates-canvas"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="legend">
+                        <div class="legend-item"><span class="color-box" style="background: #3fb950;"></span> Generation</div>
+                        <div class="legend-item"><span class="color-box" style="background: #58a6ff;"></span> Reference</div>
+                        <div class="legend-item"><span class="color-box" style="background: #a371f7;"></span> Training</div>
+                        <div class="legend-item"><span class="color-box" style="background: #f0883e;"></span> Verifier</div>
+                        <div class="legend-item"><span class="color-box" style="background: #f85149;"></span> Sync Event</div>
+                    </div>
+                </section>
+            </details>
         </section>
-
-        <!-- EMBED: pipeline-animation -->
-        <details class="visualization-details">
-            <summary>Pipeline animation</summary>
-            <section class="visualization">
-                <div class="controls">
-                    <button id="prev-btn" title="Previous step">&larr;</button>
-                    <input type="range" id="time-slider" min="0" max="100" value="0">
-                    <button id="next-btn" title="Next step">&rarr;</button>
-                    <span id="time-display">0.0s</span>
-                    <button id="play-btn" title="Play/Pause">&#9654;</button>
-                </div>
-
-                <div class="graphs">
-                    <div class="graph-container">
-                        <h3>Pipeline Timeline</h3>
-                        <canvas id="timeline-canvas"></canvas>
-                    </div>
-
-                    <div class="graph-container">
-                        <h3>Buffer Dynamics</h3>
-                        <canvas id="buffer-canvas"></canvas>
-                    </div>
-
-                    <div class="graph-container">
-                        <h3>Sample Fates</h3>
-                        <canvas id="fates-canvas"></canvas>
-                    </div>
-                </div>
-
-                <div class="legend">
-                    <div class="legend-item"><span class="color-box" style="background: #3fb950;"></span> Generation</div>
-                    <div class="legend-item"><span class="color-box" style="background: #58a6ff;"></span> Reference</div>
-                    <div class="legend-item"><span class="color-box" style="background: #a371f7;"></span> Training</div>
-                    <div class="legend-item"><span class="color-box" style="background: #f0883e;"></span> Verifier</div>
-                    <div class="legend-item"><span class="color-box" style="background: #f85149;"></span> Sync Event</div>
-                </div>
-            </section>
-        </details>
 
         <section id="experiments">
             <h2>2. Experiments</h2>
             <p>
-                All experiments run here use the <a href="https://arxiv.org/abs/2503.20783">GRPO Done Right</a> variation of the original GRPO implementation:
+                All experiments run here use the <a href="https://arxiv.org/abs/2503.20783">GRPO Done Right</a> variation of the original GRPO implementation. Given a prompt, we generate $G$ completions $o_{i}$ from the current model $\pi_{\theta}$, and compute:
             </p>
 
             $$
@@ -98,8 +145,28 @@
             \tag{1}
             $$
 
+            <p>
+                The advantage $\hat{A}_{i,t}$ is the reward of that completion minus the mean: $\hat{A}_{i,t} = r_{i} - \frac{1}{G} \sum_{j=1}^{G} r_j$.
+            </p>
+
+            <p>
+                Relative to the original GRPO implementation, Equation (1) removes standard deviation and length normalizations. TODO: why. The experiment parameters are as follows.
+            </p>
+
+            <p>
+                Note that in either implementation, when rewards are constant, their advantages become zero, and we filter out the sample. This <em>filtering</em> is one major source of waste....
+            </p>
+
+            <!-- TODO: EMBED: table with hyperparameters, Vitor will provide later. -->
+
             <section id="staleness">
                 <h3>2.1 Staleness</h3>
+                <p>
+                    If we allow completions generated from earlier model versions to be used, we can reduce...
+                </p>
+                <p>
+                    After <span class="metric" data-run="stale0" data-key="total_steps"></span> steps, the strict on-policy run (<code>max_staleness=0</code>) achieves a final reward of <span class="metric" data-run="stale0" data-key="final_reward"></span>, while allowing one step of staleness (<code>max_staleness=1</code>) reaches <span class="metric" data-run="stale1" data-key="final_reward"></span> over <span class="metric" data-run="stale1" data-key="total_steps"></span> steps.
+                </p>
 
                 <!-- EMBED: staleness-diagrams -->
                 <details class="staleness-details">
@@ -256,6 +323,31 @@
                     </div>
                 </details>
 
+                <!-- EMBED: staleness-plots -->
+                <div class="staleness-plots">
+                    <div class="plot-legend">
+                        <span class="legend-item"><span class="legend-line" style="background: #3b82f6;"></span> max_staleness=0</span>
+                        <span class="legend-item"><span class="legend-line legend-dashed" style="background: #22c55e;"></span> max_staleness=1</span>
+                    </div>
+
+                    <h4>Rewards</h4>
+                    <div class="plot-row">
+                        <div class="plot-container" id="plot-reward"></div>
+                        <div class="plot-container" id="plot-allcorr-allwrong"></div>
+                        <div class="plot-container" id="plot-completion-len"></div>
+                    </div>
+
+                    <h4>Training Dynamics</h4>
+                    <div class="plot-row">
+                        <div class="plot-container" id="plot-loss"></div>
+                        <div class="plot-container" id="plot-kl"></div>
+                        <div class="plot-container" id="plot-entropy"></div>
+                    </div>
+                </div>
+
+                <!-- EMBED: staleness-comparison-table (auto-generated) -->
+                <div id="staleness-comparison-table" class="results-table-container"></div>
+
                 <!-- EMBED: staleness-results-table -->
                 <div class="results-table-container">
                     <table class="results-table">
@@ -309,24 +401,10 @@
 
             <section id="curriculum">
                 <h3>2.2 Curriculum Learning</h3>
-                <p>
-                    A significant fraction of generated samples are filtered due to constant rewards&mdash;the prompt
-                    is either too easy (all completions correct) or too hard (all incorrect). This represents wasted
-                    compute. Curriculum learning addresses this by ordering training samples by difficulty.
-                </p>
+            </section>
 
-                <h4>Measuring Difficulty via Pass@k</h4>
-                <p>
-                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
-                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
-                    solves it), while high pass@k indicates an "easy" prompt.
-                </p>
-
-                <p>
-                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
-                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
-                    in ascending order (hard-to-easy).
-                </p>
+            <section id="llm-judge">
+                <h3>2.3 LLM-as-a-judge reward shaping</h3>
 
                 <h4>Results</h4>
                 <p>TODO: Curriculum vs random ordering comparison.</p>
@@ -344,6 +422,16 @@
 
             <section id="passk-rates">
                 <h3>Base model pass@k rates</h3>
+                <p>
+                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
+                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
+                    solves it), while high pass@k indicates an "easy" prompt.
+                </p>
+                <p>
+                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
+                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
+                    in ascending order (hard-to-easy).
+                </p>
 
                 <!-- EMBED: passk-table -->
                 <div class="results-table-container">
@@ -401,6 +489,14 @@
                     <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
                 </div>
             </section>
+
+            <section id="notes">
+                <h3>Notes</h3>
+                <ol>
+                    <li>Entropy</li>
+                    <li></li>
+                </ol>
+            </section>
         </section>
 
         <section id="references">
@@ -409,5 +505,6 @@
     </article>
 
     <script src="viewer.js"></script>
+    <script src="staleness_plots.js?v=8"></script>
 </body>
 </html>

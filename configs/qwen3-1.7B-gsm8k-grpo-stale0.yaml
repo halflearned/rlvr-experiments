@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k
+  name: qwen3_17b_gsm8k_stale0
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,6 +9,7 @@ tokenizer:
   use_fast: false
 
 training:
+  num_epochs: 2
   max_staleness: 0
   abort_in_flight: false
   checkpoint_interval: 20
@@ -29,10 +30,9 @@ verifier:
   num_workers: 4
 
 loss:
-  name: drgrpo
-  beta: 0.005 
+  name: grpo
+  beta: 0.001
   eps: 0.2
-  C: 150
 
 data:
   dataset: gsm8k
@@ -78,7 +78,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00002  # 5e-6
+        lr: 0.000001  
         eps: 0.0001
 
       lr_scheduler:
