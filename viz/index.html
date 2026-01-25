@@ -478,6 +478,53 @@
             background: #30363d;
         }
 
+        /* Notes bar */
+        .notes-bar {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 8px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .notes-label {
+            color: #8b949e;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .notes-input {
+            flex: 1;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 6px 10px;
+            color: #c9d1d9;
+            font-size: 13px;
+            font-family: inherit;
+        }
+
+        .notes-input:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+
+        .notes-input::placeholder {
+            color: #484f58;
+        }
+
+        .notes-status {
+            font-size: 11px;
+            color: #3fb950;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .notes-status.show {
+            opacity: 1;
+        }
+
         /* Favorites section */
         .trace-section-header {
             padding: 6px 12px;
@@ -850,6 +897,12 @@
                 <button class="file-input-btn">Local file</button>
             </div>
         </div>
+    </div>
+
+    <div class="notes-bar" id="notes-bar">
+        <span class="notes-label">Notes:</span>
+        <input type="text" class="notes-input" id="notes-input" placeholder="Add notes about this trace...">
+        <span class="notes-status" id="notes-status"></span>
     </div>
 
     <div class="container">

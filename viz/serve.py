@@ -22,6 +22,8 @@ from urllib.parse import urlparse, parse_qs
 
 # Server-side favorites file
 FAVORITES_FILE = os.path.join(os.path.dirname(__file__), ".trace_favorites.json")
+# Server-side notes file (path -> note text)
+NOTES_FILE = os.path.join(os.path.dirname(__file__), ".trace_notes.json")
 
 
 def load_favorites():
@@ -39,6 +41,23 @@ def save_favorites(favorites):
     """Save favorites to disk."""
     with open(FAVORITES_FILE, "w") as f:
         json.dump(list(favorites), f, indent=2)
+
+
+def load_notes():
+    """Load notes from disk. Returns dict of path -> note."""
+    if os.path.exists(NOTES_FILE):
+        try:
+            with open(NOTES_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def save_notes(notes):
+    """Save notes to disk."""
+    with open(NOTES_FILE, "w") as f:
+        json.dump(notes, f, indent=2)
 
 def find_latest_trace(traces_dir="traces"):
     """Find the most recently modified trace file."""
@@ -334,6 +353,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(list(favorites)).encode())
             return
 
+        # Serve /notes?path=... to get note for a trace
+        if parsed.path == "/notes":
+            query = parse_qs(parsed.query)
+            path = query.get("path", [None])[0]
+            if not path:
+                # Return all notes
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(load_notes()).encode())
+            else:
+                # Return note for specific path
+                notes = load_notes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"note": notes.get(path, "")}).encode())
+            return
+
         return super().do_GET()
 
     def do_POST(self):
@@ -377,6 +417,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True, "favorites": list(favorites)}).encode())
+            return
+
+        # POST /notes to save a note for a trace
+        if parsed.path == "/notes":
+            query = parse_qs(parsed.query)
+            path = query.get("path", [None])[0]
+            if not path:
+                self.send_error(400, "Missing path parameter")
+                return
+
+            # Read note content from request body
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else ""
+
+            notes = load_notes()
+            if body.strip():
+                notes[path] = body
+            else:
+                notes.pop(path, None)  # Remove empty notes
+            save_notes(notes)
+            print(f"[notes] Updated note for: {path}")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True}).encode())
             return
 
         self.send_error(404, "Not found")

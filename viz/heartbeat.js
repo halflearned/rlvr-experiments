@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 38');
+console.log('[heartbeat.js] Script loaded, version 40');
 
 class HeartbeatViz {
     constructor() {
@@ -484,6 +484,64 @@ class HeartbeatViz {
 
         // Update current trace name from /trace/info
         this.updateCurrentTraceName();
+
+        // Setup notes input
+        this.setupNotesInput();
+    }
+
+    setupNotesInput() {
+        const notesInput = document.getElementById('notes-input');
+        const notesStatus = document.getElementById('notes-status');
+        if (!notesInput) return;
+
+        let saveTimeout = null;
+
+        // Auto-save on input with debounce
+        notesInput.addEventListener('input', () => {
+            if (saveTimeout) clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(() => this.saveCurrentNote(), 500);
+        });
+
+        // Also save on blur
+        notesInput.addEventListener('blur', () => {
+            if (saveTimeout) clearTimeout(saveTimeout);
+            this.saveCurrentNote();
+        });
+    }
+
+    async loadCurrentNote() {
+        const notesInput = document.getElementById('notes-input');
+        if (!notesInput || !this.currentTracePath) return;
+
+        try {
+            const response = await fetch(`/notes?path=${encodeURIComponent(this.currentTracePath)}`);
+            if (response.ok) {
+                const data = await response.json();
+                notesInput.value = data.note || '';
+            }
+        } catch (e) {
+            console.log('[loadCurrentNote] Failed:', e);
+        }
+    }
+
+    async saveCurrentNote() {
+        const notesInput = document.getElementById('notes-input');
+        const notesStatus = document.getElementById('notes-status');
+        if (!notesInput || !this.currentTracePath) return;
+
+        try {
+            const response = await fetch(`/notes?path=${encodeURIComponent(this.currentTracePath)}`, {
+                method: 'POST',
+                body: notesInput.value
+            });
+            if (response.ok && notesStatus) {
+                notesStatus.textContent = 'Saved';
+                notesStatus.classList.add('show');
+                setTimeout(() => notesStatus.classList.remove('show'), 1500);
+            }
+        } catch (e) {
+            console.log('[saveCurrentNote] Failed:', e);
+        }
     }
 
     async updateCurrentTraceName() {
@@ -495,10 +553,13 @@ class HeartbeatViz {
             if (response.ok) {
                 const info = await response.json();
                 if (info.path) {
+                    this.currentTracePath = info.path;  // Store for notes
                     // Show just the filename or last part of path
                     const parts = info.path.split('/');
                     currentTraceName.textContent = parts.slice(-2).join('/');
                     currentTraceName.title = info.path;  // Full path on hover
+                    // Load note for this trace
+                    this.loadCurrentNote();
                 }
             }
         } catch (e) {
@@ -678,6 +739,10 @@ class HeartbeatViz {
 
         console.log(`[switchTrace] Switching to: ${path}`);
 
+        // Clear notes input immediately while loading
+        const notesInput = document.getElementById('notes-input');
+        if (notesInput) notesInput.value = '';
+
         try {
             const response = await fetch(`/reload?path=${encodeURIComponent(path)}`);
             if (!response.ok) {
@@ -690,7 +755,7 @@ class HeartbeatViz {
             // Reset all state and reload
             this.resetState();
             await this.loadDefaultTrace();
-            this.updateCurrentTraceName();
+            await this.updateCurrentTraceName();  // await so note loads
 
         } catch (e) {
             console.error('[switchTrace] Error:', e);

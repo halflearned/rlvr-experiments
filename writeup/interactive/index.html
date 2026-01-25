@@ -30,15 +30,28 @@
         </header>
 
         <section class="intro">
-            <p>Text text</p>
+            <p>The first part of this post described our package RLVR Experiments. The second presents a few experiments run with it.</p>
         </section>
 
         <section id="system-architecture">
             <h3>System overview</h3>
-            <p>TODO: Description of the system architecture.</p>
+            <p>This report describes the architecture of our GRPO training system—a distributed, asynchronous pipeline for reinforcement learning from verifiable rewards. The system runs generation, verification, and training concurrently, using Ray for orchestration and NCCL for fast weight synchronization. We'll walk through the producer-consumer design, explain the coordination mechanisms, and share what we learned building it.</p>
 
-            <h3>Setting up components</h3>
+            <h3>Components</h3>
 
+            <p>In typical usage, the system runs in a producer-consumer pipeline. The producer generates completions and verifies them; the consumer batches them and trains. They run concurrently, communicating through a versioned buffer. This sort of design, decoupling generation from training, has been used in [Kimi 1.5]() and [torchforge](https://pytorch.org/blog/introducing-torchforge/).
+
+            <p>This package provides 5 components:</p>
+
+            <ul>
+                <li><strong>Trainer</strong> (TorchTitan): holds the policy model, runs forward/backward, steps the optimizer</li>
+                <li><strong>Rollout engine</strong> (vLLM): generates completions from prompts</li>
+                <li><strong>Reference model</strong> (vLLM): computes log-probabilities for the KL penalty</li>
+                <li><strong>Verifier pool</strong>: checks completions against ground truth, returns binary rewards</li>
+                <li><strong>Data iterator</strong>: serves prompts, tracks which are pending/in-flight/done</li>
+            </ul>
+
+            <p>Each component is one or more Ray actors. The trainer and vLLM engines can be sharded across GPUs with different parallelism strategies. Weight sync happens periodically over NCCL, transferring updated policy weights from the trainer to the rollout and reference models.</p>
             <h3>Producer loop</h3>
             <p>
                 The producer runs dozens of async workers concurrently, all competing for prompts from the data iterator. Each worker independently shepherds one prompt through the full pipeline: generation, verification, reference logprobs, then buffer.
@@ -168,6 +181,144 @@
                     After <span class="metric" data-run="stale0" data-key="total_steps"></span> steps, the strict on-policy run (<code>max_staleness=0</code>) achieves a final reward of <span class="metric" data-run="stale0" data-key="final_reward"></span>, while allowing one step of staleness (<code>max_staleness=1</code>) reaches <span class="metric" data-run="stale1" data-key="final_reward"></span> over <span class="metric" data-run="stale1" data-key="total_steps"></span> steps.
                 </p>
 
+
+
+                <!-- EMBED: staleness-plots -->
+                <div class="staleness-plots">
+                    <div class="plot-legend">
+                        <span class="legend-item"><span class="legend-line" style="background: #3b82f6;"></span> max_staleness=0</span>
+                        <span class="legend-item"><span class="legend-line legend-dashed" style="background: #22c55e;"></span> max_staleness=1</span>
+                    </div>
+
+                    <h4>Rewards</h4>
+                    <div class="plot-row">
+                        <div class="plot-container" id="plot-reward"></div>
+                        <div class="plot-container" id="plot-allcorr-allwrong"></div>
+                        <div class="plot-container" id="plot-completion-len"></div>
+                    </div>
+
+                    <h4>Training Dynamics</h4>
+                    <div class="plot-row">
+                        <div class="plot-container" id="plot-loss"></div>
+                        <div class="plot-container" id="plot-kl"></div>
+                        <div class="plot-container" id="plot-entropy"></div>
+                    </div>
+                </div>
+
+                <!-- EMBED: staleness-comparison-table (auto-generated) -->
+                <div id="staleness-comparison-table" class="results-table-container"></div>
+
+            
+            </section>
+
+            <section id="curriculum">
+                <h3>2.2 Curriculum Learning</h3>
+            </section>
+
+            <section id="llm-judge">
+                <h3>2.3 LLM-as-a-judge reward shaping</h3>
+
+                <h4>Results</h4>
+                <p>TODO: Curriculum vs random ordering comparison.</p>
+            </section>
+        </section>
+
+        <section id="appendix" class="appendix">
+            <h2>Appendix</h2>
+
+            <section id="datasets">
+                <h3>Dataset, verifiers, benchmarks.</h3>
+                <p>GSM8k:</p>
+                <p>MATH:</p>
+            </section>
+
+ 
+            <section id="passk-rates">
+                <h3>Base model pass@k rates</h3>
+                <p>
+                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
+                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
+                    solves it), while high pass@k indicates an "easy" prompt.
+                </p>
+                <p>
+                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
+                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
+                    in ascending order (hard-to-easy).
+                </p>
+
+                <!-- EMBED: passk-table -->
+                <div class="results-table-container">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th>Dataset</th>
+                                <th>Prompts</th>
+                                <th>pass@1</th>
+                                <th>pass@8</th>
+                                <th>pass@64</th>
+                                <th>pass@256</th>
+                                <th>pass@512</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>GSM8K</td>
+                                <td>7,473</td>
+                                <td>75.0%</td>
+                                <td>95.6%</td>
+                                <td>99.2%</td>
+                                <td>99.7%</td>
+                                <td>99.8%</td>
+                            </tr>
+                            <tr>
+                                <td>MATH (L3-5)</td>
+                                <td>5,584</td>
+                                <td>29.7%</td>
+                                <td>57.4%</td>
+                                <td>76.5%</td>
+                                <td>82.3%</td>
+                                <td>84.0%</td>
+                            </tr>
+                            <tr>
+                                <td>MBPP</td>
+                                <td>374</td>
+                                <td>26.6%</td>
+                                <td>54.8%</td>
+                                <td>78.6%</td>
+                                <td>87.2%</td>
+                                <td>89.6%</td>
+                            </tr>
+                            <tr>
+                                <td>IFEval</td>
+                                <td>3,200</td>
+                                <td>7.6%</td>
+                                <td>16.5%</td>
+                                <td>23.4%</td>
+                                <td>26.0%</td>
+                                <td>27.0%</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
+                </div>
+            </section>
+
+            <section id="notes">
+                <h3>Notes</h3>
+                <ol>
+                    <li>Entropy</li>
+                    <li>MFU</li>
+                </ol>
+            </section>
+        </section>
+
+        <section id="references">
+            <h2>References</h2>
+        </section>
+
+
+                   <section id="staleness-appendix">
+                <h3>Staleness conditions</h3>
                 <!-- EMBED: staleness-diagrams -->
                 <details class="staleness-details">
                     <summary>Staleness diagrams</summary>
@@ -322,186 +473,8 @@
                     </div>
                     </div>
                 </details>
-
-                <!-- EMBED: staleness-plots -->
-                <div class="staleness-plots">
-                    <div class="plot-legend">
-                        <span class="legend-item"><span class="legend-line" style="background: #3b82f6;"></span> max_staleness=0</span>
-                        <span class="legend-item"><span class="legend-line legend-dashed" style="background: #22c55e;"></span> max_staleness=1</span>
-                    </div>
-
-                    <h4>Rewards</h4>
-                    <div class="plot-row">
-                        <div class="plot-container" id="plot-reward"></div>
-                        <div class="plot-container" id="plot-allcorr-allwrong"></div>
-                        <div class="plot-container" id="plot-completion-len"></div>
-                    </div>
-
-                    <h4>Training Dynamics</h4>
-                    <div class="plot-row">
-                        <div class="plot-container" id="plot-loss"></div>
-                        <div class="plot-container" id="plot-kl"></div>
-                        <div class="plot-container" id="plot-entropy"></div>
-                    </div>
-                </div>
-
-                <!-- EMBED: staleness-comparison-table (auto-generated) -->
-                <div id="staleness-comparison-table" class="results-table-container"></div>
-
-                <!-- EMBED: staleness-results-table -->
-                <div class="results-table-container">
-                    <table class="results-table">
-                        <thead>
-                            <tr>
-                                <th>prompts_per_optim_step</th>
-                                <th>max_staleness</th>
-                                <th>GSM8K</th>
-                                <th>MATH</th>
-                                <th>MBPP</th>
-                                <th>IFEval</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="baseline-row">
-                                <td colspan="2" class="row-label">Base model</td>
-                                <td>64.6</td>
-                                <td>17.7</td>
-                                <td>55.8</td>
-                                <td>22.0</td>
-                            </tr>
-                            <tr>
-                                <td>16</td>
-                                <td>0</td>
-                                <td>68.7</td>
-                                <td>17.2</td>
-                                <td>55.0</td>
-                                <td>25.9</td>
-                            </tr>
-                            <tr>
-                                <td>16</td>
-                                <td>1</td>
-                                <td>&mdash;</td>
-                                <td>&mdash;</td>
-                                <td>&mdash;</td>
-                                <td>&mdash;</td>
-                            </tr>
-                            <tr>
-                                <td>8</td>
-                                <td>1</td>
-                                <td>&mdash;</td>
-                                <td>&mdash;</td>
-                                <td>&mdash;</td>
-                                <td>&mdash;</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <p class="table-caption"><strong>Table 1.</strong> Benchmark performance across staleness configurations. Model: Qwen3-1.7B-Base.</p>
-                </div>
             </section>
 
-            <section id="curriculum">
-                <h3>2.2 Curriculum Learning</h3>
-            </section>
-
-            <section id="llm-judge">
-                <h3>2.3 LLM-as-a-judge reward shaping</h3>
-
-                <h4>Results</h4>
-                <p>TODO: Curriculum vs random ordering comparison.</p>
-            </section>
-        </section>
-
-        <section id="appendix" class="appendix">
-            <h2>Appendix</h2>
-
-            <section id="datasets">
-                <h3>Dataset, verifiers, benchmarks.</h3>
-                <p>GSM8k:</p>
-                <p>MATH:</p>
-            </section>
-
-            <section id="passk-rates">
-                <h3>Base model pass@k rates</h3>
-                <p>
-                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
-                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
-                    solves it), while high pass@k indicates an "easy" prompt.
-                </p>
-                <p>
-                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
-                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
-                    in ascending order (hard-to-easy).
-                </p>
-
-                <!-- EMBED: passk-table -->
-                <div class="results-table-container">
-                    <table class="results-table">
-                        <thead>
-                            <tr>
-                                <th>Dataset</th>
-                                <th>Prompts</th>
-                                <th>pass@1</th>
-                                <th>pass@8</th>
-                                <th>pass@64</th>
-                                <th>pass@256</th>
-                                <th>pass@512</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td>GSM8K</td>
-                                <td>7,473</td>
-                                <td>75.0%</td>
-                                <td>95.6%</td>
-                                <td>99.2%</td>
-                                <td>99.7%</td>
-                                <td>99.8%</td>
-                            </tr>
-                            <tr>
-                                <td>MATH (L3-5)</td>
-                                <td>5,584</td>
-                                <td>29.7%</td>
-                                <td>57.4%</td>
-                                <td>76.5%</td>
-                                <td>82.3%</td>
-                                <td>84.0%</td>
-                            </tr>
-                            <tr>
-                                <td>MBPP</td>
-                                <td>374</td>
-                                <td>26.6%</td>
-                                <td>54.8%</td>
-                                <td>78.6%</td>
-                                <td>87.2%</td>
-                                <td>89.6%</td>
-                            </tr>
-                            <tr>
-                                <td>IFEval</td>
-                                <td>3,200</td>
-                                <td>7.6%</td>
-                                <td>16.5%</td>
-                                <td>23.4%</td>
-                                <td>26.0%</td>
-                                <td>27.0%</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
-                </div>
-            </section>
-
-            <section id="notes">
-                <h3>Notes</h3>
-                <ol>
-                    <li>Entropy</li>
-                    <li></li>
-                </ol>
-            </section>
-        </section>
-
-        <section id="references">
-            <h2>References</h2>
-        </section>
     </article>
 
     <script src="viewer.js"></script>

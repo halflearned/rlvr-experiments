@@ -314,6 +314,26 @@ aws s3 sync s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/a
     /efs/rlvr-experiments/checkpoints/mixed_lr1e5_curriculum_final/
 ```
 
+**To sync traces from running jobs:**
+
+Use `scripts/sync_traces.sh` to poll S3 and download `trace.jsonl` and `config.yaml` for running jobs:
+
+```bash
+# One-time sync for a specific job
+./scripts/sync_traces.sh annotations-adhoc-20260125-192901
+
+# Poll every 60s (auto-exits after 1h with no changes)
+./scripts/sync_traces.sh annotations-adhoc-20260125-192901 60
+
+# Sync all jobs matching a pattern
+./scripts/sync_traces.sh 20260125 60
+
+# Run in background
+nohup ./scripts/sync_traces.sh annotations-adhoc-20260125-192901 60 > /tmp/sync_job.log 2>&1 &
+```
+
+Files are saved to `results/<job_name>/traces/trace.jsonl` and `results/<job_name>/config.yaml`.
+
 ### Datasets
 
 SageMaker instances in the VPC cannot access HuggingFace Hub. Datasets are pre-cached to S3 and the data loaders (`src/rlvr_experiments/data.py`) automatically load from S3 first, falling back to HuggingFace Hub if S3 is unavailable.
@@ -806,6 +826,50 @@ Use the standard `run_lm_eval.sh` script with `math_qwen` task:
 The `math_qwen` task internally calls `scripts/adhoc/eval_math_qwen_style.py`.
 
 See `scripts/adhoc/NOTES_math_eval.md` for technical details.
+
+## IFEval/IFBench Evaluation
+
+Evaluate instruction-following checkpoints on IFEval (Google) and IFBench (AllenAI) datasets.
+
+### Step 1: Generate Completions
+
+```bash
+# Generate completions for a checkpoint (uses vLLM, greedy sampling)
+python scripts/eval_ifeval_checkpoint.py <checkpoint_path> <output_dir> --gpu <GPU>
+
+# Example:
+python scripts/eval_ifeval_checkpoint.py \
+    results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/checkpoints/step100 \
+    results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step100 \
+    --gpu 0
+```
+
+This generates `ifeval_completions.jsonl` and `ifbench_completions.jsonl` in the output directory.
+
+### Step 2: Verify Completions
+
+```bash
+# Verify completions (auto-detects IFEval vs IFBench format)
+python scripts/verify_ifeval_completions.py <completions_file>
+
+# Example:
+python scripts/verify_ifeval_completions.py \
+    results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step100/ifeval_completions.jsonl
+python scripts/verify_ifeval_completions.py \
+    results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step100/ifbench_completions.jsonl
+```
+
+This creates `*_verified.jsonl` and `*_verified_summary.json` files with metrics.
+
+### Verifiers
+
+- **IFEval**: Uses `src/rlvr_experiments/verifiers/if_multi_constraints.py` (RLVR-IFEval format)
+- **IFBench**: Uses `src/rlvr_experiments/verifiers/ifbench.py` (AllenAI format, 55 instruction types)
+
+### Metrics
+
+- **Prompt-level strict accuracy**: % of prompts where ALL constraints pass
+- **Instruction-level accuracy**: % of individual instructions that pass
 
 ## MBPP Training Notes
 

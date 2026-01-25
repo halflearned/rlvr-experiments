@@ -1646,3 +1646,226 @@ All runs on Qwen3-1.7B-Base with n=8 completions per prompt.
 2. **No advantage std normalization**: DrGRPO only mean-centers advantages (no division by std)
 
 Combined effect: DrGRPO gradients are ~5x weaker for the same lr, requiring higher lr to match GRPO training dynamics. Even at lr=5e-5, DrGRPO peaked at 0.394 vs GRPO's 0.59+ at lr=1e-6.
+
+---
+
+## IFEval GRPO Sweep (SageMaker, 2026-01-25)
+
+Hyperparameter sweep for IFEval training on Qwen3-1.7B-Base with GRPO.
+
+### Configuration
+- Dataset: `if_multi_constraints` (~500 prompts)
+- n=8 completions per prompt
+- max_tokens=2048
+- checkpoint_interval=25 steps
+- Instance: ml.p4de.24xlarge
+
+### Jobs Submitted
+
+| Job Name | LR | Beta | Status | Steps | Notes |
+|----------|-----|------|--------|-------|-------|
+| annotations-adhoc-20260125-083856 | 5e-6 | 0.001 | Running | 249 | reward 25%→37% |
+| annotations-adhoc-20260125-083900 | 5e-6 | 0.0001 | KL exploded | 79 | kl_max=9748, entropy→0.008 |
+| annotations-adhoc-20260125-083904 | 1e-6 | 0.001 | Killed | 199 | no improvement |
+| annotations-adhoc-20260125-083907 | 1e-6 | 0.0001 | Killed | 199 | no improvement |
+| annotations-adhoc-20260125-083911 | 5e-7 | 0.001 | Killed | 199 | no improvement |
+| annotations-adhoc-20260125-083914 | 5e-7 | 0.0001 | Killed | 199 | no improvement |
+
+### Observations
+
+- **lr=5e-6, beta=0.001 shows improvement**: Overall reward increased from ~25% to ~37% after 80 steps
+- **lr=5e-6, beta=0.0001 KL exploded**: Low beta insufficient to constrain KL. At step 79: kl_max=9748 (should be <1), entropy collapsed to 0.008 (model became deterministic). Rollouts still coherent text but model drifted far from reference.
+- **lr=1e-6 and lr=5e-7 showed no movement**: High zero_variance skip counts (13k+), model not learning
+- **IFEval is hard**: Most batches have all 0 or all 1 rewards, providing limited gradient signal
+- Higher learning rate (5e-6) with sufficient beta (0.001) seems necessary to make progress on this task
+
+### Traces
+
+Downloaded to `/efs/rlvr-experiments/traces_ifeval_sweep/`:
+- `annotations-adhoc-20260125-083856.jsonl` (427M)
+- `annotations-adhoc-20260125-083900.jsonl` (115M)
+- `annotations-adhoc-20260125-083904.jsonl` (600M)
+- `annotations-adhoc-20260125-083907.jsonl` (551M)
+- `annotations-adhoc-20260125-083911.jsonl` (585M)
+- `annotations-adhoc-20260125-083914.jsonl` (540M)
+
+---
+
+## MATH GRPO Sweep (Local, 2026-01-25)
+
+Learning rate sweep for MATH training on Qwen3-1.7B-Base with GRPO.
+
+### Configuration
+- Dataset: `math` (~7.5k prompts)
+- n=8 completions per prompt
+- max_tokens=1024
+- beta=0.001
+- Local runs on primary and secondary nodes
+
+### Results
+
+| Config | LR | Final Step | reward_all | Location |
+|--------|-----|------------|------------|----------|
+| qwen3-1.7B-math-lr5e6 | 5e-6 | 37 | **0.49** | `results/qwen3-1.7B-math-lr5e6_20260125-101019/` |
+| qwen3-1.7B-math-lr2e6 | 2e-6 | 39 | 0.45 | `results/qwen3-1.7B-math-lr2e6_20260125-101020/` |
+| qwen3-1.7B-math | 1e-6 | 39 | 0.43 | `results/qwen3-1.7B-math_20260125-084518/` |
+| qwen3-1.7B-math-lr5e7 | 5e-7 | 39 | 0.42 | `results/qwen3-1.7B-math-lr5e7_20260125-084519/` |
+
+### Observations
+
+- **Best LR: 5e-6** with reward_all=0.49
+- Clear trend: higher LR → better final reward (within tested range)
+- MATH dataset has ~59 steps per epoch with 128 prompts/step, so all runs completed ~1 epoch
+
+---
+
+## 2026-01-25: MATH Test Set Evaluation (lr=5e-6 Run)
+
+### Summary
+
+Evaluated the best MATH GRPO run from the learning rate sweep on the full MATH test set (5000 problems). Used our `MathVerifier` with sympy symbolic equivalence checking.
+
+### Run Details
+
+**Run**: `results/qwen3-1.7B-math-lr5e6_20260125-101019/`
+**Config**: `configs/qwen3-1.7B-math.yaml`
+
+```yaml
+model: Qwen3-1.7B-Base
+dataset: math (train split, ~7.5k problems)
+loss: grpo
+lr: 5e-6
+beta: 0.001
+n: 8 completions per prompt
+prompts_per_optim_step: 128
+seq_len_buckets: [768, 1280]
+completion_len_buckets: [512, 1024]
+skip_chat_template: true
+```
+
+**Checkpoint**: `qwen3-1.7B-math-lr5e6_20260125-101019_final` (end of epoch 1)
+
+### Evaluation Method
+
+- Script: `scripts/eval_math_checkpoint.py`
+- vLLM greedy sampling (temperature=0, TP=1, max_tokens=2048)
+- Verifier: `MathVerifier` (extracts `\boxed{}` answer, sympy symbolic equivalence)
+- Prompt format: `Problem: {problem}\n\nSolution:`
+
+### Results
+
+| Model | Total | Correct | Accuracy |
+|-------|-------|---------|----------|
+| **Qwen3-1.7B-Base** | 5000 | 2059 | **41.2%** |
+| **GRPO lr=5e-6** | 5000 | 2615 | **52.3%** |
+| **Improvement** | - | +556 | **+11.1%** |
+
+### Results by Difficulty Level
+
+| Level | Base Correct/Total | Base Acc | GRPO Correct/Total | GRPO Acc | Δ |
+|-------|-------------------|----------|-------------------|----------|---|
+| Level 1 | 320/437 | 73.2% | 342/437 | 78.3% | +5.1% |
+| Level 2 | 556/894 | 62.2% | 613/894 | 68.6% | +6.4% |
+| Level 3 | 591/1131 | 52.3% | 680/1131 | 60.1% | +7.9% |
+| Level 4 | 385/1214 | 31.7% | 599/1214 | 49.3% | +17.6% |
+| Level 5 | 207/1324 | 15.6% | 381/1324 | 28.8% | +13.2% |
+
+### Results by Subject
+
+| Subject | Base Acc | GRPO Acc | Δ |
+|---------|----------|----------|---|
+| algebra | 67.6% | 75.1% | +7.5% |
+| prealgebra | 58.6% | 66.9% | +8.4% |
+| number_theory | 38.9% | 50.7% | +11.9% |
+| counting_and_probability | 32.5% | 44.7% | +12.2% |
+| geometry | 28.0% | 39.2% | +11.3% |
+| intermediate_algebra | 24.5% | 33.5% | +9.1% |
+| precalculus | 22.0% | 30.0% | +8.0% |
+
+### Key Takeaways
+
+1. **Strong improvement across all levels**: The trained model improves on every difficulty level
+2. **Largest gains on Level 4**: +17.6% improvement on Level 4 problems
+3. **Improvement scales with difficulty**: Harder problems (L3-L5) see larger absolute gains than easy ones (L1-L2)
+4. **Consistent across subjects**: Every subject shows improvement, ranging from +7.5% (algebra) to +12.2% (counting_and_probability)
+
+### Files
+
+- Base model eval: `results/qwen3-1.7B-base/evals/math/math_test_summary.json`
+- GRPO eval: `results/qwen3-1.7B-math-lr5e6_20260125-101019/evals/math_test_summary.json`
+- Completions: `*/evals/math_test_completions.jsonl`
+- Eval script: `scripts/eval_math_checkpoint.py`
+
+---
+
+## IFEval/IFBench Evaluation (2026-01-25)
+
+### Model & Checkpoints
+
+**Training run**: `annotations-adhoc-20260125-083856`
+- Config: `configs/qwen3-1.7B-ifeval.yaml`
+- Hyperparams: lr=5e-6, beta=0.001
+- Base model: `Qwen/Qwen3-1.7B-Base`
+- Results folder: `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/`
+
+**Checkpoints evaluated**:
+- `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/checkpoints/step100/`
+- `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/checkpoints/step250/`
+- Base model: `Qwen/Qwen3-1.7B-Base`
+
+### Evaluation Setup
+
+- **Generation**: vLLM with TP=1, greedy sampling (temperature=0), max_tokens=2048
+- **Datasets**:
+  - IFEval (Google): 541 prompts from `google/IFEval` (train split)
+  - IFBench (AllenAI): 300 prompts from `allenai/IFBench_test` (train split)
+- **Verifiers**:
+  - IFEval: `src/rlvr_experiments/verifiers/if_multi_constraints.py` (RLVR-IFEval format)
+  - IFBench: `src/rlvr_experiments/verifiers/ifbench.py` (AllenAI IFBench format, 55 instruction types)
+
+### Results
+
+#### IFEval (In-distribution - trained on RLVR-IFEval constraints)
+
+| Model | Prompt-Level Strict | Instruction-Level |
+|-------|--------------------:|------------------:|
+| **Qwen3-1.7B-Base** | 21.26% | 32.85% |
+| **Step 100** | **40.85%** | **54.20%** |
+| **Step 250** | 40.11% | 53.72% |
+| **Improvement (Step 100)** | **+19.6%** | **+21.4%** |
+
+#### IFBench (Out-of-distribution - novel constraint types)
+
+| Model | Prompt-Level Strict | Instruction-Level |
+|-------|--------------------:|------------------:|
+| **Qwen3-1.7B-Base** | 12.33% | 14.83% |
+| **Step 100** | 19.00% | 20.06% |
+| **Step 250** | **20.00%** | **22.09%** |
+| **Improvement (Step 250)** | **+7.7%** | **+7.3%** |
+
+### Key Findings
+
+1. **IFEval performance nearly doubled**: Training on RLVR-IFEval improved prompt-level accuracy from 21.26% to 40.85% (+19.6%)
+2. **OOD generalization to IFBench**: Despite training only on IFEval-style constraints, models also improved on IFBench (+7.7%)
+3. **Step 100 vs Step 250**:
+   - Step 100 slightly better on IFEval (in-distribution)
+   - Step 250 slightly better on IFBench (OOD) - possibly better generalization with more training
+4. **IFBench is harder**: Base model only 12.33% vs 21.26% on IFEval (constraints are more specific/unusual)
+
+### Bug Fix During Evaluation
+
+Initial IFBench verification showed 0% for all models. Root cause: the verifier was passing ALL kwargs (including `None` values) to each checker's `build_description()` method, which only accepts specific parameters. The `except Exception` silently caught the `TypeError` and returned `False`.
+
+**Fix**: Filter out `None` values before calling `build_description()`:
+```python
+filtered_kwargs = {k: v for k, v in (kwargs or {}).items() if v is not None}
+```
+
+### Files
+
+- Generation script: `scripts/eval_ifeval_checkpoint.py`
+- Verification script: `scripts/verify_ifeval_completions.py`
+- IFBench verifier: `src/rlvr_experiments/verifiers/ifbench.py`
+- Base model results: `results/qwen3-1.7B-base/evals/ifeval/`
+- Step 100 results: `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step100/`
+- Step 250 results: `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step250/`
