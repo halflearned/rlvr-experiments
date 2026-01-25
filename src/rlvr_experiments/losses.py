@@ -145,14 +145,21 @@ class GRPOLoss(torch.nn.Module):
                 ratio_max = ratio[valid].max().item()
                 # Entropy approximation: mean negative logprob of selected tokens at rollout time
                 entropy_mean = -old_lp[valid].mean().item()
+                # Clip fraction: what fraction of tokens were clipped
+                if self.eps > 0:
+                    clipped = (ratio[valid] < 1.0 - self.eps) | (ratio[valid] > 1.0 + self.eps)
+                    clip_frac = clipped.float().mean().item()
+                else:
+                    clip_frac = 0.0
             else:
-                kl_mean = kl_max = ratio_max = entropy_mean = 0.0
+                kl_mean = kl_max = ratio_max = entropy_mean = clip_frac = 0.0
 
             self._last_debug = {
                 "kl_mean": kl_mean,
                 "kl_max": kl_max,
                 "ratio_max": ratio_max,
                 "entropy_mean": entropy_mean,
+                "clip_frac": clip_frac,
             }
             print(f"[GRPO DEBUG] {self._last_debug}")
 
@@ -230,13 +237,20 @@ class DrGRPOLoss(torch.nn.Module):
                 ratio_max = ratio[valid].max().item()
                 # Entropy approximation: mean negative logprob of selected tokens at rollout time
                 entropy_mean = -old_lp[valid].mean().item()
+                # Clip fraction: what fraction of tokens were clipped
+                if self.eps > 0:
+                    clipped = (ratio[valid] < 1.0 - self.eps) | (ratio[valid] > 1.0 + self.eps)
+                    clip_frac = clipped.float().mean().item()
+                else:
+                    clip_frac = 0.0
             else:
-                kl_mean = kl_max = ratio_max = entropy_mean = 0.0
+                kl_mean = kl_max = ratio_max = entropy_mean = clip_frac = 0.0
             self._last_debug = {
                 "kl_mean": kl_mean,
                 "kl_max": kl_max,
                 "ratio_max": ratio_max,
                 "entropy_mean": entropy_mean,
+                "clip_frac": clip_frac,
             }
             print(f"[GRPO DEBUG] {self._last_debug}")
 

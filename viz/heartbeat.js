@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 40');
+console.log('[heartbeat.js] Script loaded, version 41');
 
 class HeartbeatViz {
     constructor() {
@@ -50,8 +50,8 @@ class HeartbeatViz {
             // Debug
             kl_max: [],
             ratio_max: [],
-            diff_ref: [],
-            diff_rollout: [],
+            entropy_mean: [],
+            clip_frac: [],
             // Efficiency (padding/truncation)
             seq_padding_pct: [],
             completion_padding_pct: [],
@@ -1102,7 +1102,7 @@ class HeartbeatViz {
             kl_mean: [], loss: [], grad_norm: [],
             mfu: [], train_tps: [], memory_pct: [],
             vllm_tps: [], vllm_output_tokens: [], vllm_prompt_tokens: [],
-            kl_max: [], ratio_max: [], diff_ref: [], diff_rollout: [],
+            kl_max: [], ratio_max: [], entropy_mean: [], clip_frac: [],
             // Efficiency (padding/truncation)
             seq_padding_pct: [], completion_padding_pct: [], completion_len_mean: [],
             finish_stop_pct: [], finish_length_pct: [],
@@ -1194,11 +1194,11 @@ class HeartbeatViz {
                     if (event.ratio_max !== undefined) {
                         this.metrics.ratio_max.push({ ts, value: event.ratio_max });
                     }
-                    if (event.diff_trainer_ref_max !== undefined) {
-                        this.metrics.diff_ref.push({ ts, value: event.diff_trainer_ref_max });
+                    if (event.entropy_mean !== undefined) {
+                        this.metrics.entropy_mean.push({ ts, value: event.entropy_mean });
                     }
-                    if (event.diff_trainer_rollout_max !== undefined) {
-                        this.metrics.diff_rollout.push({ ts, value: event.diff_trainer_rollout_max });
+                    if (event.clip_frac !== undefined) {
+                        this.metrics.clip_frac.push({ ts, value: event.clip_frac });
                     }
                 }
                 // Efficiency: padding stats
@@ -2755,8 +2755,8 @@ class HeartbeatViz {
             vllm_prompt_tokens: '#8b949e',
             kl_max: '#f85149',
             ratio_max: '#d29922',
-            diff_ref: '#a371f7',
-            diff_rollout: '#39d4e0',
+            entropy_mean: '#a371f7',
+            clip_frac: '#39d4e0',
             // Efficiency metrics
             seq_padding_pct: '#f0883e',      // orange - padding is waste
             completion_padding_pct: '#d29922', // yellow
@@ -2990,8 +2990,8 @@ class HeartbeatViz {
             case 'kl_mean':
             case 'kl_max':
             case 'ratio_max':
-            case 'diff_ref':
-            case 'diff_rollout':
+            case 'entropy_mean':
+            case 'clip_frac':
                 return value.toFixed(4);
             case 'reward_overall':
             case 'reward_used':
