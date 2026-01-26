@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k_stale0
+  name: qwen3_17b_gsm8k_stale0_stop
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -50,6 +50,14 @@ sampling:
   max_tokens: 512
   n: 8
   logprobs: 0
+  # Stop sequences to prevent model from generating additional Q&A pairs
+  # This forces the model to stop after answering, removing "learned to stop" confounder
+  stop:
+    - "[Question]"
+    - "Question:"
+    - "Q:"
+    - "\n\n\n"
+    - "\n\n"
 
 buffer:
   max_reads: 1
@@ -78,7 +86,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001  
+        lr: 0.000001
         eps: 0.000001
 
       lr_scheduler:

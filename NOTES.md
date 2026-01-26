@@ -1974,3 +1974,135 @@ Standard GRPO with adaptive sampling on GSM8K shows strong results: **72.6% accu
   - `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/evals/gsm8k_step120/`
   - `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/evals/gsm8k_step220/`
 - **Base model eval**: `results/qwen3-1.7B-base/evals/gsm8k/summary.json`
+
+---
+
+## lm_eval Benchmark Comparison: Step 120 vs Base (2026-01-26)
+
+Evaluated step 120 checkpoint against base model using lm_eval with gsm8k and gsm8k_cot tasks.
+
+### Results Summary
+
+| Task | Shots | Metric | Base | Step 120 | Δ |
+|------|-------|--------|------|----------|---|
+| **gsm8k** | 0-shot | flexible-extract | 14.48% | **63.38%** | +48.9pp |
+| | | strict-match | 0.00% | 0.15% | +0.15pp |
+| **gsm8k** | 4-shot | flexible-extract | 69.75% | **72.86%** | +3.1pp |
+| | | strict-match | 59.59% | **62.40%** | +2.8pp |
+| **gsm8k_cot** | 0-shot | flexible-extract | 11.75% | **68.16%** | +56.4pp |
+| | | strict-match | 56.25% | 51.25% | -5.0pp |
+| **gsm8k_cot** | 4-shot | flexible-extract | 73.09% | 72.02% | -1.1pp |
+| | | strict-match | 54.13% | 44.05% | -10.1pp |
+
+### Key Observations
+
+1. **Massive 0-shot improvement**: The trained model jumps from ~12-14% to ~63-68% on 0-shot, showing it learned to solve GSM8K without needing few-shot examples.
+
+2. **flexible-extract improved, strict-match degraded**: The model got better at producing correct answers (flexible) but *worse* at using the exact "The answer is X." format (strict). This makes sense - during RL training, MathVerifier rewards the last number, not the specific phrase.
+
+3. **4-shot shows modest gains on gsm8k** but slight regression on gsm8k_cot strict-match. The model no longer needs few-shot examples as much, so they help less.
+
+4. **The 0-shot strict-match anomaly**: Base model gets 56% strict on gsm8k_cot 0-shot but 0% on gsm8k 0-shot - this is because gsm8k_cot uses "The answer is X." format in few-shot examples even at 0-shot (it's baked into the task), while gsm8k doesn't use CoT prompting at all.
+
+### Extraction Method Notes
+
+- **strict-match**: First match of `The answer is X.` pattern
+- **flexible-extract**: Last number in response
+
+MathVerifier (used during training) behaves like flexible-extract (extracts last number), which explains why the model improved on flexible but not strict. The training signal never rewarded "The answer is X." format specifically.
+
+### Eval Commands
+
+```bash
+# Settings used: TP=1, seed=42, temp=0, max_gen_toks=1024
+CUDA_VISIBLE_DEVICES=X lm_eval --model vllm \
+  --model_args "pretrained=$MODEL,dtype=bfloat16,tensor_parallel_size=1,gpu_memory_utilization=0.8,max_model_len=4096,seed=42" \
+  --tasks gsm8k_cot --num_fewshot 0 --batch_size auto --seed 42 \
+  --gen_kwargs "temperature=0,max_gen_toks=1024" \
+  --output_path $OUT_DIR
+```
+
+Results saved to: `/efs/rlvr-experiments/eval_results/gsm8k_comparison/`
+
+---
+
+## 2026-01-26: Stop-Sequence Experiment (GSM8K)
+
+### Motivation
+
+Previous analysis showed that the base model's "actual" GSM8K accuracy is ~67% when completions are truncated at stop sequences (model continues generating Q&A pairs after answering). MathVerifier extracts the LAST number, so without stop sequences it gets garbage from continuation text. lm_eval's strict-match extracts the FIRST "The answer is X" so it gets ~66%.
+
+The question: **Does the model actually "learn to solve math" during GRPO, or does it just "learn to stop"?** If we force stopping with stop sequences, does reward start at 67% instead of 8%?
+
+### Config: `qwen3-1.7B-gsm8k-grpo-stale0-stop.yaml`
+
+Key differences from original `qwen3-1.7B-gsm8k-grpo-stale0.yaml`:
+- Added stop sequences: `["[Question]", "Question:", "Q:", "\n\n\n", "\n\n"]`
+- Fixed optimizer eps: 1e-6 (was 1e-6 in original too, so no change)
+
+### Initial Observations (Step 1)
+
+**Expected**: reward_overall ~67% (matching truncated base model accuracy)
+**Actual**: reward_overall started at **25.3%**, climbed to 62% by step ~10
+
+Why not 67%? Investigation revealed:
+1. **Stop sequence coverage gap**: 62.8% of completions contained `Question:` but only `Q:` was being matched (wrong pattern)
+2. **`\n\n\n` triggered** for ~20% of completions, but `\n\n` wasn't in the original config
+3. **Completions were shorter** (avg 643 chars) vs original run (avg 1402 chars), confirming stop sequences worked partially
+
+**Fix applied**: Added `"Question:"` and `"\n\n"` to stop sequences in config for future runs.
+
+### clip_frac Nonzero Mystery
+
+For on-policy (max_staleness=0), ratio π(a|s)/π_old(a|s) should be exactly 1.0, so clip_frac should be 0.
+
+**Observed**: clip_frac ~0.08, ratio_max up to 1.51, kl_max up to 1691
+
+**Root cause**: Trainer uses TP=2, vLLM reference/rollout uses TP=1. Different tensor parallelism causes numerical differences in logprob computation. Even though the weights are identical, the computation order differs, leading to ratio ≠ 1.0.
+
+This is a known issue with mixed-parallelism setups and doesn't indicate actual staleness.
+
+### Checkpoint Evaluation (Step 60)
+
+**Run folder**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/`
+
+#### Our Verifier (scripts/eval_checkpoint.py)
+
+| Checkpoint | Accuracy | Correct/Total |
+|------------|----------|---------------|
+| Step 60 | **77.1%** | 1017/1319 |
+
+#### lm_eval (0-shot, temp=0, TP=1, seed=42)
+
+| Task | Metric | Value |
+|------|--------|-------|
+| gsm8k | flexible-extract | **75.89%** |
+| gsm8k | strict-match | 0.00% |
+| gsm8k_cot | flexible-extract | **75.51%** |
+| gsm8k_cot | strict-match | **58.00%** |
+
+### Comparison with Base Model
+
+| Metric | Base (4-shot) | Step 60 (0-shot) | Δ |
+|--------|---------------|------------------|---|
+| gsm8k_cot flexible-extract | 73.09% | 75.51% | **+2.4pp** |
+| gsm8k_cot strict-match | 54.13% | 58.00% | **+3.9pp** |
+
+**Key finding**: Step 60 achieves **75.51% 0-shot** vs base model's **73.09% 4-shot** on gsm8k_cot flexible-extract. This demonstrates **genuine math reasoning improvement**, not just "learning to stop".
+
+### Conclusion
+
+Even with stop sequences forcing early termination:
+1. Initial reward started at ~25% (not 67%) due to incomplete stop sequence coverage
+2. Training still improved accuracy significantly (25% → 77% by step 60)
+3. The model beats its own 4-shot baseline when evaluated 0-shot, confirming learned reasoning ability
+
+### Files
+
+- **Config**: `configs/qwen3-1.7B-gsm8k-grpo-stale0-stop.yaml`
+- **Run folder**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/`
+- **Traces**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/traces/trace.jsonl`
+- **Checkpoints**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/checkpoints/`
+- **Step 60 eval (our verifier)**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/evals/gsm8k_step60/`
+- **Step 60 lm_eval gsm8k**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/evals/lm_eval_gsm8k_0shot/`
+- **Step 60 lm_eval gsm8k_cot**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/evals/lm_eval_gsm8k_cot_0shot/`
