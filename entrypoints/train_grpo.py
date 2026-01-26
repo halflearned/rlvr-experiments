@@ -46,6 +46,7 @@ from rlvr_experiments.verifiers import (
     IFEvalVerifier,
     IFMultiConstraintsVerifier,
     MultiVerifier,
+    LLMJudgeVerifier,
 )
 
 DATASETS = {
@@ -139,7 +140,30 @@ async def main():
     data_cfg = dict(plan.data)
     dataset_name = data_cfg.pop("dataset")
     load_fn, verifier_cls = DATASETS[dataset_name]
-    verifier = VerifierPool(verifier_cls, **plan.verifier)
+
+    verifier_cfg = plan.verifier
+    verifier_type = verifier_cfg.get("type")
+    if verifier_type == "llm_judge":
+        role = verifier_cfg.get("role", "judge")
+        judge_handle = runtime.roles.get(role)
+        verifier = LLMJudgeVerifier(judge_handle, **verifier_cfg.get("kwargs", {}))
+        verify_completions = verifier.verify_completions
+    elif verifier_type == "mixed":
+        alpha = verifier_cfg.get("alpha", 0.5)
+        base_cfg = {k: v for k, v in verifier_cfg.items() if k not in ("type", "alpha", "judge")}
+        base_verifier = VerifierPool(verifier_cls, **base_cfg)
+        judge_cfg = verifier_cfg.get("judge", {})
+        role = judge_cfg.get("role", "judge")
+        judge_handle = runtime.roles.get(role)
+        judge_verifier = LLMJudgeVerifier(judge_handle, **judge_cfg.get("kwargs", {}))
+
+        async def verify_completions(problem, completions):
+            base_rewards = await base_verifier.verify_completions(problem, completions)
+            judge_rewards = await judge_verifier.verify_completions(problem, completions)
+            return [alpha * b + (1 - alpha) * j for b, j in zip(base_rewards, judge_rewards)]
+    else:
+        verifier = VerifierPool(verifier_cls, **verifier_cfg)
+        verify_completions = verifier.verify_completions
 
     # load_mixed returns (dataset, order), other loaders return just dataset
     # order_file in data_iter config takes precedence over mixed dataset's order
@@ -243,7 +267,10 @@ async def main():
 
             # --- Verify completions ---
             with trace_span("verify"):
-                rewards = await verifier.verify_completions(item["problem"], completions)
+                verify_problem = dict(item["problem"])
+                verify_problem.setdefault("prompt", item["prompt"])
+                verify_problem.setdefault("template", item["template"])
+                rewards = await verify_completions(verify_problem, completions)
 
             # --- Log rollout (even if filtered) ---
             log_rollout(

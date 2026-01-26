@@ -1,0 +1,203 @@
+run:
+  name: qwen3_17b_ifeval_judge_mixed
+
+model:
+  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+
+tokenizer:
+  pretrained_model_name_or_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  use_fast: false
+
+training:
+  # No max_steps, no max epoch, just run
+  num_epochs: 1
+  checkpoint_interval: 25
+  max_staleness: 0
+  abort_in_flight: false
+
+  # MATH problems may need longer completions
+  # seq_len_buckets is TOTAL seq length (prompt + completion)
+  # - GSM8K: ~256 prompt + 512 completion = 768
+  # - MATH / IFEval can be longer, just add in buckets of 512 increments
+  seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+  completion_len_buckets: [512, 1024, 1536, 2048]
+
+  prompts_per_rollout_sync: 128
+  prompts_per_reference_sync: 9999999
+  prompts_per_optim_step: 128
+  prompts_per_forward_backward: 2
+  # Micro-batch keys must match seq_len_buckets
+  completions_per_micro_batch:
+    768: 64
+    1280: 16
+    1536: 8
+    2048: 4  # TODO: could this be 8? 
+    2560: 4
+
+verifier:
+  type: mixed
+  alpha: 0.7
+  num_workers: 4
+  judge:
+    role: judge
+    kwargs:
+      use_chat_template: true
+      system_prompt: |
+        You are a strict judge for instruction-following quality. Return ONLY a number between 0 and 1.
+        Focus on whether the response satisfies the instruction's intent and content, not just output constraints.
+        Do NOT reward formatting alone.
+        Do not include any reasoning or analysis. Do not output <think> or explanations.
+      user_prompt: |
+        Instruction: {prompt}
+        Response: {completion}
+        Score guidelines:
+        - High (closer to 1.0): Fully addresses the instruction's intent (e.g., actually a Cajun recipe if asked).
+        - Mid (around 0.5): Partially addresses the intent or is vague/incomplete.
+        - Low (closer to 0.0): Misses the intent or only satisfies format/constraints.
+        Score:
+      regex: "\\b(0(?:\\.\\d+)?|1(?:\\.0+)?)\\b"
+      sampling:
+        temperature: 0.0
+        max_tokens: 8
+
+loss:
+  name: grpo
+  beta: 0.001  # 1e-3
+  eps: 0.2
+
+data:
+  dataset: if_multi_constraints
+
+data_iter:
+  system_prompt: ""
+  assistant_prefix: ""
+  skip_chat_template: true 
+
+
+sampling:
+  temperature: 1.
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 2048
+  n: 8
+  logprobs: 0
+
+buffer:
+  max_reads: 1
+  maxsize: 0
+
+roles:
+  - name: trainer
+    kind: titan
+    config:
+      trainable: true
+
+      profiling:
+        enable_profiling: false
+        save_traces_folder: "profile_trace"
+        profile_freq: 10
+
+      metrics:
+        log_freq: 1
+        enable_tensorboard: false
+        save_tb_folder: "tb"
+
+      model:
+        name: "qwen3"
+        flavor: "1.7B"
+        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+
+      optimizer:
+        name: "AdamW"
+        lr: 0.000001  
+        eps: 0.0001
+
+      lr_scheduler:
+        warmup_steps: 0
+        decay_ratio: 0.0
+
+      training:
+        seq_len: 2560  # Must match max(seq_len_buckets)
+        dtype: "float16"
+        mixed_precision_param: "float16"
+        mixed_precision_reduce: "float32"
+
+      parallelism:
+        data_parallel_replicate_degree: 1
+        data_parallel_shard_degree: 1
+        fsdp_reshard_after_forward: "default"
+        tensor_parallel_degree: 2
+        context_parallel_degree: 1
+        disable_loss_parallel: false
+
+      checkpoint:
+        enable: true
+        folder: "checkpoint"
+        initial_load_in_hf: true
+        interval: 500
+        last_save_model_only: false
+        export_dtype: "float16"
+        async_mode: "disabled"
+
+      activation_checkpoint:
+        mode: selective
+        selective_ac_option: "op"
+
+      compile:
+        enable: true
+        components:
+          - "model"
+
+  - name: reference
+    kind: vllm
+    config:
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
+      tensor_parallel_size: 1
+      data_parallel_size: 2
+      max_model_len: 2561  # seq_len_buckets[-1] + 1 for logprobs
+      gpu_memory_utilization: 0.90
+      dtype: "float16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: false
+      enable_chunked_prefill: true
+
+  - name: rollout
+    kind: vllm
+    config:
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 10
+      max_num_seqs: 64
+      tensor_parallel_size: 1
+      data_parallel_size: 3
+      max_model_len: 2560  # Match max(seq_len_buckets)
+      gpu_memory_utilization: 0.90
+      dtype: "float16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+  - name: judge
+    kind: vllm
+    config:
+      model: "Qwen/Qwen3-8B"
+      max_concurrent_per_replica: 8
+      max_num_seqs: 32
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      max_model_len: 4096
+      gpu_memory_utilization: 0.90
+      dtype: "float16"
+      max_num_batched_tokens: 16384
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+
+sync:
+  chunk_mb: 100
+  wiring:
+    - src: trainer
+      dst: reference
+    - src: trainer
+      dst: rollout

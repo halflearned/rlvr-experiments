@@ -44,6 +44,7 @@ from .if_multi_constraints import IFMultiConstraintsVerifier
 from .allenai import AllenAIGSM8KVerifier, AllenAIMathVerifier
 from .multi import MultiVerifier
 from .distributed import VerifierPool
+from .llm_judge import LLMJudgeVerifier
 
 __all__ = [
     # Code executor
@@ -71,4 +72,6 @@ __all__ = [
     "MultiVerifier",
     # Distributed
     "VerifierPool",
+    # LLM judge
+    "LLMJudgeVerifier",
 ]
