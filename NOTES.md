@@ -1869,3 +1869,108 @@ filtered_kwargs = {k: v for k, v in (kwargs or {}).items() if v is not None}
 - Base model results: `results/qwen3-1.7B-base/evals/ifeval/`
 - Step 100 results: `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step100/`
 - Step 250 results: `results/qwen3-1.7B-ifeval-lr5e6-beta1e3_20260125-083856/evals/step250/`
+
+---
+
+## 2026-01-26: DrGRPO + Adaptive Sampling Experiments (GSM8K)
+
+### Summary
+
+Attempted to combine DrGRPO loss with adaptive sampling on GSM8K. **Conclusion: DrGRPO with adaptive sampling does not work well - either KL explodes or learning is too slow. Abandoning in favor of standard GRPO.**
+
+### Configuration
+
+All runs used `configs/qwen3-1.7B-gsm8k-drgrpo-adaptive.yaml`:
+- **Model**: Qwen3-1.7B-Base
+- **Dataset**: GSM8K
+- **Loss**: DrGRPO
+- **Adaptive Sampling**: k_success=2, k_failure=2, max_completions=64, chunk_size=8
+
+### Runs
+
+| Run | C | LR | Beta | Step 30 | Step 60 | Notes |
+|-----|---|-----|------|---------|---------|-------|
+| 4 | 150 | 5e-6 | 0.005 | - | - | KL exploded ~0.3 by step 40, grad_norm spiked to 294 |
+| 5 | 512 | 5e-6 | 0.005 | 8% | - | Too slow, killed early |
+| 6 | 256 | 5e-6 | 0.005 | 12% | 16% | Stable KL (~0.03-0.06), but slow learning |
+| 7 | 200 | 5e-6 | 0.005 | 12% | - | Same as C=256, no improvement |
+| 8 | 175 | 5e-6 | 0.007 | 14% | diverged | KL stable initially, then exploded at step ~85, grad_norm=inf by step 100 |
+| 9 | 256 | 1e-5 | 0.005 | ~8% | - | Higher lr didn't help, reward_all stuck at 7-8% |
+
+### Targets (from reference GRPO stale=0 run)
+- Step 30: >15% reward_all
+- Step 60: >30% reward_all
+
+### Key Observations
+
+1. **C=150-175 unstable**: KL explodes even with higher beta
+2. **C=256-512 too slow**: Reward_all stuck at 8-16% by step 60
+3. **Higher lr (1e-5 vs 5e-6) didn't help**: Same slow learning with C=256
+4. **DrGRPO fundamentally different from GRPO**: No length normalization + no advantage std normalization means gradients are ~5x weaker
+
+### Trace Files
+
+Traces saved in run folders under `results/`:
+- `results/qwen3_17b_gsm8k_adaptive_*/traces/trace.jsonl`
+
+### Conclusion
+
+DrGRPO + adaptive sampling combination doesn't achieve competitive results on GSM8K. The effective learning rate is hard to tune - either too aggressive (KL explodes) or too conservative (no learning). Switching to standard GRPO with adaptive sampling.
+
+---
+
+## 2026-01-26: GRPO + Adaptive Sampling on GSM8K
+
+### Summary
+
+Standard GRPO with adaptive sampling on GSM8K shows strong results: **72.6% accuracy** after ~2.5 epochs (step 220), up from 14.3% base model.
+
+### Configuration
+
+- **Config**: `configs/qwen3-1.7B-gsm8k-grpo-adaptive.yaml`
+- **Git commit**: `489ffc2` (or later)
+- **Model**: Qwen3-1.7B-Base
+- **Dataset**: GSM8K train
+- **Loss**: GRPO (beta=0.001, eps=0.2)
+- **Optimizer**: AdamW (lr=1e-6, eps=1e-4)
+- **Adaptive Sampling**: k_success=2, k_failure=2, max_completions=64, chunk_size=8
+- **Sampling**: temperature=1.0, top_p=0.95, top_k=20, n=16, max_tokens=512
+
+### Run Details
+
+- **Run folder**: `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/`
+- **Log file**: `/tmp/grpo_adaptive_train10.log`
+- **Started**: 2026-01-26 16:02
+- **Stopped**: 2026-01-26 19:11 (manually stopped at step 236, epoch 2)
+- **Duration**: ~3 hours for ~2.5 epochs
+
+### Training Progress
+
+- Epoch 1 ended at step ~115 (117 steps/epoch with 64 prompts/step, 7473 GSM8K train examples)
+- Epoch 2 ended at step 229 (19:06:40)
+- Run stopped at step 236 (epoch 2, mid-epoch 3)
+
+### Evaluation Results
+
+| Checkpoint | Step | Epoch | GSM8K Test Accuracy |
+|------------|------|-------|---------------------|
+| Base model | - | - | 14.3% (189/1319) |
+| Step 120 | 120 | ~2 | 69.9% (922/1319) |
+| Step 220 | 220 | ~3 | **72.6% (957/1319)** |
+
+### Key Observations
+
+1. **Massive improvement from base**: +58.3pp from 14.3% to 72.6%
+2. **Most gains in first 2 epochs**: Step 120 already at 69.9%, only +2.7pp more by step 220
+3. **Stable training**: No KL explosions or gradient issues throughout
+4. **Adaptive sampling worked well**: Mixed batch sizes (B=16-48) with early stopping on solved problems
+
+### Files
+
+- **Config**: `configs/qwen3-1.7B-gsm8k-grpo-adaptive.yaml`
+- **Checkpoints**: `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/checkpoints/`
+- **Traces**: `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/traces/`
+- **Evals**:
+  - `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/evals/gsm8k_step120/`
+  - `results/qwen3-1.7B-gsm8k-grpo-adaptive_20260126-160231/evals/gsm8k_step220/`
+- **Base model eval**: `results/qwen3-1.7B-base/evals/gsm8k/summary.json`
