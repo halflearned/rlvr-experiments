@@ -464,7 +464,11 @@ if TraceState.rollout_file:
     print(f"  Available at http://localhost:{PORT}/rollout?prompt_id=...")
 print("Press Ctrl+C to stop")
 
-with http.server.HTTPServer(("", PORT), Handler) as httpd:
+class ThreadedHTTPServer(http.server.ThreadingHTTPServer):
+    """HTTP server that handles each request in a separate thread."""
+    daemon_threads = True  # Don't wait for threads on shutdown
+
+with ThreadedHTTPServer(("", PORT), Handler) as httpd:
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -6,7 +6,11 @@ from .ops import compute_logprobs
 import torch
 
 
-def compute_grpo_advantages(rewards: torch.Tensor, group_size: int | None = None) -> torch.Tensor:
+def compute_grpo_advantages(
+    rewards: torch.Tensor,
+    group_size: int | None = None,
+    group_sizes: list[int] | None = None,
+) -> torch.Tensor:
     """
     Notes:
         - In multi-prompt batches, group_size MUST be the per-prompt sample count G,
@@ -18,6 +22,22 @@ def compute_grpo_advantages(rewards: torch.Tensor, group_size: int | None = None
     """
     rewards = rewards.float()
     eps = 1e-6
+
+    if group_sizes is not None:
+        B = rewards.shape[0]
+        if sum(group_sizes) != B:
+            raise ValueError(f"sum(group_sizes) must equal B={B}, got {sum(group_sizes)}")
+        out = torch.empty_like(rewards, dtype=torch.float32)
+        idx = 0
+        for g in group_sizes:
+            if g <= 0:
+                raise ValueError(f"group_sizes must be positive, got {g}")
+            group = rewards[idx : idx + g]
+            mean = group.mean()
+            std = group.std(unbiased=False).clamp_min(eps)
+            out[idx : idx + g] = (group - mean) / std
+            idx += g
+        return out
 
     if group_size is None:
         mean = rewards.mean()
@@ -35,7 +55,11 @@ def compute_grpo_advantages(rewards: torch.Tensor, group_size: int | None = None
     return a.view(-1)
 
 
-def compute_drgrpo_advantages(rewards: torch.Tensor, group_size: int | None = None) -> torch.Tensor:
+def compute_drgrpo_advantages(
+    rewards: torch.Tensor,
+    group_size: int | None = None,
+    group_sizes: list[int] | None = None,
+) -> torch.Tensor:
     """
     Dr. GRPO advantages: per-group mean-centering only (no std normalization).
 
@@ -54,6 +78,21 @@ def compute_drgrpo_advantages(rewards: torch.Tensor, group_size: int | None = No
         Same batching/layout assumptions as compute_grpo_advantages().
     """
     rewards = rewards.float()
+
+    if group_sizes is not None:
+        B = rewards.shape[0]
+        if sum(group_sizes) != B:
+            raise ValueError(f"sum(group_sizes) must equal B={B}, got {sum(group_sizes)}")
+        out = torch.empty_like(rewards, dtype=torch.float32)
+        idx = 0
+        for g in group_sizes:
+            if g <= 0:
+                raise ValueError(f"group_sizes must be positive, got {g}")
+            group = rewards[idx : idx + g]
+            mean = group.mean()
+            out[idx : idx + g] = group - mean
+            idx += g
+        return out
 
     if group_size is None:
         return rewards - rewards.mean()

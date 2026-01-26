@@ -208,6 +208,7 @@ async def main():
     prompts_per_forward_backward = plan.training.get("prompts_per_forward_backward")
     completions_per_micro_batch_cfg = plan.training.get("completions_per_micro_batch")
     completions_per_micro_batch_reference = plan.training.get("completions_per_micro_batch_reference")
+    adaptive_cfg = plan.training.get("adaptive_sampling")
 
     # Sequence length limits
     max_completion_len = plan.sampling.get("max_tokens", 512)
@@ -255,22 +256,77 @@ async def main():
 
             # --- Generate completions ---
             log_sample("generation_start", prompt_id=prompt_id, dataset=dataset)
-            with trace_span("generate"):
-                response = await asyncio.wait_for(
-                    rollout.generate_single(item["template"], **sp),
-                    timeout=rollout_timeout_s,
-                )
-            trainer_version = rollout.trainer_version
-            completions = [out.text for out in response.outputs]
-            rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
-            log_sample("generation_done", prompt_id=prompt_id, version=trainer_version, n_completions=len(completions), dataset=dataset)
+            verify_problem = dict(item["problem"])
+            verify_problem.setdefault("prompt", item["prompt"])
+            verify_problem.setdefault("template", item["template"])
 
-            # --- Verify completions ---
-            with trace_span("verify"):
-                verify_problem = dict(item["problem"])
-                verify_problem.setdefault("prompt", item["prompt"])
-                verify_problem.setdefault("template", item["template"])
-                rewards = await verify_completions(verify_problem, completions)
+            if adaptive_cfg:
+                k_success = adaptive_cfg.get("k_success", 0)
+                k_failure = adaptive_cfg.get("k_failure", 0)
+                max_completions = adaptive_cfg.get("max_completions", completions_per_prompt)
+                max_total_tokens = adaptive_cfg.get("max_total_tokens")
+                chunk_size = adaptive_cfg.get("chunk_size", 1)
+
+                total_completions = 0
+                total_tokens = 0
+                successes = 0
+                failures = 0
+                completions = []
+                rewards = []
+                rollout_chunks = []
+
+                def stop_condition() -> bool:
+                    if (k_success > 0 or k_failure > 0) and successes >= k_success and failures >= k_failure:
+                        return True
+                    return False
+
+                while total_completions < max_completions:
+                    if max_total_tokens is not None and total_tokens >= max_total_tokens:
+                        break
+                    if stop_condition():
+                        break
+
+                    n_chunk = min(chunk_size, max_completions - total_completions)
+                    sp_chunk = {**sp, "n": n_chunk}
+                    with trace_span("generate"):
+                        response = await asyncio.wait_for(
+                            rollout.generate_single(item["template"], **sp_chunk),
+                            timeout=rollout_timeout_s,
+                        )
+                    chunk_completions = [out.text for out in response.outputs]
+                    chunk_rollout = RolloutSample.from_vllm(response, pad_token_id)
+
+                    with trace_span("verify"):
+                        chunk_rewards = await verify_completions(verify_problem, chunk_completions)
+
+                    for r, comp_len in zip(chunk_rewards, chunk_rollout.completion_lens):
+                        if r > 0:
+                            successes += 1
+                        else:
+                            failures += 1
+                        total_tokens += int(comp_len)
+
+                    completions.extend(chunk_completions)
+                    rewards.extend(chunk_rewards)
+                    rollout_chunks.append(chunk_rollout)
+                    total_completions += len(chunk_completions)
+
+                rollout_sample = RolloutSample.merge(rollout_chunks, pad_token_id)
+            else:
+                with trace_span("generate"):
+                    response = await asyncio.wait_for(
+                        rollout.generate_single(item["template"], **sp),
+                        timeout=rollout_timeout_s,
+                    )
+                completions = [out.text for out in response.outputs]
+                rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
+
+                # --- Verify completions ---
+                with trace_span("verify"):
+                    rewards = await verify_completions(verify_problem, completions)
+
+            trainer_version = rollout.trainer_version
+            log_sample("generation_done", prompt_id=prompt_id, version=trainer_version, n_completions=len(completions), dataset=dataset)
 
             # --- Log rollout (even if filtered) ---
             log_rollout(
@@ -440,7 +496,8 @@ async def main():
                         **{f"{k}_tokens": v for k, v in dataset_tokens.items()},
                     })
                     item_ids = [s.item_id for s in samples]
-                    yield batch, stats, item_ids
+                    group_sizes = [len(s.rewards) for s in samples]
+                    yield batch, stats, item_ids, group_sizes
                 return
 
             # --- Staleness check ---
@@ -494,7 +551,8 @@ async def main():
                     **{f"{k}_tokens": v for k, v in dataset_tokens.items()},
                 })
                 item_ids = [s.item_id for s in samples]
-                yield batch, stats, item_ids
+                group_sizes = [len(s.rewards) for s in samples]
+                yield batch, stats, item_ids, group_sizes
                 samples = []
 
     # =========================================================================
@@ -512,11 +570,11 @@ async def main():
         tracer.counter("epoch", {"epoch": epoch})
         producer = asyncio.create_task(produce_epoch())
 
-        async for batch, stats, item_ids in batches(producer):
+        async for batch, stats, item_ids, group_sizes in batches(producer):
             accum_count += 1
 
             # Compute GRPO advantages (normalized within each prompt's completions)
-            advantages = compute_advantages(batch.rewards, group_size=completions_per_prompt)
+            advantages = compute_advantages(batch.rewards, group_sizes=group_sizes)
 
             # Forward/backward pass
             with trace_span("forward_backward"):

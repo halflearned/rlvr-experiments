@@ -1,5 +1,5 @@
 // RLVR Heartbeat Visualization
-console.log('[heartbeat.js] Script loaded, version 41');
+console.log('[heartbeat.js] Script loaded, version 42');
 
 class HeartbeatViz {
     constructor() {
@@ -743,12 +743,29 @@ class HeartbeatViz {
         const notesInput = document.getElementById('notes-input');
         if (notesInput) notesInput.value = '';
 
+        // Show loading overlay for large files
+        const overlay = document.getElementById('loading-overlay');
+        if (overlay) overlay.classList.add('visible');
+
+        // Show loading indicator in header
+        const currentTraceName = document.getElementById('current-trace-name');
+        const prevName = currentTraceName ? currentTraceName.textContent : '';
+        if (currentTraceName) {
+            currentTraceName.textContent = 'Loading...';
+            currentTraceName.classList.add('loading');
+        }
+
         try {
             const response = await fetch(`/reload?path=${encodeURIComponent(path)}`);
             if (!response.ok) {
                 const text = await response.text();
                 console.error(`[switchTrace] Failed: ${text}`);
                 alert(`Failed to switch trace: ${text}`);
+                if (currentTraceName) {
+                    currentTraceName.textContent = prevName;
+                    currentTraceName.classList.remove('loading');
+                }
+                if (overlay) overlay.classList.remove('visible');
                 return;
             }
 
@@ -757,9 +774,19 @@ class HeartbeatViz {
             await this.loadDefaultTrace();
             await this.updateCurrentTraceName();  // await so note loads
 
+            if (currentTraceName) {
+                currentTraceName.classList.remove('loading');
+            }
+
         } catch (e) {
             console.error('[switchTrace] Error:', e);
             alert(`Error switching trace: ${e.message}`);
+            if (currentTraceName) {
+                currentTraceName.textContent = prevName;
+                currentTraceName.classList.remove('loading');
+            }
+        } finally {
+            if (overlay) overlay.classList.remove('visible');
         }
     }
 

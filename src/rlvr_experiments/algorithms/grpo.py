@@ -105,6 +105,38 @@ class RolloutSample:
 
         return cls(input_ids, completion_ids, logprobs, prompt_len, finish_reasons, completion_lens)
 
+    @classmethod
+    def merge(cls, samples: list["RolloutSample"], pad_token_id: int) -> "RolloutSample":
+        """Merge multiple RolloutSample chunks for the same prompt."""
+        if not samples:
+            raise ValueError("RolloutSample.merge requires at least one sample")
+        prompt_len = samples[0].prompt_len
+        if any(s.prompt_len != prompt_len for s in samples):
+            raise ValueError("All RolloutSample chunks must share the same prompt_len")
+
+        input_rows = [row for s in samples for row in s.input_ids]
+        comp_rows = [row for s in samples for row in s.completion_ids]
+        logprob_rows = [row for s in samples for row in s.logprobs]
+
+        max_seq_len = max(r.numel() for r in input_rows)
+        max_comp_len = max(r.numel() for r in comp_rows)
+
+        input_ids = torch.full((len(input_rows), max_seq_len), pad_token_id, dtype=torch.long)
+        completion_ids = torch.full((len(comp_rows), max_comp_len), pad_token_id, dtype=torch.long)
+        logprobs = torch.zeros((len(logprob_rows), max_comp_len), dtype=torch.float32)
+
+        for i, row in enumerate(input_rows):
+            input_ids[i, : row.numel()] = row
+        for i, row in enumerate(comp_rows):
+            completion_ids[i, : row.numel()] = row
+        for i, row in enumerate(logprob_rows):
+            logprobs[i, : row.numel()] = row
+
+        finish_reasons = [r for s in samples for r in s.finish_reasons]
+        completion_lens = [l for s in samples for l in s.completion_lens]
+
+        return cls(input_ids, completion_ids, logprobs, prompt_len, finish_reasons, completion_lens)
+
 
 @dataclass
 class TrainSample:
@@ -286,5 +318,4 @@ def make_batch(
     stats = BatchStats.from_samples(samples, padded_seq_len, padded_completion_len)
     print(f"[make_batch] B={batch.input_ids.shape[0]}, seq_len={padded_seq_len}, comp_len={padded_completion_len}")
     return batch, stats
-
 

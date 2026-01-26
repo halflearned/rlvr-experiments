@@ -44,7 +44,13 @@ from .if_multi_constraints import IFMultiConstraintsVerifier
 from .allenai import AllenAIGSM8KVerifier, AllenAIMathVerifier
 from .multi import MultiVerifier
 from .distributed import VerifierPool
-from .llm_judge import LLMJudgeVerifier
+
+# Lazy import for LLMJudgeVerifier to avoid vLLM GPU init on non-GPU workers
+def __getattr__(name: str):
+    if name == "LLMJudgeVerifier":
+        from .llm_judge import LLMJudgeVerifier
+        return LLMJudgeVerifier
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # Code executor
