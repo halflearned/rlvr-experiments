@@ -1,11 +1,17 @@
 import asyncio
 import logging
+import os
 import time
 import uuid
 import torch
 import ray
 
+from pathlib import Path
 from typing import Any, Sequence
+
+# Lifecycle debugging
+_LIFECYCLE_DEBUG = os.environ.get("RLVR_LIFECYCLE_DEBUG", "0") == "1"
+_LIFECYCLE_DIR = Path("/tmp/lifecycle_dumps")
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -498,6 +504,31 @@ class VLLMHandle:
         for i, lps in enumerate(logprobs_lists):
             actual_len = min(len(lps), completion_len)
             result[i, :actual_len] = torch.tensor(lps[:actual_len], dtype=torch.float32)
+
+            # COPIOUS LOGGING: Log every ref logprob conversion
+            if _LIFECYCLE_DEBUG:
+                plen = prompt_lens_list[i]
+                seq_len = len(token_ids_list[i])
+                print(f"[REF_COMPUTE] i={i} prompt_len={plen} seq_len={seq_len} "
+                      f"completion_len={completion_len} lps_len={len(lps)} actual_len={actual_len} "
+                      f"lps[:5]={lps[:5]} result_nonzero={torch.count_nonzero(result[i]).item()}", flush=True)
+
+        # Lifecycle debugging: dump ref logprob computation
+        if _LIFECYCLE_DEBUG:
+            _LIFECYCLE_DIR.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time() * 1000)
+            filename = f"ref_compute_{ts}.pt"
+            torch.save({
+                "input_ids": input_ids.clone(),
+                "completion_ids": completion_ids.clone(),
+                "prompt_lens": prompt_lens.clone(),
+                "completion_len": completion_len,
+                "token_ids_list_lens": [len(t) for t in token_ids_list],
+                "logprobs_lists_lens": [len(l) for l in logprobs_lists],
+                "logprobs_lists": logprobs_lists,  # raw from vLLM
+                "result": result.clone(),
+            }, _LIFECYCLE_DIR / filename)
+            print(f"[LIFECYCLE:ref_compute] -> {filename}")
 
         return result
 

@@ -2106,3 +2106,116 @@ Even with stop sequences forcing early termination:
 - **Step 60 eval (our verifier)**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/evals/gsm8k_step60/`
 - **Step 60 lm_eval gsm8k**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/evals/lm_eval_gsm8k_0shot/`
 - **Step 60 lm_eval gsm8k_cot**: `results/qwen3-1.7B-gsm8k-grpo-stale0-stop_20260126-201902/evals/lm_eval_gsm8k_cot_0shot/`
+
+---
+
+## MATH Training - KL Spike Fix & Hyperparameter Tuning
+
+**Date**: 2026-01-27
+
+### Problem: KL Divergence Explosion
+
+GRPO training on MATH dataset was exploding after 5-8 steps with KL divergence spikes of ~2685, causing loss to become NaN.
+
+### Root Cause (Verified)
+
+The reference model was computing logprobs correctly (verified by independent vLLM test). The issue was:
+
+1. **Small optimizer epsilon (1e-7)** - Adam updates unstable early in training
+2. **No learning rate warmup** - Full LR applied from step 0
+3. **Low KL penalty (beta=0.001)** - Couldn't prevent rapid divergence on rare token patterns
+
+The Schulman KL approximator `kl = exp(r) - r - 1` explodes when `r = policy_lp - ref_lp` gets large. With beta=0.001, the KL gradient only matches the surrogate gradient at log_ratio ≈ 7, by which point probability has shifted 1000x.
+
+### Fix Applied
+
+```yaml
+optimizer:
+  eps: 0.0001  # Changed from 0.0000001
+  
+lr_scheduler:
+  warmup_steps: 50  # Changed from 0
+```
+
+### Training Run: math-eps-warmup-lr5e6
+
+**Config**: `configs/adhoc/math-eps-warmup-lr5e6.yaml`
+**Run folder**: `results/math-eps-warmup-lr5e6_20260127-095003/`
+
+Key hyperparameters:
+- `optimizer.lr`: 5e-6
+- `optimizer.eps`: 1e-4
+- `lr_scheduler.warmup_steps`: 50
+- `loss.beta`: 0.001
+- `training.num_epochs`: 2
+- `sampling.n`: 8
+
+### Training Results (72 steps, 2 epochs)
+
+| Steps | reward_overall | frac_all_correct |
+|-------|----------------|------------------|
+| 1-10  | 0.4067 | 6.2% |
+| 61-70 | 0.4759 | 11.6% |
+| 71-72 | 0.5026 | 14.6% |
+
+**Improvement**: reward_overall +19%, frac_all_correct **doubled** (6% → 12.5%)
+
+**Note**: Only 72 steps because ~38% of prompts filtered due to length constraints (seq_len_buckets: [768, 1280])
+
+### Evaluation Results (Final Checkpoint)
+
+#### Hendrycks MATH (0-shot, greedy)
+
+| Metric | Value |
+|--------|-------|
+| lm_eval exact_match | 0.70% |
+| **MathVerifier** | **44.88%** |
+
+By difficulty level:
+| Level | Accuracy |
+|-------|----------|
+| Level 1 | 73.68% |
+| Level 2 | 61.52% |
+| Level 3 | 50.31% |
+| Level 4 | 40.61% |
+| Level 5 | 23.41% |
+
+#### Minerva MATH (4-shot, greedy)
+
+| Metric | Value |
+|--------|-------|
+| lm_eval exact_match | 31.68% |
+| lm_eval math_verify | 42.72% |
+| **MathVerifier** | **39.20%** |
+
+#### Base Model Comparison (MathVerifier)
+
+| Model | MATH Accuracy |
+|-------|---------------|
+| Base (Qwen3-1.7B) | ~41.2% |
+| After GRPO (72 steps) | 44.88% |
+| **Δ** | **+3.7pp** |
+
+### Files
+
+- **Config**: `configs/adhoc/math-eps-warmup-lr5e6.yaml`
+- **Run folder**: `results/math-eps-warmup-lr5e6_20260127-095003/`
+- **Traces**: `results/math-eps-warmup-lr5e6_20260127-095003/traces/trace.jsonl`
+- **Checkpoints**: `results/math-eps-warmup-lr5e6_20260127-095003/checkpoints/`
+  - `math-eps-warmup-lr5e6_20260127-095003_step20/`
+  - `math-eps-warmup-lr5e6_20260127-095003_step40/`
+  - `math-eps-warmup-lr5e6_20260127-095003_step60/`
+  - `math-eps-warmup-lr5e6_20260127-095003_final/`
+- **Eval (Hendrycks, verified)**: `results/math-eps-warmup-lr5e6_20260127-095003/evals/hendrycks_math_verified/`
+- **Eval (Minerva, verified)**: `results/math-eps-warmup-lr5e6_20260127-095003/evals/minerva_math_verified/`
+
+### Analysis Docs
+
+- `docs/kl_spike_fix.md` - Fix documentation and experiment results
+- `docs/kl_spike_analysis.md` - Detailed root cause analysis
+
+### Next Steps
+
+1. Run with num_epochs=10 to allow longer training
+2. Try eps=1e-5, warmup=30 for faster warmup
+3. Tune learning rate and loss.beta

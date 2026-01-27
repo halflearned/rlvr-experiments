@@ -12,7 +12,7 @@ os.environ.setdefault("NCCL_TIMEOUT", "90")  # 90s timeout for NCCL collectives 
 import torch
 from transformers import AutoTokenizer
 
-from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
+from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats, _lifecycle_dump
 from rlvr_experiments.data import (
     DataIterator,
     load_apps,
@@ -296,7 +296,7 @@ async def main():
                             timeout=rollout_timeout_s,
                         )
                     chunk_completions = [out.text for out in response.outputs]
-                    chunk_rollout = RolloutSample.from_vllm(response, pad_token_id)
+                    chunk_rollout = RolloutSample.from_vllm(response, pad_token_id, prompt_id=prompt_id)
 
                     with trace_span("verify"):
                         chunk_rewards = await verify_completions(verify_problem, chunk_completions)
@@ -321,7 +321,7 @@ async def main():
                         timeout=rollout_timeout_s,
                     )
                 completions = [out.text for out in response.outputs]
-                rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
+                rollout_sample = RolloutSample.from_vllm(response, pad_token_id, prompt_id=prompt_id)
 
                 # --- Verify completions ---
                 with trace_span("verify"):
@@ -381,6 +381,17 @@ async def main():
                     )
                     chunks.append(chunk)
                 ref_logprobs = torch.cat(chunks, dim=0)
+
+            # Lifecycle dump: after ref_logprobs computed
+            _lifecycle_dump("2_ref_computed", prompt_id, {
+                "input_ids": rollout_sample.input_ids.clone(),
+                "completion_ids": rollout_sample.completion_ids.clone(),
+                "rollout_logprobs": rollout_sample.logprobs.clone(),
+                "ref_logprobs": ref_logprobs.clone(),
+                "prompt_len": rollout_sample.prompt_len,
+                "completion_lens": rollout_sample.completion_lens,
+                "rewards": rewards,
+            })
 
             # --- Buffer the sample ---
             reward_stats.record(rewards, used=True)

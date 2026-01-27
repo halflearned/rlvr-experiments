@@ -1,9 +1,30 @@
 """Rollout types and batch utilities."""
 
 from dataclasses import dataclass
+from pathlib import Path
+import time
+import os
 
 import torch
 import torch.nn.functional as F
+
+# ============================================================================
+# LIFECYCLE DEBUGGING - dumps data at each stage to trace corruption
+# ============================================================================
+_LIFECYCLE_DEBUG = os.environ.get("RLVR_LIFECYCLE_DEBUG", "0") == "1"
+_LIFECYCLE_DIR = Path("/tmp/lifecycle_dumps")
+
+def _lifecycle_dump(stage: str, prompt_id: str, data: dict):
+    """Dump data at a lifecycle stage for debugging."""
+    if not _LIFECYCLE_DEBUG:
+        return
+    _LIFECYCLE_DIR.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time() * 1000)
+    # Sanitize prompt_id for filename
+    safe_id = str(prompt_id).replace("/", "_")[:50]
+    filename = f"{stage}_{safe_id}_{ts}.pt"
+    torch.save(data, _LIFECYCLE_DIR / filename)
+    print(f"[LIFECYCLE:{stage}] prompt={prompt_id} -> {filename}")
 
 
 class RewardStats:
@@ -77,7 +98,7 @@ class RolloutSample:
     completion_lens: list[int]    # Actual completion lengths before padding
 
     @classmethod
-    def from_vllm(cls, response, pad_token_id: int):
+    def from_vllm(cls, response, pad_token_id: int, prompt_id: str = "unknown"):
         prompt = response.prompt_token_ids
         outputs = response.outputs
         n = len(outputs)
@@ -96,12 +117,37 @@ class RolloutSample:
         finish_reasons = []
         completion_lens = []
 
+        # Also capture raw vLLM logprobs for debugging
+        raw_logprobs_debug = []
+
         for i, o in enumerate(outputs):
             L = len(o.token_ids)
             completion_ids[i, :L] = torch.tensor(o.token_ids)
-            logprobs[i, :L] = torch.tensor([o.logprobs[j][o.token_ids[j]].logprob for j in range(L)])
+            raw_lps = [o.logprobs[j][o.token_ids[j]].logprob for j in range(L)]
+            logprobs[i, :L] = torch.tensor(raw_lps)
             finish_reasons.append(getattr(o, 'finish_reason', None) or 'unknown')
             completion_lens.append(L)
+            raw_logprobs_debug.append(raw_lps)
+
+            # COPIOUS LOGGING: Log every completion extraction
+            if _LIFECYCLE_DEBUG:
+                print(f"[FROM_VLLM] prompt_id={prompt_id} comp={i} L={L} max_comp={max_completion_len} "
+                      f"finish={finish_reasons[-1]} token_ids={list(o.token_ids)[:10]}... "
+                      f"logprobs[:5]={raw_lps[:5]}", flush=True)
+
+        # Lifecycle dump: capture what vLLM returned vs what we extracted
+        _lifecycle_dump("1_from_vllm", prompt_id, {
+            "prompt_tokens": list(prompt),
+            "prompt_len": prompt_len,
+            "n_completions": n,
+            "completion_lens": completion_lens,
+            "max_completion_len": max_completion_len,
+            "input_ids": input_ids.clone(),
+            "completion_ids": completion_ids.clone(),
+            "logprobs": logprobs.clone(),
+            "raw_logprobs_per_completion": raw_logprobs_debug,
+            "finish_reasons": finish_reasons,
+        })
 
         return cls(input_ids, completion_ids, logprobs, prompt_len, finish_reasons, completion_lens)
 
@@ -317,5 +363,29 @@ def make_batch(
 
     stats = BatchStats.from_samples(samples, padded_seq_len, padded_completion_len)
     print(f"[make_batch] B={batch.input_ids.shape[0]}, seq_len={padded_seq_len}, comp_len={padded_completion_len}")
+
+    # Lifecycle dump: capture inputs and outputs of make_batch
+    item_ids = [s.item_id for s in samples]
+    _lifecycle_dump("3_make_batch", "_".join(item_ids[:3]), {
+        "item_ids": item_ids,
+        "n_samples": len(samples),
+        "padded_seq_len": padded_seq_len,
+        "padded_completion_len": padded_completion_len,
+        "natural_max_seq": natural_max_seq,
+        "natural_max_comp": natural_max_comp,
+        "max_prompt_len": max_prompt_len,
+        # Per-sample shapes before batching
+        "per_sample_input_shapes": [(s.rollout.input_ids.shape, s.rollout.completion_ids.shape, s.rollout.logprobs.shape, s.ref_logprobs.shape if s.ref_logprobs is not None else None) for s in samples],
+        "per_sample_prompt_lens": [s.rollout.prompt_len for s in samples],
+        "per_sample_completion_lens": [s.rollout.completion_lens for s in samples],
+        # Batched outputs
+        "batch_input_ids": batch.input_ids.clone(),
+        "batch_completion_ids": batch.completion_ids.clone(),
+        "batch_logprobs": batch.logprobs.clone(),
+        "batch_ref_logprobs": batch.ref_logprobs.clone() if batch.ref_logprobs is not None else None,
+        "batch_mask": batch.mask.clone(),
+        "batch_prompt_lens": batch.prompt_lens.clone(),
+    })
+
     return batch, stats
 

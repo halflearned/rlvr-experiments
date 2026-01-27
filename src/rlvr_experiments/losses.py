@@ -1,9 +1,13 @@
 import torch
+import json
+import os
+from pathlib import Path
 
 from .ops import compute_logprobs
 
 
-import torch
+_KL_SPIKE_DUMP_DIR = Path("/tmp/kl_spike_dumps")
+_KL_SPIKE_THRESHOLD = 1000.0  # dump when kl_max exceeds this
 
 
 def compute_grpo_advantages(
@@ -201,6 +205,48 @@ class GRPOLoss(torch.nn.Module):
                 "clip_frac": clip_frac,
             }
             print(f"[GRPO DEBUG] {self._last_debug}")
+
+            # Dump token-level data when kl_max spikes
+            if kl_max > _KL_SPIKE_THRESHOLD:
+                _KL_SPIKE_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+                import time
+                dump_file = _KL_SPIKE_DUMP_DIR / f"spike_{int(time.time()*1000)}.pt"
+
+                # Find the token with max KL
+                kl_flat = kl_t[valid]
+                max_idx = kl_flat.argmax().item()
+
+                # Get indices in original tensor
+                valid_indices = valid.nonzero(as_tuple=False)
+                max_pos = valid_indices[max_idx]  # [batch_idx, token_idx]
+                batch_idx, token_idx = max_pos[0].item(), max_pos[1].item()
+
+                dump_data = {
+                    "kl_max": kl_max,
+                    "kl_mean": kl_mean,
+                    "max_batch_idx": batch_idx,
+                    "max_token_idx": token_idx,
+                    "max_token_id": response[batch_idx, token_idx].item(),
+                    "trainer_logprob_at_max": trainer_logprobs[batch_idx, token_idx].item(),
+                    "ref_logprob_at_max": ref_lp[batch_idx, token_idx].item(),
+                    "rollout_logprob_at_max": old_lp[batch_idx, token_idx].item(),
+                    "log_ratio_ref_at_max": log_ratio_ref[batch_idx, token_idx].item(),
+                    # Save full tensors for the problematic sequence
+                    "response_seq": response[batch_idx].cpu(),
+                    "trainer_logprobs_seq": trainer_logprobs[batch_idx].cpu(),
+                    "ref_logprobs_seq": ref_lp[batch_idx].cpu(),
+                    "rollout_logprobs_seq": old_lp[batch_idx].cpu(),
+                    "kl_seq": kl_t[batch_idx].cpu(),
+                    "mask_seq": mask[batch_idx].cpu(),
+                    # Also save prompt_lens for debugging
+                    "prompt_len": prompt_lens[batch_idx].item() if prompt_lens is not None else None,
+                }
+                torch.save(dump_data, dump_file)
+                print(f"[KL SPIKE] Dumped to {dump_file}: batch={batch_idx} token={token_idx} "
+                      f"token_id={dump_data['max_token_id']} "
+                      f"trainer_lp={dump_data['trainer_logprob_at_max']:.4f} "
+                      f"ref_lp={dump_data['ref_logprob_at_max']:.4f} "
+                      f"log_ratio_ref={dump_data['log_ratio_ref_at_max']:.4f}")
 
         return loss
 
