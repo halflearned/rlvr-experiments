@@ -603,8 +603,17 @@ class WeightSyncVLLMWorker(Worker):
         flat = torch.empty(chunk["total_numel"], dtype=dtype, device=self.device)
         self.weight_sync.communicator.broadcast(flat, src=src_rank)
 
+        print(f"[VLLM SYNC recv_chunk] Received chunk: {len(chunk['params'])} params, total_numel={chunk['total_numel']:,}, dtype={dtype_str}", flush=True)
+
         offset = 0
+        loaded_count = 0
         for p in chunk["params"]:
             weight = flat[offset : offset + p["numel"]].view(p["shape"])
             offset += p["numel"]
             self.model_runner.model.load_weights(weights=[(p["name"], weight)])
+            loaded_count += 1
+            # Log embed/lm_head weights for debugging
+            if p["name"] in ["model.embed_tokens.weight", "lm_head.weight"]:
+                print(f"[VLLM SYNC recv_chunk] Loaded {p['name']}: shape={p['shape']} numel={p['numel']:,} sample={weight[0,:3].tolist()}", flush=True)
+
+        print(f"[VLLM SYNC recv_chunk] Loaded {loaded_count} params from chunk", flush=True)

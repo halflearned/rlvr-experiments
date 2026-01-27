@@ -314,6 +314,16 @@ aws s3 sync s3://sagemaker-us-west-2-503561457547/rlvr-experiments/checkpoints/a
     /efs/rlvr-experiments/checkpoints/mixed_lr1e5_curriculum_final/
 ```
 
+**To download completed job results:**
+
+Use `scripts/download_job_results.sh` to download and unpack the full job output (config, traces, checkpoints):
+
+```bash
+./scripts/download_job_results.sh annotations-adhoc-20260125-192905
+```
+
+This downloads `model.tar.gz` from S3, unpacks it, and flattens the directory structure so that `config.yaml`, `traces/`, and `checkpoints/` are directly under `results/<job_name>/`.
+
 **To sync traces from running jobs:**
 
 Use `scripts/sync_traces.sh` to poll S3 and download `trace.jsonl` and `config.yaml` for running jobs:

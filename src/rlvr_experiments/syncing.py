@@ -52,9 +52,14 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
     async def resolve(ref):
         return await loop.run_in_executor(None, ray.get, ref)
 
+    print(f"[SYNC _sync_chunks] START channel={channel} chunk_mb={chunk_mb} dtype={dtype_str} dst_is_titan={dst_is_titan}", flush=True)
+    print(f"[SYNC _sync_chunks] src.actors={len(src.actors)} dst_actors={len(dst_actors)}", flush=True)
+
     # Prepare source actors (cache HF state dict)
     with trace_span("sync.prepare_src"):
+        print(f"[SYNC _sync_chunks] Calling prepare_sync_state on {len(src.actors)} src actors...", flush=True)
         await asyncio.gather(*[resolve(a.prepare_sync_state.remote()) for a in src.actors])
+        print(f"[SYNC _sync_chunks] prepare_sync_state done", flush=True)
 
     # Prepare destination actors if they support it (Titan only)
     if dst_is_titan:
@@ -63,19 +68,32 @@ async def _sync_chunks(src, dst_actors, channel, chunk_mb, dtype_str, src_rank, 
 
     try:
         max_chunk_elems = _chunk_elems_from_mb(chunk_mb, dtype_str)
+        print(f"[SYNC _sync_chunks] max_chunk_elems={max_chunk_elems:,} (from {chunk_mb}MB)", flush=True)
+
+        print(f"[SYNC _sync_chunks] Calling build_chunk_plan...", flush=True)
         chunks = await resolve(src.actors[0].build_chunk_plan.remote(max_chunk_elems=max_chunk_elems))
+        print(f"[SYNC _sync_chunks] Got {len(chunks)} chunks", flush=True)
+
+        total_params = sum(len(c["params"]) for c in chunks)
+        total_elems = sum(c["total_numel"] for c in chunks)
+        print(f"[SYNC _sync_chunks] Total: {total_params} params, {total_elems:,} elements, {total_elems*2/1e9:.3f} GB", flush=True)
 
         with trace_span("sync.nccl_broadcast", args={"num_chunks": len(chunks)}):
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                if i == 0 or i == len(chunks) - 1:
+                    print(f"[SYNC _sync_chunks] Broadcasting chunk {i}/{len(chunks)}: {len(chunk['params'])} params, {chunk['total_numel']:,} elems", flush=True)
                 src_futs = [resolve(a.broadcast_chunk.remote(channel, chunk, dtype_str, src_rank)) for a in src.actors]
                 dst_futs = [resolve(a.recv_chunk.remote(channel, chunk, dtype_str, src_rank)) for a in dst_actors]
                 await asyncio.gather(*src_futs, *dst_futs)
+
+        print(f"[SYNC _sync_chunks] All {len(chunks)} chunks broadcast complete", flush=True)
     finally:
         with trace_span("sync.cleanup"):
             await asyncio.gather(*[resolve(a.clear_sync_state.remote()) for a in src.actors])
             if dst_is_titan:
                 await asyncio.gather(*[resolve(a.clear_recv_state.remote()) for a in dst_actors])
 
+    print(f"[SYNC _sync_chunks] DONE: {label}", flush=True)
     logger.info(label)
 
 

@@ -255,7 +255,9 @@ async def main():
                     sp = {**sp, "max_tokens": headroom}
 
             # --- Generate completions ---
-            log_sample("generation_start", prompt_id=prompt_id, dataset=dataset)
+            # Capture trainer version right before generation to avoid post-sync mis-tagging.
+            trainer_version = rollout.trainer_version
+            log_sample("generation_start", prompt_id=prompt_id, dataset=dataset, version=trainer_version)
             verify_problem = dict(item["problem"])
             verify_problem.setdefault("prompt", item["prompt"])
             verify_problem.setdefault("template", item["template"])
@@ -325,8 +327,16 @@ async def main():
                 with trace_span("verify"):
                     rewards = await verify_completions(verify_problem, completions)
 
-            trainer_version = rollout.trainer_version
-            log_sample("generation_done", prompt_id=prompt_id, version=trainer_version, n_completions=len(completions), dataset=dataset)
+            trainer_version_after = rollout.trainer_version
+            log_sample(
+                "generation_done",
+                prompt_id=prompt_id,
+                version=trainer_version,
+                version_after=trainer_version_after,
+                version_delta=trainer_version_after - trainer_version,
+                n_completions=len(completions),
+                dataset=dataset,
+            )
 
             # --- Log rollout (even if filtered) ---
             log_rollout(
@@ -335,6 +345,7 @@ async def main():
                 completions=completions,
                 rewards=rewards,
                 trainer_version=trainer_version,
+                trainer_version_after=trainer_version_after,
                 dataset=dataset,
             )
 
@@ -440,6 +451,34 @@ async def main():
     async def batches(producer_task):
         """Yield batches from buffer, handling staleness eviction."""
         samples = []
+
+        def _evict_stale(sample_list):
+            """Drop samples that became stale while waiting to form a batch."""
+            if not sample_list:
+                return sample_list
+            min_acceptable_version = trainer.version - max_staleness
+            fresh = []
+            for s in sample_list:
+                if s.trainer_version < min_acceptable_version:
+                    buffer.stats.record_wasted(s.trainer_version)
+                    tracer.counter("retry", {
+                        "stale_evicted": 1,
+                        "trainer_version": s.trainer_version,
+                        "trained_at_step": trainer.version,
+                        "stale_after_pop": 1,
+                    })
+                    log_sample(
+                        "evicted",
+                        prompt_id=s.item_id,
+                        trained_at_step=trainer.version,
+                        trainer_version=s.trainer_version,
+                        reason="stale_after_pop",
+                    )
+                    data_iter.mark_pending(s.item_id)
+                else:
+                    fresh.append(s)
+            return fresh
+
         while True:
             # Propagate producer errors
             if producer_task.done() and producer_task.exception():
@@ -460,6 +499,9 @@ async def main():
             if entry is None:
                 # Producer finished, buffer drained - yield any partial batch
                 if samples:
+                    samples = _evict_stale(samples)
+                    if not samples:
+                        return
                     batch, stats = make_batch(
                         samples,
                         pad_token_id,
@@ -503,18 +545,14 @@ async def main():
             # --- Staleness check ---
             # Reject samples generated with weights too far behind current trainer version
             min_acceptable_version = trainer.version - max_staleness
-            if entry.version < min_acceptable_version:
-                buffer.stats.record_wasted(entry.version)
-                tracer.counter("retry", {"stale_evicted": 1, "trainer_version": entry.version, "trained_at_step": trainer.version})
-                log_sample("evicted", prompt_id=entry.item_id, trained_at_step=trainer.version,
-                           trainer_version=entry.version, reason="stale")
-                data_iter.mark_pending(entry.item_id)
-                continue
 
             samples.append(entry.item)
 
             # --- Yield batch when we have enough samples ---
             if len(samples) >= prompts_per_forward_backward:
+                samples = _evict_stale(samples)
+                if len(samples) < prompts_per_forward_backward:
+                    continue
                 batch, stats = make_batch(
                     samples,
                     pad_token_id,
@@ -631,19 +669,23 @@ async def main():
                   f"reward={avg_reward:.2f} reward_all={rw_metrics.get('reward_overall', avg_reward):.2f}")
 
             # Sync weights to reference model
+            # Use float16 wire_dtype to match model dtype (avoids fp16→bf16→fp16 precision loss)
             if trainer.version % sync_ref_every == 0:
                 await sync_titan_to_vllm(
                     trainer, reference,
                     abort_in_flight=abort_in_flight,
                     trainer_version=trainer.version,
+                    wire_dtype="float16",
                 )
 
             # Sync weights to rollout model
+            # Use float16 wire_dtype to match model dtype (avoids fp16→bf16→fp16 precision loss)
             if trainer.version % sync_model_every == 0:
                 await sync_titan_to_vllm(
                     trainer, rollout,
                     abort_in_flight=abort_in_flight,
                     trainer_version=trainer.version,
+                    wire_dtype="float16",
                 )
 
             # Checkpoint (saves to SM_MODEL_DIR on SageMaker, uploaded at job end)

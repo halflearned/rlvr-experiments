@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k
+  name: qwen3_17b_gsm8k_drgrpo
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -18,9 +18,9 @@ training:
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  prompts_per_rollout_sync: 64
+  prompts_per_rollout_sync: 128
   prompts_per_reference_sync: 9999999
-  prompts_per_optim_step: 64
+  prompts_per_optim_step: 128
   prompts_per_forward_backward: 2
   completions_per_micro_batch:
     768: 64
@@ -29,10 +29,9 @@ verifier:
   num_workers: 4
 
 loss:
-  name: drgrpo
-  beta: 0.005 
+  name: grpo
+  beta: 0.001
   eps: 0.2
-  C: 150
 
 data:
   dataset: gsm8k
@@ -45,11 +44,16 @@ data_iter:
 
 sampling:
   temperature: 1.
-  top_p: 0.95
-  top_k: 20
+  top_p: 1
+  top_k: -1
   max_tokens: 512
-  n: 16
+  n: 8
   logprobs: 0
+  stop:
+    - "[Question]"
+    - "Question:"
+    - "Q:"
+    - "\n"
 
 buffer:
   max_reads: 1
@@ -78,8 +82,8 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00002  # 5e-6
-        eps: 0.0001
+        lr: 0.000001
+        eps: 0.0000001
 
       lr_scheduler:
         warmup_steps: 0

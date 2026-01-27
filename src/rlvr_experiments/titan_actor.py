@@ -90,6 +90,38 @@ class TitanModelRank:
         current_params = []
         current_total = 0
 
+        # DEBUG: Comprehensive logging
+        print(f"[SYNC DEBUG build_chunk_plan] START max_chunk_elems={max_chunk_elems:,}", flush=True)
+        print(f"[SYNC DEBUG build_chunk_plan] _sync_cache has {len(self._sync_cache)} keys", flush=True)
+
+        # Check actual dtype of first tensor
+        first_name, first_tensor = next(iter(self._sync_cache.items()))
+        actual_dtype = first_tensor.dtype if not isinstance(first_tensor, DTensor) else first_tensor._local_tensor.dtype
+        print(f"[SYNC DEBUG build_chunk_plan] ACTUAL WEIGHT DTYPE: {actual_dtype}", flush=True)
+
+        total_numel_all = 0
+        dtensor_count = 0
+        regular_count = 0
+
+        for name, tensor in self._sync_cache.items():
+            is_dtensor = isinstance(tensor, DTensor)
+            numel = tensor.numel()
+            total_numel_all += numel
+
+            if is_dtensor:
+                dtensor_count += 1
+                local_numel = tensor._local_tensor.numel()
+                local_dtype = tensor._local_tensor.dtype
+                # Only log first few DTensors to reduce noise
+                if dtensor_count <= 3:
+                    print(f"[SYNC DEBUG DTensor] {name}: dtype={local_dtype} shape={tuple(tensor.shape)} global={numel:,} local={local_numel:,}", flush=True)
+            else:
+                regular_count += 1
+
+        total_bytes = total_numel_all * 2  # bf16/fp16
+        print(f"[SYNC DEBUG build_chunk_plan] TOTAL: {len(self._sync_cache)} params, {total_numel_all:,} elements, {total_bytes/1e9:.3f} GB", flush=True)
+        print(f"[SYNC DEBUG build_chunk_plan] DTensors={dtensor_count}, Regular={regular_count}", flush=True)
+
         for name, tensor in self._sync_cache.items():
             numel = tensor.numel()
             shape = tuple(tensor.shape)
@@ -104,6 +136,9 @@ class TitanModelRank:
 
         if current_params:
             chunks.append({"total_numel": current_total, "params": current_params})
+
+        total_chunk_elems = sum(c["total_numel"] for c in chunks)
+        print(f"[SYNC DEBUG build_chunk_plan] DONE: {len(chunks)} chunks, total_elems={total_chunk_elems:,}", flush=True)
         return chunks
 
     def broadcast_chunk(self, channel: str, chunk: dict, dtype_str: str, src_rank: int) -> None:
@@ -118,6 +153,9 @@ class TitanModelRank:
         for p in chunk["params"]:
             t = self._sync_cache[p["name"]]
             t_full = t.full_tensor() if isinstance(t, DTensor) else t
+            # DEBUG: Log first/last param in chunk
+            if p == chunk["params"][0] or p == chunk["params"][-1]:
+                print(f"[SYNC DEBUG broadcast] {p['name']}: expected={p['numel']:,} actual={t_full.numel():,} match={p['numel']==t_full.numel()}", flush=True)
             tensors.append((p["name"], p["numel"], t_full))
 
         # Pack into flat buffer (only src fills with real data)
@@ -126,6 +164,8 @@ class TitanModelRank:
             offset = 0
             for name, numel, t_full in tensors:
                 buf = t_full.to(device=device, dtype=dtype).contiguous().view(-1)
+                if buf.numel() != numel:
+                    print(f"[SYNC DEBUG broadcast MISMATCH!] {name}: chunk_numel={numel:,} buf_numel={buf.numel():,}", flush=True)
                 flat[offset : offset + numel].copy_(buf)
                 offset += numel
 

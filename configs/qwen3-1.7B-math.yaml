@@ -9,11 +9,10 @@ tokenizer:
   use_fast: false
 
 training:
-  # No max_steps, no max epoch, just run
-  num_epochs: 1
-  checkpoint_interval: 50
+  num_epochs: 2
+  checkpoint_interval: 20
   max_staleness: 0
-  abort_in_flight: false
+  abort_in_flight: true
 
   # MATH problems may need longer completions
   # seq_len_buckets is TOTAL seq length (prompt + completion)
@@ -39,7 +38,7 @@ verifier:
 
 loss:
   name: grpo
-  beta: 0.001  # 1e-3
+  beta: 0.001
   eps: 0.2
 
 data:
@@ -54,11 +53,14 @@ data_iter:
 
 sampling:
   temperature: 1.
-  top_p: 0.95
+  top_p: .95
   top_k: 20
   max_tokens: 1024  # will actually change per dataset
   n: 8
   logprobs: 0
+  stop:
+  - "Problem:"
+  - "\n\n\n"
 
 buffer:
   max_reads: 1
@@ -88,7 +90,7 @@ roles:
       optimizer:
         name: "AdamW"
         lr: 0.000001
-        eps: 0.0001
+        eps: 0.0000001
 
       lr_scheduler:
         warmup_steps: 0
