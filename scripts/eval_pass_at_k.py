@@ -46,12 +46,14 @@ DATASET_REGISTRY = {
         "verifier": "MathVerifier",
         "verifier_module": "rlvr_experiments.verifiers.math",
         "answer_key": "answer",  # Key in problem dict for ground truth
+        "stop": ["[Question]", "Question:", "Q:", "\n\n\n"],
     },
     "math": {
         "loader": "load_math",
         "verifier": "MathVerifier",
         "verifier_module": "rlvr_experiments.verifiers.math",
         "answer_key": "answer",
+        "stop": ["Problem:", "\n\n\n"],
     },
     "deepscaler": {
         "loader": "load_deepscaler",
@@ -243,12 +245,18 @@ def run_generation_and_verification(
         trust_remote_code=True,
     )
 
+    # Get dataset-specific stop tokens
+    stop_tokens = DATASET_REGISTRY[dataset_name].get("stop", [])
+    if stop_tokens:
+        print(f"  Stop tokens: {stop_tokens}")
+
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
         max_tokens=max_tokens,
         n=n_completions,
+        stop=stop_tokens if stop_tokens else None,
     )
 
     # Initialize verifier

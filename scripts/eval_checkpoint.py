@@ -54,7 +54,13 @@ BENCHMARK_CONFIGS = {
     "gsm8k": {
         "max_tokens": 1024,
         "max_model_len": 2048,
-        "stop_sequences": ["Q:", "\n\nQ:"],
+        # Include "Question:" which the model often outputs instead of "Q:"
+        "stop_sequences": ["[Question]", "Question:", "Q:", "\n\n\n"],
+    },
+    "math": {
+        "max_tokens": 1024,
+        "max_model_len": 2048,
+        "stop_sequences": ["Problem:", "\n\n\n"],
     },
     "ifeval": {
         "max_tokens": 2048,
@@ -91,6 +97,36 @@ def load_gsm8k_test():
         })
 
     print(f"[load_gsm8k_test] Loaded {len(rows)} examples")
+    return rows
+
+
+def load_math_test():
+    """Load MATH test set (Hendrycks et al.)."""
+    from datasets import load_dataset
+
+    # Load all subjects from EleutherAI/hendrycks_math
+    subjects = [
+        "algebra", "counting_and_probability", "geometry",
+        "intermediate_algebra", "number_theory", "prealgebra", "precalculus"
+    ]
+
+    rows = []
+    for subject in subjects:
+        ds = load_dataset("EleutherAI/hendrycks_math", subject, split="test")
+        for i, item in enumerate(ds):
+            # Format: "Problem:\n{problem}\n\nSolution:" to match training format
+            prompt = f"Problem:\n{item['problem'].strip()}\n\nSolution:"
+            # Extract answer from solution (boxed answer)
+            solution = item["solution"]
+            rows.append({
+                "id": f"math_{subject}_{i}",
+                "prompt": prompt,
+                "gold_answer": solution,  # Full solution for MathVerifier
+                "level": item.get("level", ""),
+                "type": subject,
+            })
+
+    print(f"[load_math_test] Loaded {len(rows)} examples")
     return rows
 
 
@@ -134,6 +170,7 @@ def load_ifbench():
 
 LOADERS = {
     "gsm8k": load_gsm8k_test,
+    "math": load_math_test,
     "ifeval": load_ifeval,
     "ifbench": load_ifbench,
 }
@@ -155,6 +192,25 @@ def verify_gsm8k(completions: list[str], rows: list[dict]) -> list[dict]:
         results.append({
             "reward": reward,
             "correct": reward > 0,
+        })
+
+    return results
+
+
+def verify_math(completions: list[str], rows: list[dict]) -> list[dict]:
+    """Verify MATH completions using MathVerifier."""
+    from rlvr_experiments.verifiers.math import MathVerifier
+
+    verifier = MathVerifier(timeout=5.0, max_workers=8)
+
+    results = []
+    for completion, row in zip(completions, rows):
+        reward = verifier.verify(completion, row["gold_answer"])
+        results.append({
+            "reward": reward,
+            "correct": reward > 0,
+            "level": row.get("level", ""),
+            "type": row.get("type", ""),
         })
 
     return results
@@ -253,6 +309,7 @@ def verify_ifbench(completions: list[str], rows: list[dict]) -> list[dict]:
 
 VERIFIERS = {
     "gsm8k": verify_gsm8k,
+    "math": verify_math,
     "ifeval": verify_ifeval,
     "ifbench": verify_ifbench,
 }
@@ -295,8 +352,54 @@ def compute_summary_ifeval(results: list[dict], rows: list[dict]) -> dict:
     }
 
 
+def compute_summary_math(results: list[dict], rows: list[dict]) -> dict:
+    """Compute summary metrics for MATH, including per-level and per-subject breakdowns."""
+    n_correct = sum(1 for r in results if r["correct"])
+    n_total = len(results)
+    accuracy = n_correct / n_total if n_total > 0 else 0.0
+
+    # Per-level breakdown
+    level_stats = {}
+    for r in results:
+        level = r.get("level", "unknown")
+        if level not in level_stats:
+            level_stats[level] = {"correct": 0, "total": 0}
+        level_stats[level]["total"] += 1
+        if r["correct"]:
+            level_stats[level]["correct"] += 1
+
+    level_accuracy = {
+        level: stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
+        for level, stats in sorted(level_stats.items())
+    }
+
+    # Per-subject breakdown
+    subject_stats = {}
+    for r in results:
+        subject = r.get("type", "unknown")
+        if subject not in subject_stats:
+            subject_stats[subject] = {"correct": 0, "total": 0}
+        subject_stats[subject]["total"] += 1
+        if r["correct"]:
+            subject_stats[subject]["correct"] += 1
+
+    subject_accuracy = {
+        subject: stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
+        for subject, stats in sorted(subject_stats.items())
+    }
+
+    return {
+        "n_examples": n_total,
+        "n_correct": n_correct,
+        "accuracy": accuracy,
+        "level_accuracy": level_accuracy,
+        "subject_accuracy": subject_accuracy,
+    }
+
+
 SUMMARY_FUNCTIONS = {
     "gsm8k": compute_summary_gsm8k,
+    "math": compute_summary_math,
     "ifeval": compute_summary_ifeval,
     "ifbench": compute_summary_ifeval,  # Same metrics as IFEval
 }
@@ -421,6 +524,14 @@ def main():
 
     if args.benchmark == "gsm8k":
         print(f"Accuracy: {metrics['accuracy']:.4f} ({metrics['n_correct']}/{metrics['n_examples']})")
+    elif args.benchmark == "math":
+        print(f"Overall Accuracy: {metrics['accuracy']:.4f} ({metrics['n_correct']}/{metrics['n_examples']})")
+        print(f"\nPer-level accuracy:")
+        for level, acc in metrics["level_accuracy"].items():
+            print(f"  {level}: {acc:.4f}")
+        print(f"\nPer-subject accuracy:")
+        for subject, acc in metrics["subject_accuracy"].items():
+            print(f"  {subject}: {acc:.4f}")
     else:
         print(f"Prompt-level strict accuracy: {metrics['prompt_pass']}/{metrics['n_prompts']} = {metrics['prompt_level_strict_acc']:.2%}")
         print(f"Instruction-level accuracy:   {metrics['inst_pass']}/{metrics['inst_total']} = {metrics['inst_level_acc']:.2%}")

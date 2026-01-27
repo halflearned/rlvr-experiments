@@ -2219,3 +2219,92 @@ By difficulty level:
 1. Run with num_epochs=10 to allow longer training
 2. Try eps=1e-5, warmup=30 for faster warmup
 3. Tune learning rate and loss.beta
+
+---
+
+## Hyperparameter Experiments on MATH (2026-01-27)
+
+Following the KL spike fix, we're exploring three hyperparameter combinations for MATH training:
+
+### Summary Table
+
+| Run | LR | Optimizer eps | Warmup | Epochs | MATH Acc | GSM8K Acc | Δ MATH | Δ GSM8K |
+|-----|-----|---------------|--------|--------|----------|-----------|--------|---------|
+| **Base (Qwen3-1.7B)** | — | — | — | — | 41.18% | 14.33% | — | — |
+| **math-eps-warmup-lr5e6** | 5e-6 | 1e-4 | 50 | 2 | 44.88% | — | +3.7pp | — |
+| **math-10epochs** (step100) | 5e-6 | 1e-4 | 50 | 10 | 57.56% | **67.02%** | +16.4pp | **+52.7pp** |
+| **math-eps1e5-warmup30-lr1e5** (step80) | 1e-5 | 1e-5 | 30 | 10 | 61.20% | — | +20.0pp | — |
+
+### Run 1: math-eps-warmup-lr5e6 (baseline)
+
+- **Config**: `configs/adhoc/math-eps-warmup-lr5e6.yaml`
+- **Hyperparams**: lr=5e-6, eps=1e-4, warmup=50, epochs=2
+- **Steps completed**: 72 (limited by seq_len_buckets filtering ~38% of prompts)
+- **MATH (MathVerifier)**: 44.88% (base: 41.18%)
+
+### Run 2: math-10epochs
+
+- **Config**: `configs/adhoc/math-10epochs.yaml`
+- **Hyperparams**: lr=5e-6, eps=1e-4, warmup=50, epochs=10
+- **Run folder**: `results/math-10epochs_20260127-154943/`
+- **Checkpoint**: step100
+
+**Results (MathVerifier)**:
+| Benchmark | Accuracy |
+|-----------|----------|
+| MATH (5000) | 57.56% (2878/5000) |
+| GSM8K (1319) | **67.02%** (884/1319) — after stop token fix |
+
+**Note on GSM8K accuracy**: Original evaluation showed 16.83% because completions continued past the answer with "Question:" patterns (hallucinated follow-up questions). The model outputs "Question:" but stop tokens were `["Q:", "\n\nQ:"]`. After clipping at `["Question:", "[Question]", "Q:", "\n\n\n"]`, accuracy jumps to 67.02%. See `results/math-10epochs_20260127-154943/evals/gsm8k_step100_clipped/`.
+
+**By Level**:
+| Level | Accuracy |
+|-------|----------|
+| Level 1 | 84.90% |
+| Level 2 | 75.28% |
+| Level 3 | 66.49% |
+| Level 4 | 55.02% |
+| Level 5 | 31.27% |
+
+### Run 3: math-eps1e5-warmup30-lr1e5
+
+- **Config**: `configs/adhoc/math-eps1e5-warmup30-lr1e5.yaml`
+- **Hyperparams**: lr=1e-5, eps=1e-5, warmup=30, epochs=10
+- **Run folder**: `results/math-eps1e5-warmup30-lr1e5_20260127-155007/`
+- **Checkpoint**: step80 (stalled due to high filtering rate)
+
+**Results (MathVerifier)**:
+| Benchmark | Accuracy |
+|-----------|----------|
+| MATH (5000) | 61.20% (3060/5000) |
+
+**By Level**:
+| Level | Accuracy |
+|-------|----------|
+| Level 1 | 89.93% |
+| Level 2 | 80.31% |
+| Level 3 | 72.06% |
+| Level 4 | 57.00% |
+| Level 5 | 33.38% |
+
+### Key Findings
+
+1. **Higher LR (1e-5) + Lower eps (1e-5) works better** - The eps1e5 run reached 61.2% at step 80, vs 57.6% at step 100 for the conservative config
+
+2. **GSM8K improves dramatically** - After fixing stop tokens, the 10-epochs run shows **67.02%** on GSM8K (base: **14.33%**) — a **+52.7pp improvement**! The initial 16.8% was due to missing "Question:" in stop tokens — the model hallucinated follow-up questions, and MathVerifier extracted the LAST number instead of the answer.
+
+3. **Longer training helps** - Going from 2 epochs (44.9%) to 10 epochs (57.6%+) shows continued improvement
+
+### Stop Token Lesson Learned
+
+The model outputs "Question:" when generating follow-up content, but our stop tokens were `["Q:", "\n\nQ:"]`. This caused:
+- 1071/1319 completions (81%) to contain hallucinated follow-up questions
+- MathVerifier's `_extract_last_number()` picked up numbers from hallucinated content
+- Correct answers like "18" were masked by follow-up numbers like "1820"
+
+**Fix**: Use stop tokens `["[Question]", "Question:", "Q:", "\n\n\n"]` for GSM8K generation.
+
+### Next Experiments
+
+- Try lr=7e-6 (between 5e-6 and 1e-5) with eps=1e-5, warmup=30
+- Train on harder problems only (MATH levels 3-5)
