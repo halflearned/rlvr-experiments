@@ -228,8 +228,8 @@
 
             <section id="datasets">
                 <h3>Dataset, verifiers, benchmarks.</h3>
-                <p>GSM8k:</p>
-                <p>MATH:</p>
+                <p><strong>GSM8K:</strong> The MathVerifier achieves only 8-9% on base model completions compared to lm_eval's 66% strict-match accuracy. This discrepancy is intentional and correct. The base model often continues generating after providing the answer, producing additional unrelated Q&A pairs. MathVerifier extracts the <em>last</em> number in the response, which in these cases comes from the spurious continuation rather than the actual answer. lm_eval's strict-match, by contrast, extracts the <em>first</em> occurrence of "The answer is X." and ignores everything after. While lm_eval's approach is appropriate for evaluation (measuring whether the model <em>can</em> solve the problem), MathVerifier's stricter approach is the right training signal for RL: it rewards completions that both solve the problem correctly <em>and</em> terminate appropriately, rather than giving credit to responses that ramble indefinitely after stating the answer.</p>
+                <p><strong>MATH:</strong></p>
             </section>
 
  
