@@ -348,6 +348,80 @@ def load_math(
     return ds.map(preprocess)
 
 
+def load_aime(split: str = "train") -> ray.data.Dataset:
+    """
+    Load AIME (American Invitational Mathematics Examination) dataset as a Ray Dataset.
+
+    Uses AI-MO/aimo-validation-aime dataset with 90 competition math problems.
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
+    """
+    # AIME dataset only has train split with 90 problems
+    hf_dataset = load_dataset("AI-MO/aimo-validation-aime", split="train")
+    items = list(hf_dataset)
+
+    # Add index to each item for deterministic prompt_id
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        # Format: "Problem:\n{problem}\n\nSolution:" to match MATH eval format
+        question = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
+        prompt_id = f"aime_{row['_idx']}"
+        return {
+            "prompt": question,
+            "problem": {
+                "answer": row["answer"],
+                "prompt_id": prompt_id,
+                "verifier_type": "math",
+                "dataset_name": "aime",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": MATH_MAX_COMPLETION_LEN,
+            },
+        }
+
+    return ds.map(preprocess)
+
+
+def load_beyondaime(split: str = "test") -> ray.data.Dataset:
+    """
+    Load ByteDance-Seed/BeyondAIME dataset as a Ray Dataset.
+
+    100 challenging math problems beyond AIME difficulty.
+
+    Returns dataset with columns: "prompt", "problem"
+    where "problem" is a dict with "answer" and "prompt_id" for use with MathVerifier.
+    """
+    # BeyondAIME only has test split with 100 problems
+    hf_dataset = load_dataset("ByteDance-Seed/BeyondAIME", split="test")
+    items = list(hf_dataset)
+
+    # Add index to each item for deterministic prompt_id
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        # Format: "Problem:\n{problem}\n\nSolution:" to match MATH eval format
+        question = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
+        prompt_id = f"beyondaime_{row['_idx']}"
+        return {
+            "prompt": question,
+            "problem": {
+                "answer": str(row["answer"]),  # Convert to string for MathVerifier
+                "prompt_id": prompt_id,
+                "verifier_type": "math",
+                "dataset_name": "beyondaime",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": MATH_MAX_COMPLETION_LEN,
+            },
+        }
+
+    return ds.map(preprocess)
+
+
 def load_deepscaler(split: str = "train") -> ray.data.Dataset:
     """
     Load DeepScaleR-Preview-Dataset as a Ray Dataset.

@@ -88,7 +88,12 @@ class Runtime:
         config_stem = Path(plan_path).stem.replace(" ", "_")
         run_name = f"{config_stem}_{timestamp}"
 
-        results_root = Path(os.environ.get("SM_MODEL_DIR", "results")).resolve()
+        # On SageMaker: use SM_MODEL_DIR (auto-uploaded to S3)
+        # Locally: use EFS to avoid filling up local disk
+        if os.environ.get("SM_MODEL_DIR"):
+            results_root = Path(os.environ["SM_MODEL_DIR"]).resolve()
+        else:
+            results_root = Path("/efs/rlvr-experiments/results").resolve()
 
         # Ensure unique run dir if a collision somehow occurs
         run_dir = results_root / run_name

@@ -73,6 +73,80 @@ get_gpu_summary() {
     done
 }
 
+# Check if a training run is healthy by looking at trace file freshness
+# Returns: "healthy", "stale", or "unknown"
+# A run is stale if its trace file hasn't been updated in >5 minutes
+check_training_health() {
+    local node=$1
+    local config_name=$2
+
+    # Find the most recent run directory matching this config
+    local find_cmd="find /efs/rlvr-experiments/results ~/results -maxdepth 1 -type d -name '${config_name%.yaml}_*' 2>/dev/null | sort -r | head -1"
+
+    if [ "$node" = "localhost" ]; then
+        run_dir=$(eval "$find_cmd")
+    else
+        run_dir=$(ssh -o ConnectTimeout=5 ubuntu@$node "$find_cmd" 2>/dev/null)
+    fi
+
+    if [ -z "$run_dir" ]; then
+        echo "unknown"
+        return
+    fi
+
+    # Check trace file age
+    local trace_file="$run_dir/traces/trace.jsonl"
+    local age_cmd="stat -c %Y '$trace_file' 2>/dev/null || echo 0"
+
+    if [ "$node" = "localhost" ]; then
+        trace_mtime=$(eval "$age_cmd")
+    else
+        trace_mtime=$(ssh -o ConnectTimeout=5 ubuntu@$node "$age_cmd" 2>/dev/null)
+    fi
+
+    if [ "$trace_mtime" = "0" ] || [ -z "$trace_mtime" ]; then
+        echo "unknown"
+        return
+    fi
+
+    local now=$(date +%s)
+    local age_seconds=$((now - trace_mtime))
+    local age_minutes=$((age_seconds / 60))
+
+    if [ "$age_minutes" -gt 5 ]; then
+        echo "stale|${age_minutes}m"
+    else
+        echo "healthy|${age_minutes}m"
+    fi
+}
+
+# Check if GPUs with 0% util are actually zombies or just waiting (on-policy training)
+# Returns true if zombie (no active healthy training), false otherwise
+is_actually_zombie() {
+    local node=$1
+    local jobs=$2
+
+    # If there are training jobs, check their health
+    local has_healthy_training=false
+
+    while IFS='|' read -r type config started pid; do
+        if [ "$type" = "TRAIN" ]; then
+            health=$(check_training_health "$node" "$config")
+            health_status=$(echo "$health" | cut -d'|' -f1)
+            if [ "$health_status" = "healthy" ]; then
+                has_healthy_training=true
+                break
+            fi
+        fi
+    done <<< "$jobs"
+
+    if [ "$has_healthy_training" = true ]; then
+        echo "false"
+    else
+        echo "true"
+    fi
+}
+
 check_node() {
     local node=$1
     local name=$2
@@ -83,10 +157,32 @@ check_node() {
         gpu_output=$(ssh -o ConnectTimeout=5 ubuntu@$node "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader" 2>/dev/null || echo "UNREACHABLE")
     fi
 
+    # Get jobs first - we need them to determine if 0% util GPUs are actually zombies
+    jobs=$(get_jobs "$node")
+
+    # Check if there's healthy training (trace file updated in last 5 min)
+    local has_healthy_training=false
+    local training_health=""
+    while IFS='|' read -r type config started pid; do
+        if [ "$type" = "TRAIN" ] && [ -n "$config" ]; then
+            health=$(check_training_health "$node" "$config")
+            health_status=$(echo "$health" | cut -d'|' -f1)
+            health_age=$(echo "$health" | cut -d'|' -f2)
+            if [ "$health_status" = "healthy" ]; then
+                has_healthy_training=true
+                training_health="healthy (trace updated ${health_age} ago)"
+            elif [ "$health_status" = "stale" ]; then
+                training_health="STALE (trace not updated in ${health_age})"
+            fi
+            break
+        fi
+    done <<< "$jobs"
+
     # Parse GPU status
     free_gpus=""
     busy_gpus=""
-    zombie_gpus=""
+    waiting_gpus=""  # 0% util but healthy training running
+    zombie_gpus=""   # 0% util and NO healthy training
 
     while IFS=, read -r idx mem util; do
         idx=$(echo "$idx" | tr -d ' ')
@@ -99,7 +195,12 @@ check_node() {
         if [ "$mem_val" -lt 100 ]; then
             free_gpus="$free_gpus$idx,"
         elif [ "$util" -lt 5 ]; then
-            zombie_gpus="$zombie_gpus$idx,"
+            # 0% util with memory - could be waiting or zombie
+            if [ "$has_healthy_training" = true ]; then
+                waiting_gpus="$waiting_gpus$idx,"
+            else
+                zombie_gpus="$zombie_gpus$idx,"
+            fi
         else
             busy_gpus="$busy_gpus$idx,"
         fi
@@ -108,10 +209,8 @@ check_node() {
     # Remove trailing commas
     free_gpus=$(echo "$free_gpus" | sed 's/,$//')
     busy_gpus=$(echo "$busy_gpus" | sed 's/,$//')
+    waiting_gpus=$(echo "$waiting_gpus" | sed 's/,$//')
     zombie_gpus=$(echo "$zombie_gpus" | sed 's/,$//')
-
-    # Get jobs
-    jobs=$(get_jobs "$node")
 
     echo "### $name ($node)"
     echo ""
@@ -119,17 +218,33 @@ check_node() {
     echo "|--------|------|"
     [ -n "$free_gpus" ] && echo "| Free | $free_gpus |"
     [ -n "$busy_gpus" ] && echo "| Busy | $busy_gpus |"
-    [ -n "$zombie_gpus" ] && echo "| Zombie (0% util) | $zombie_gpus |"
+    [ -n "$waiting_gpus" ] && echo "| Waiting (0% util, training healthy) | $waiting_gpus |"
+    [ -n "$zombie_gpus" ] && echo "| **ZOMBIE** (0% util, no healthy job) | $zombie_gpus |"
     echo ""
 
     if [ -n "$jobs" ]; then
         echo "**Active Jobs:**"
         echo ""
-        echo "| Type | Config/Target | Started | PID |"
-        echo "|------|---------------|---------|-----|"
-        echo "$jobs" | while IFS='|' read -r type config started pid; do
-            [ -n "$type" ] && echo "| $type | $config | $started | $pid |"
-        done
+        echo "| Type | Config/Target | Started | PID | Health |"
+        echo "|------|---------------|---------|-----|--------|"
+        while IFS='|' read -r type config started pid; do
+            if [ -n "$type" ]; then
+                if [ "$type" = "TRAIN" ]; then
+                    health=$(check_training_health "$node" "$config")
+                    health_status=$(echo "$health" | cut -d'|' -f1)
+                    health_age=$(echo "$health" | cut -d'|' -f2)
+                    if [ "$health_status" = "healthy" ]; then
+                        echo "| $type | $config | $started | $pid | ✓ ${health_age} ago |"
+                    elif [ "$health_status" = "stale" ]; then
+                        echo "| $type | $config | $started | $pid | ⚠ STALE ${health_age} |"
+                    else
+                        echo "| $type | $config | $started | $pid | ? |"
+                    fi
+                else
+                    echo "| $type | $config | $started | $pid | - |"
+                fi
+            fi
+        done <<< "$jobs"
         echo ""
     else
         echo "_No jobs detected_"

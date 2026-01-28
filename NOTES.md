@@ -2308,3 +2308,134 @@ The model outputs "Question:" when generating follow-up content, but our stop to
 
 - Try lr=7e-6 (between 5e-6 and 1e-5) with eps=1e-5, warmup=30
 - Train on harder problems only (MATH levels 3-5)
+
+---
+
+## MATH Pass@k Results - Base Model (2026-01-27)
+
+Pass@k evaluation for curriculum learning on Qwen3-1.7B-Base model.
+
+**Results**: `results/qwen3-1.7B-base/evals/math/pass-at-k/`
+
+| k | Pass Rate |
+|---|-----------|
+| 1 | 39.0% |
+| 2 | 53.7% |
+| 4 | 66.2% |
+| 8 | 74.9% |
+| 16 | 80.7% |
+| 32 | 85.8% |
+| 64 | 89.2% |
+| 128 | **92.0%** |
+
+- **Total prompts**: 7,500
+- **Completions per prompt**: 128
+- **Total completions**: 960,000
+- **Correct completions**: 371,083 (38.7% raw pass rate)
+- **Sampling**: temperature=1.0, top_p=0.95, top_k=20
+- **Stop tokens**: `["Problem:", "\n\n\n"]`
+
+### Interpretation
+
+- pass@1 (39%) ≈ greedy eval (41%) confirms evaluation consistency
+- pass@128 (92%) shows that most MATH problems are solvable by the base model with enough attempts
+- The gap between pass@1 and pass@128 (39% → 92%) shows significant room for improvement via RL
+
+### Curriculum Use
+
+Per-prompt pass rates in `all_verification_results.jsonl` can be used to:
+1. Filter out "too easy" problems (pass@128 = 100%)
+2. Filter out "unsolvable" problems (pass@128 = 0%)
+3. Prioritize moderate-difficulty problems for training
+
+---
+
+## Evaluation: math-10epochs vs math-lr7e6 (2026-01-28)
+
+### Models Evaluated
+
+| Model | Description |
+|-------|-------------|
+| **Base** | Qwen3-1.7B-Base (pretrained) |
+| **10epochs** | math-10epochs step160 (lr=1e-6, 10 epoch config) |
+| **lr7e6** | math-lr7e6-eps1e5-warmup30 step160 (lr=7e-6, eps=1e-5, warmup=30) |
+
+### MathVerifier Greedy Eval (eval_checkpoint.py)
+
+| Checkpoint | GSM8K | MATH |
+|------------|-------|------|
+| 10ep_step60 | 65.81% | 55.94% |
+| 10ep_step100 | 67.48% | 58.58% |
+| 10ep_step160 | 68.76% | 59.68% |
+| lr7e6_step60 | 74.37% | 62.14% |
+| lr7e6_step100 | 75.82% | 62.02% |
+| lr7e6_step160 | 76.88% | 62.94% |
+
+**Takeaway**: lr7e6 significantly outperforms 10epochs (+8-9pp on GSM8K, +2-3pp on MATH).
+
+### AIME Pass@k (90 problems)
+
+| Model | pass@1 | pass@2 | pass@4 | pass@16 | pass@32 |
+|-------|--------|--------|--------|---------|---------|
+| Base | 1.11% | 1.11% | 4.44% | 7.78% | 12.22% |
+| 10epochs | 2.22% | 3.33% | 7.78% | 10.00% | 15.56% |
+| lr7e6 | 1.11% | 4.44% | 7.78% | 12.22% | 14.44% |
+
+**Takeaway**: Inconclusive - models trade wins at different k values. AIME too hard and sample size too small to differentiate.
+
+### BeyondAIME Pass@k (100 problems, harder than AIME)
+
+| Model | pass@1 | pass@2 | pass@4 | pass@16 | pass@32 |
+|-------|--------|--------|--------|---------|---------|
+| Base | 0.00% | 1.00% | 1.00% | 3.00% | 6.00% |
+| 10epochs | 1.00% | 2.00% | 2.00% | 7.00% | **14.00%** |
+| lr7e6 | **2.00%** | **3.00%** | **4.00%** | **11.00%** | 13.00% |
+
+**Takeaway**: lr7e6 wins at k<=16, 10epochs wins at k=32. Both dramatically better than base (2x+ improvement at pass@32).
+
+### Summary
+
+1. **lr7e6 is the better model overall** - consistently wins on GSM8K/MATH greedy eval
+2. **Training helps on hard problems** - both models show 2x+ improvement over base on BeyondAIME
+3. **Higher learning rate (7e-6 vs 1e-6) appears beneficial** for math reasoning
+4. **eps=1e-5 and warmup=30** (lr7e6 config) may also contribute to better performance
+
+---
+
+## IF Multi-Constraints Ablation Results (2026-01-28)
+
+### Ablation Setup
+
+Training Qwen3-1.7B-Base on IF multi-constraints dataset to test different RL training strategies.
+
+| Ablation | Description | Config |
+|----------|-------------|--------|
+| **Vanilla** | Standard GRPO, no staleness | `annotations-adhoc` (step125) |
+| **Staleness=1** | Allow 1-step stale rollouts | `if-staleness1.yaml` |
+| **Curriculum** | Easy-to-hard ordering by pass@k | `if-curriculum.yaml` |
+| **Adaptive** | Early stopping (k_success=2, k_failure=2) | `if-adaptive.yaml` (in progress) |
+
+### IFEval Results (Prompt-Level Strict Accuracy)
+
+| Model | Prompt Accuracy | Instruction Accuracy | Notes |
+|-------|-----------------|---------------------|-------|
+| **Base (Qwen3-1.7B)** | 17.38% | 29.38% | Pretrained baseline |
+| **Vanilla (step125)** | **42.51%** | **54.80%** | Best so far |
+| if-staleness1 (step120) | 40.30% | 54.32% | |
+| if-curriculum (step120) | 41.40% | 53.96% | |
+| if-adaptive | TBD | TBD | Running (step 77/120) |
+
+### Preliminary Conclusions
+
+1. **All ablations significantly improve over base** (+23pp prompt accuracy, +25pp instruction accuracy)
+2. **Vanilla is currently the best** - the additional features (staleness, curriculum) don't help for IF
+3. **Staleness=1 slightly hurts** compared to vanilla (-2pp)
+4. **Curriculum ordering doesn't help** for IF (possibly because IF problems don't have clear difficulty gradient like math)
+
+### Notes
+
+- IF multi-constraints has 40,400 problems
+- Curriculum ordering filtered to 33,866 problems with 0.01 <= pass@k <= 0.99
+- All runs trained for 120 steps with checkpoint interval of 20
+- Evaluations used greedy decoding (temperature=0)
+

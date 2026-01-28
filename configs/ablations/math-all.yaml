@@ -1,5 +1,8 @@
+# MATH ablation: ALL features combined
+# staleness=1 + adaptive sampling + curriculum ordering
+# Based on math-lr7e6-eps1e5-warmup30.yaml (our best MATH config)
 run:
-  name: gsm8k_s0_opt8_lr5e7
+  name: math_all
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,42 +12,59 @@ tokenizer:
   use_fast: false
 
 training:
-  num_epochs: 1
-  max_steps: 100
-  max_staleness: 0
+  num_epochs: 10
+  max_steps: 120
+  checkpoint_interval: 20
+  max_staleness: 1  # STALENESS
   abort_in_flight: true
-  checkpoint_interval: 50
-
-  seq_len_buckets: [768]
-  completion_len_buckets: [512]
-
-  prompts_per_rollout_sync: 8
-  prompts_per_reference_sync: 64
-  prompts_per_optim_step: 8
-  prompts_per_forward_backward: 1
-  completions_per_micro_batch: 64
+  seq_len_buckets: [768, 1280]
+  completion_len_buckets: [512, 1024]
+  prompts_per_rollout_sync: 128
+  prompts_per_reference_sync: 9999999
+  prompts_per_optim_step: 128
+  prompts_per_forward_backward: 2
+  completions_per_micro_batch:
+    768: 16
+    1280: 16
+    1536: 8
+    2048: 4
+    2560: 4
+  # ADAPTIVE SAMPLING
+  adaptive_sampling:
+    k_success: 2
+    k_failure: 2
+    max_completions: 64
+    chunk_size: 16
 
 verifier:
   num_workers: 4
 
 loss:
-  beta: 0.05
+  name: grpo
+  beta: 0.001
   eps: 0.2
 
 data:
-  dataset: gsm8k
+  dataset: math
+  split: train
+  # No level filter - curriculum file determines which problems to train on
 
 data_iter:
-  system_prompt: "Solve the following math problem and provide the final answer inside \\boxed{}"
-  assistant_prefix: "Let's think step by step."
+  system_prompt: ""
+  assistant_prefix: ""
+  skip_chat_template: true
+  order: "/efs/rlvr-experiments/assets/math_curriculum_order.txt"  # CURRICULUM
 
 sampling:
-  temperature: 0.6
-  top_p: 0.95
+  temperature: 1.
+  top_p: .95
   top_k: 20
-  max_tokens: 512
-  n: 64
+  max_tokens: 1024
+  n: 16
   logprobs: 0
+  stop:
+  - "Problem:"
+  - "\n\n\n"
 
 buffer:
   max_reads: 1
@@ -59,7 +79,7 @@ roles:
       profiling:
         enable_profiling: false
         save_traces_folder: "profile_trace"
-        profile_freq: 100
+        profile_freq: 10
 
       metrics:
         log_freq: 1
@@ -73,17 +93,17 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.0000005  # 5e-7
-        eps: 0.0001
+        lr: 0.000007   # 7e-6
+        eps: 0.00001   # 1e-5
 
       lr_scheduler:
-        warmup_steps: 0
+        warmup_steps: 30
         decay_ratio: 0.0
 
       training:
-        seq_len: 1024
-        dtype: "bfloat16"
-        mixed_precision_param: "bfloat16"
+        seq_len: 2560
+        dtype: "float16"
+        mixed_precision_param: "float16"
         mixed_precision_reduce: "float32"
 
       parallelism:
@@ -100,7 +120,7 @@ roles:
         initial_load_in_hf: true
         interval: 500
         last_save_model_only: false
-        export_dtype: "bfloat16"
+        export_dtype: "float16"
         async_mode: "disabled"
 
       activation_checkpoint:
@@ -120,9 +140,10 @@ roles:
       max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 1025
+      max_model_len: 2561
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
+      logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: false
       enable_chunked_prefill: true
@@ -131,13 +152,13 @@ roles:
     kind: vllm
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
-      max_concurrent_per_replica: 8
-      max_num_seqs: 256
+      max_concurrent_per_replica: 10
+      max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 1
-      max_model_len: 1024
+      data_parallel_size: 3
+      max_model_len: 2560
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: true
@@ -145,7 +166,6 @@ roles:
 
 sync:
   chunk_mb: 100
-
   wiring:
     - src: trainer
       dst: reference

@@ -55,6 +55,20 @@ DATASET_REGISTRY = {
         "answer_key": "answer",
         "stop": ["Problem:", "\n\n\n"],
     },
+    "aime": {
+        "loader": "load_aime",
+        "verifier": "MathVerifier",
+        "verifier_module": "rlvr_experiments.verifiers.math",
+        "answer_key": "answer",
+        "stop": ["Problem:", "\n\n\n"],
+    },
+    "beyondaime": {
+        "loader": "load_beyondaime",
+        "verifier": "MathVerifier",
+        "verifier_module": "rlvr_experiments.verifiers.math",
+        "answer_key": "answer",
+        "stop": ["Problem:", "\n\n\n"],
+    },
     "deepscaler": {
         "loader": "load_deepscaler",
         "verifier": "MathVerifier",
@@ -730,7 +744,7 @@ def main():
 
     # Build verifier kwargs
     verifier_kwargs = {}
-    if args.dataset in ("gsm8k", "math", "deepscaler"):
+    if args.dataset in ("gsm8k", "math", "deepscaler", "aime", "beyondaime"):
         verifier_kwargs["max_workers"] = args.verifier_workers
         verifier_kwargs["warmup"] = True
 

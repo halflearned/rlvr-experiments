@@ -33,12 +33,65 @@ Outputs:
     <output_dir>/completions.jsonl  - Raw completions with prompts
     <output_dir>/results.jsonl      - Completions with verification results
     <output_dir>/summary.json       - Aggregate metrics
+
+IMPORTANT: Always specify --gpu N to select which GPU to use!
+vLLM does not respect CUDA_VISIBLE_DEVICES reliably.
 """
 
 import argparse
-import json
 import os
+import subprocess
 import sys
+
+# =============================================================================
+# GPU Selection - MUST happen before any other imports that touch CUDA
+# =============================================================================
+
+def find_free_gpu():
+    """Find a GPU with minimal memory usage."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True
+        )
+        gpus = []
+        for line in result.stdout.strip().split("\n"):
+            idx, mem = line.split(",")
+            gpus.append((int(idx.strip()), int(mem.strip())))
+        # Find GPU with least memory used
+        gpus.sort(key=lambda x: x[1])
+        if gpus and gpus[0][1] < 1000:  # Less than 1GB used
+            return gpus[0][0]
+        return None
+    except Exception:
+        return None
+
+def setup_gpu():
+    """Parse --gpu argument early and set CUDA_VISIBLE_DEVICES before any CUDA imports."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--gpu", type=int, default=None)
+    args, _ = parser.parse_known_args()
+
+    if args.gpu is None:
+        # Try to find a free GPU
+        free_gpu = find_free_gpu()
+        if free_gpu is not None:
+            print(f"[eval] Auto-selected GPU {free_gpu} (least memory used)")
+            args.gpu = free_gpu
+        else:
+            print("[eval] ERROR: No --gpu specified and no free GPU found (<1GB memory).")
+            print("[eval] Please specify --gpu N where N is a free GPU index.")
+            print("[eval] Check available GPUs with: nvidia-smi --query-gpu=index,memory.used --format=csv")
+            sys.exit(1)
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    print(f"[eval] Using GPU {args.gpu}")
+    return args.gpu
+
+# Set GPU before any other imports
+_SELECTED_GPU = setup_gpu()
+
+import json
 import time
 from pathlib import Path
 
@@ -427,8 +480,7 @@ def main():
     max_model_len = config["max_model_len"]
     stop_sequences = config["stop_sequences"]
 
-    # Set GPU
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    # GPU already set at module load time via setup_gpu()
 
     # Create output directory
     output_dir = Path(args.output_dir)

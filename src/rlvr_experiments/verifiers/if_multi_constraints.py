@@ -670,6 +670,41 @@ class IFMultiConstraintsVerifier:
         if not rewards:
             return 0.0
         return sum(rewards) / len(rewards)
+
+    def verify_detailed(
+        self, response: str, ground_truth: str | dict | list
+    ) -> tuple[list[bool], list[str], list[dict]]:
+        """Verify with per-constraint details.
+
+        Returns:
+            (per_constraint_results, instruction_ids, kwargs_list)
+            - per_constraint_results: list of bools, True if constraint satisfied
+            - instruction_ids: list of constraint type strings (e.g. "keywords:existence")
+            - kwargs_list: list of kwargs dicts for each constraint
+        """
+        instruction_ids, kwargs_list = self._parse_ground_truth(ground_truth)
+        if not instruction_ids:
+            return [], [], []
+
+        answer = _remove_thinking_section(response)
+        if not answer:
+            return [False] * len(instruction_ids), instruction_ids, kwargs_list
+
+        results = []
+        for instruction_id, kwargs in zip(instruction_ids, kwargs_list):
+            func = INSTRUCTION_FUNCTIONS.get(instruction_id)
+            if func is None:
+                results.append(False)
+                continue
+            if kwargs is None:
+                kwargs = {}
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            try:
+                ok = func(answer, **kwargs) if kwargs else func(answer)
+            except Exception:
+                ok = False
+            results.append(bool(ok))
+        return results, instruction_ids, kwargs_list
         
     async def verify_completions(self, problem: dict, completions: list[str], **kwargs) -> list[float]:
         ground_truth = problem.get("ground_truth", "")

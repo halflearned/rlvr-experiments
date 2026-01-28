@@ -1,16 +1,21 @@
 #!/bin/bash
 # Sync results from a remote node to EFS
-# Usage: ./scripts/sync_node_results.sh <node_ip> <run_name> [interval_seconds]
+# Usage: ./scripts/sync_node_results.sh <node_ip> <run_name> [interval_seconds] [--with-checkpoints]
 #
 # Examples:
-#   ./scripts/sync_node_results.sh 172.31.24.124 math-lr7e6-eps1e5-warmup30_20260127-181035
-#   ./scripts/sync_node_results.sh 172.31.24.124 math-lr7e6-eps1e5-warmup30_20260127-181035 60
+#   ./scripts/sync_node_results.sh 172.31.24.124 math-run 60                    # traces only
+#   ./scripts/sync_node_results.sh 172.31.24.124 math-run 60 --with-checkpoints # include model weights
 
 set -e
 
-NODE_IP="${1:?Usage: $0 <node_ip> <run_name> [interval_seconds]}"
-RUN_NAME="${2:?Usage: $0 <node_ip> <run_name> [interval_seconds]}"
+NODE_IP="${1:?Usage: $0 <node_ip> <run_name> [interval_seconds] [--with-checkpoints]}"
+RUN_NAME="${2:?Usage: $0 <node_ip> <run_name> [interval_seconds] [--with-checkpoints]}"
 INTERVAL="${3:-0}"
+WITH_CHECKPOINTS=0
+if [ "$4" = "--with-checkpoints" ] || [ "$3" = "--with-checkpoints" ]; then
+    WITH_CHECKPOINTS=1
+    [ "$3" = "--with-checkpoints" ] && INTERVAL=0
+fi
 STALE_TIMEOUT=3600  # 1 hour with no changes = exit
 
 REMOTE_DIR="ubuntu@${NODE_IP}:~/results/${RUN_NAME}/"
@@ -27,12 +32,17 @@ sync_once() {
 
     # Rsync with checksum to detect changes
     # --info=progress2 shows overall progress
-    # --exclude large model checkpoints by default (sync separately if needed)
-    OUTPUT=$(rsync -avz --info=stats2 \
-        --exclude='*.safetensors' \
-        --exclude='*.bin' \
-        --exclude='*.pt' \
-        "$REMOTE_DIR" "$LOCAL_DIR" 2>&1)
+    if [ "$WITH_CHECKPOINTS" -eq 1 ]; then
+        # Include model weights
+        OUTPUT=$(rsync -avz --info=stats2 "$REMOTE_DIR" "$LOCAL_DIR" 2>&1)
+    else
+        # Exclude large model checkpoints (sync separately if needed)
+        OUTPUT=$(rsync -avz --info=stats2 \
+            --exclude='*.safetensors' \
+            --exclude='*.bin' \
+            --exclude='*.pt' \
+            "$REMOTE_DIR" "$LOCAL_DIR" 2>&1)
+    fi
 
     # Check if anything was transferred
     if echo "$OUTPUT" | grep -q "Number of regular files transferred: [1-9]"; then
