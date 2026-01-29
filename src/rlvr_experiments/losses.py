@@ -168,9 +168,9 @@ class GRPOLoss(torch.nn.Module):
         else:
             surrogate = ratio * adv
 
-        # KL penalty (Schulman-style approximator used in GRPO implementations):
-        # log_ratio_ref = log(πθ/πref)
-        log_ratio_ref = trainer_logprobs - ref_lp
+        # KL penalty (Schulman k3 estimator, matching torchforge):
+        # r = log(π_ref / π_θ), then KL ≈ exp(r) - r - 1 estimates KL(π_θ ∥ π_ref)
+        log_ratio_ref = ref_lp - trainer_logprobs  # log(π_ref / π_θ)
         kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
 
         per_token_loss = -(surrogate - self.beta * kl_t)
@@ -306,7 +306,8 @@ class DrGRPOLoss(torch.nn.Module):
         else:
             surrogate = ratio * adv
 
-        log_ratio_ref = trainer_logprobs - ref_lp
+        # KL penalty (Schulman k3 estimator): r = log(π_ref/π_θ)
+        log_ratio_ref = ref_lp - trainer_logprobs  # log(π_ref / π_θ)
         kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
 
         per_token_loss = -(surrogate - self.beta * kl_t)
@@ -451,7 +452,8 @@ class DAPOLoss(torch.nn.Module):
             if ref_logprobs is None:
                 raise ValueError("ref_logprobs must be provided when beta > 0")
             ref_lp = ref_logprobs.to(device=device, dtype=torch.float32)
-            log_ratio_ref = trainer_logprobs - ref_lp
+            # KL penalty (Schulman k3 estimator): r = log(π_ref/π_θ)
+            log_ratio_ref = ref_lp - trainer_logprobs  # log(π_ref / π_θ)
             kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
             per_token_loss = -(surrogate - self.beta * kl_t)
         else:
