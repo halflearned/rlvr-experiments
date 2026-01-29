@@ -2486,3 +2486,49 @@ Training Qwen3-1.7B-Base on MATH dataset to test different RL training strategie
 - [ ] Run final evals on math-curriculum step140
 - [ ] Investigate math-all crash (loss explosion)
 
+---
+
+## DeepScaler Run: `qwen3-1.7B-deepscaler_20260129-032252`
+
+**Node**: Secondary (172.31.17.116)
+**Duration**: ~7h36m (03:22 → 10:58, Jan 29)
+**Config**: lr=1e-6, eps=1e-6, warmup=40, beta=0.001, eps_clip=0.2, n=8, 2 epochs
+**Dataset**: DeepScaleR-Preview (40,315 prompts), max_completion_len=1024
+
+### Training Stats
+
+- **Total prompts generated**: 85,009 (~2 full passes over 40k dataset)
+- **Skipped (zero variance)**: 49,429 (58.1%) — all 8 completions same reward, no GRPO signal
+- **Retried**: 4,381
+- **Prompts used for training**: 35,580
+- **Total steps**: 243 (119 in epoch 0, 124 in epoch 1)
+- Checkpoints every 20 steps: step20 through step240 + final
+
+### MATH Eval (final checkpoint)
+
+**Overall: 62.22%** (3111/5000)
+
+| Level | Accuracy |
+|-------|----------|
+| Level 1 | 91.08% |
+| Level 2 | 81.21% |
+| Level 3 | 71.71% |
+| Level 4 | 58.73% |
+| Level 5 | 34.97% |
+
+| Subject | Accuracy |
+|---------|----------|
+| Algebra | 84.16% |
+| Prealgebra | 76.92% |
+| Number Theory | 57.59% |
+| Counting & Probability | 54.01% |
+| Geometry | 53.65% |
+| Precalculus | 46.34% |
+| Intermediate Algebra | 40.42% |
+
+### Notes
+
+- 62.22% MATH is close to the current best (62.94% from math-lr7e6 step160), despite using a much larger and harder dataset
+- The high skip rate (58%) is expected: DeepScaler problems are harder, so more prompts fall into "all 8 wrong" (zero variance) early in training
+- Run completed cleanly (both epochs finished, no crash)
+

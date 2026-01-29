@@ -1,5 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k
+  name: qwen3_17b_gsm8k_dapo_beta1e-5
+  port_start: 29700
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -9,14 +10,14 @@ tokenizer:
   use_fast: false
 
 training:
+  num_epochs: 5
+  max_steps: 200
+  checkpoint_interval: 20
   max_staleness: 0
   abort_in_flight: false
-  checkpoint_interval: 20
 
-  # GSM8K only - single bucket for 512 token completions
-  # ~256 prompt + 512 completion = 768 total
-  seq_len_buckets: [768]
-  completion_len_buckets: [512]
+  seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+  completion_len_buckets: [512, 1024, 1536, 2048]
 
   prompts_per_rollout_sync: 64
   prompts_per_reference_sync: 9999999
@@ -24,21 +25,35 @@ training:
   prompts_per_forward_backward: 2
   completions_per_micro_batch:
     768: 64
+    1280: 16
+    1536: 8
+    2048: 4
+    2560: 4
+
+  alpha_grpo: 1.0
+  alpha_sft: 1.0
+
+  sft:
+    seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+    completion_len_buckets: [512, 1024, 1536, 2048]
+    micro_batch_size: 2
 
 verifier:
   num_workers: 4
 
 loss:
-  name: drgrpo
-  beta: 0.005 
-  eps: 0.2
-  C: 150
+  name: dapo
+  beta: 0.00001
 
 data:
   dataset: gsm8k
-  split: train
 
 data_iter:
+  system_prompt: ""
+  assistant_prefix: ""
+  skip_chat_template: true
+
+sft_data_iter:
   system_prompt: ""
   assistant_prefix: ""
   skip_chat_template: true
@@ -47,9 +62,16 @@ sampling:
   temperature: 1.
   top_p: 0.95
   top_k: 20
-  max_tokens: 512
+  max_tokens: 2048
   n: 8
   logprobs: 0
+  stop:
+    - "[Question]"
+    - "Question:"
+    - "Q:"
+    - "\n\n\n"
+    - "\n\n"
+
 
 buffer:
   max_reads: 1
@@ -78,7 +100,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.00002  # 5e-6
+        lr: 0.000001
         eps: 0.0001
 
       lr_scheduler:
@@ -86,9 +108,9 @@ roles:
         decay_ratio: 0.0
 
       training:
-        seq_len: 768  # Must match max(seq_len_buckets)
-        dtype: "float16"
-        mixed_precision_param: "float16"
+        seq_len: 2560
+        dtype: "bfloat16"
+        mixed_precision_param: "bfloat16"
         mixed_precision_reduce: "float32"
 
       parallelism:
@@ -125,9 +147,9 @@ roles:
       max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 769  # seq_len_buckets[-1] + 1 for logprobs
+      max_model_len: 2561
       gpu_memory_utilization: 0.90
-      dtype: "float16"
+      dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: false
@@ -141,9 +163,9 @@ roles:
       max_num_seqs: 64
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 768
+      max_model_len: 2560
       gpu_memory_utilization: 0.90
-      dtype: "float16"
+      dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: true
