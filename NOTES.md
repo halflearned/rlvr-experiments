@@ -1,5 +1,30 @@
 # RLVR Experiments - Debug Notes
 
+## GSM8K Loss Comparison Results (2026-01-29)
+
+Three loss functions evaluated on GSM8K-only training with Qwen3-1.7B-Base.
+
+**Best run**: `gsm8k-only` (GRPO loss, branch `working-run-checkpoint`, config `configs/variations/qwen3-1.7B-gsm8k-only.yaml`)
+
+Key config: lr=1e-6, beta=0.001, eps=0.2, temperature=1.0, n=8, max_tokens=512, TP=2, max_staleness=0, 64 prompts/step.
+
+| Run | Loss | Step | GSM8K | MATH |
+|-----|------|------|-------|------|
+| **Base** (with stop tokens) | — | — | 62.77% (828/1319) | 52.68% (2634/5000) |
+| **DAPO** | DAPOLoss (eps_low=0.2, eps_high=0.28, beta=0) | 200 | 66.49% (877/1319) | 53.40% (2670/5000) |
+| **GRPO** | GRPOLoss (beta=0.001, eps=0.2) | 200 | 67.93% (896/1319) | 52.66% (2633/5000) |
+| **gsm8k-only** | GRPOLoss (beta=0.001, eps=0.2) | 160 | 74.60% (984/1319) | 54.68% (2734/5000) |
+| **gsm8k-only** | GRPOLoss (beta=0.001, eps=0.2) | 200 | **76.72%** (1012/1319) | **55.72%** (2786/5000) |
+
+**Notes**:
+- Base model without stop tokens scores only 14.33% on GSM8K (rambles past the answer).
+- The gsm8k-only run is the clear winner: +14pp over base on GSM8K, +3pp on MATH (cross-domain transfer from GSM8K training alone).
+- DAPO and GRPO runs used the current `main` branch code (with KL direction fix); gsm8k-only used the `working-run-checkpoint` branch.
+- DAPO vs GRPO difference is small (~1.5pp on GSM8K). Neither meaningfully improves MATH over base.
+- All evals use stop tokens: GSM8K stops on `[Question]`, `Question:`, `Q:`, `\n\n\n`; MATH stops on `Problem:`, `\n\n\n`.
+
+---
+
 ## Problem Statement
 
 Training Qwen3-1.7B-Base with GRPO on mixed datasets (GSM8K, MATH, MBPP, IFEval, APPS) is not showing expected improvement on benchmarks. We suspect formatting issues are filtering out otherwise correct answers, preventing the model from receiving training signal.
