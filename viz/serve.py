@@ -209,41 +209,112 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             self.wfile.write((line + "\n").encode())
                 elif filter_type == "buffer":
                     # Paginated buffer events: ?filter=buffer&offset=0&limit=5000
+                    # Supports direction=desc to load latest events first
                     offset = int(query.get("offset", [0])[0])
                     limit = int(query.get("limit", [5000])[0])
-                    buffer_count = 0
-                    sent_count = 0
-                    with open(TraceState.trace_file, "r") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if '"type":"buffer"' in line or '"type": "buffer"' in line:
-                                if buffer_count >= offset:
-                                    self.wfile.write((line + "\n").encode())
-                                    sent_count += 1
-                                    if sent_count >= limit:
-                                        break
-                                buffer_count += 1
+                    direction = query.get("direction", ["asc"])[0]
+                    count_only = query.get("count", ["0"])[0] == "1"
+
+                    if count_only or direction == "desc":
+                        # Need total count for desc pagination or count-only requests
+                        total = 0
+                        with open(TraceState.trace_file, "r") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                if '"type":"buffer"' in line or '"type": "buffer"' in line:
+                                    total += 1
+                        if count_only:
+                            self.wfile.write(f'{{"total":{total}}}\n'.encode())
+                        else:
+                            # desc: offset means "how many from the end we've already loaded"
+                            # so we want events from index (total - offset - limit) to (total - offset)
+                            start = max(0, total - offset - limit)
+                            end = total - offset
+                            buffer_count = 0
+                            sent_count = 0
+                            with open(TraceState.trace_file, "r") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    if '"type":"buffer"' in line or '"type": "buffer"' in line:
+                                        if start <= buffer_count < end:
+                                            self.wfile.write((line + "\n").encode())
+                                            sent_count += 1
+                                        elif buffer_count >= end:
+                                            break
+                                        buffer_count += 1
+                    else:
+                        buffer_count = 0
+                        sent_count = 0
+                        with open(TraceState.trace_file, "r") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                if '"type":"buffer"' in line or '"type": "buffer"' in line:
+                                    if buffer_count >= offset:
+                                        self.wfile.write((line + "\n").encode())
+                                        sent_count += 1
+                                        if sent_count >= limit:
+                                            break
+                                    buffer_count += 1
                 elif filter_type == "spans":
                     # Only send span events (for timeline visualization)
                     # Supports pagination: ?filter=spans&offset=0&limit=50000
+                    # Supports direction=desc to load latest events first
                     offset = int(query.get("offset", [0])[0])
                     limit = int(query.get("limit", [50000])[0])
-                    span_count = 0
-                    sent_count = 0
-                    with open(TraceState.trace_file, "r") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if '"type":"span"' in line or '"type": "span"' in line:
-                                if span_count >= offset:
-                                    self.wfile.write((line + "\n").encode())
-                                    sent_count += 1
-                                    if sent_count >= limit:
-                                        break
-                                span_count += 1
+                    direction = query.get("direction", ["asc"])[0]
+                    count_only = query.get("count", ["0"])[0] == "1"
+
+                    if count_only or direction == "desc":
+                        # Need total count for desc pagination or count-only requests
+                        total = 0
+                        with open(TraceState.trace_file, "r") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                if '"type":"span"' in line or '"type": "span"' in line:
+                                    total += 1
+                        if count_only:
+                            self.wfile.write(f'{{"total":{total}}}\n'.encode())
+                        else:
+                            # desc: offset means "how many from the end we've already loaded"
+                            start = max(0, total - offset - limit)
+                            end = total - offset
+                            span_count = 0
+                            sent_count = 0
+                            with open(TraceState.trace_file, "r") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    if '"type":"span"' in line or '"type": "span"' in line:
+                                        if start <= span_count < end:
+                                            self.wfile.write((line + "\n").encode())
+                                            sent_count += 1
+                                        elif span_count >= end:
+                                            break
+                                        span_count += 1
+                    else:
+                        span_count = 0
+                        sent_count = 0
+                        with open(TraceState.trace_file, "r") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                if '"type":"span"' in line or '"type": "span"' in line:
+                                    if span_count >= offset:
+                                        self.wfile.write((line + "\n").encode())
+                                        sent_count += 1
+                                        if sent_count >= limit:
+                                            break
+                                    span_count += 1
                 else:
                     # Full trace (legacy)
                     with open(TraceState.trace_file, "rb") as f:

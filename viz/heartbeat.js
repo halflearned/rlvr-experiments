@@ -192,7 +192,7 @@ class HeartbeatViz {
                 timelineLoadMore.textContent = 'Loading...';
                 timelineLoadMore.disabled = true;
                 await this.loadMoreSpans();
-                timelineLoadMore.textContent = 'Load More';
+                timelineLoadMore.textContent = 'Load Older';
                 timelineLoadMore.disabled = false;
                 this.updateLoadMoreButtons();
             });
@@ -219,7 +219,7 @@ class HeartbeatViz {
                 bufferLoadMore.textContent = 'Loading...';
                 bufferLoadMore.disabled = true;
                 await this.loadMoreBuffer();
-                bufferLoadMore.textContent = 'Load More';
+                bufferLoadMore.textContent = 'Load Older';
                 bufferLoadMore.disabled = false;
                 this.updateLoadMoreButtons();
             });
@@ -854,7 +854,7 @@ class HeartbeatViz {
 
     async loadSpans(loadMore = false) {
         // Load span events for timeline visualization (on-demand)
-        // loadMore=true fetches the next batch instead of initial
+        // Loads latest data first (direction=desc), "Load Older" fetches earlier data
         if (!loadMore && this.spansLoaded) return;
         if (!loadMore) this.spansLoaded = true;
 
@@ -862,8 +862,8 @@ class HeartbeatViz {
         const offset = loadMore ? this.spansOffset : 0;
 
         try {
-            console.log(`[loadSpans] Loading spans offset=${offset} limit=${limit}...`);
-            const response = await fetch(`/trace?filter=spans&offset=${offset}&limit=${limit}`);
+            console.log(`[loadSpans] Loading spans (latest-first) offset=${offset} limit=${limit}...`);
+            const response = await fetch(`/trace?filter=spans&offset=${offset}&limit=${limit}&direction=desc`);
             if (response.ok) {
                 const text = await response.text();
                 console.log(`[loadSpans] Received ${text.length} bytes`);
@@ -884,8 +884,9 @@ class HeartbeatViz {
                     }
                 }
                 this.spansOffset = (this.spansOffset || 0) + addedCount;
-                this.hasMoreSpans = addedCount >= limit;  // Probably more if we hit the limit
-                console.log(`[loadSpans] Added ${addedCount} spans, total offset now ${this.spansOffset}, hasMore=${this.hasMoreSpans}`);
+                // If we got fewer than limit, there's no older data left
+                this.hasMoreSpans = addedCount >= limit;
+                console.log(`[loadSpans] Added ${addedCount} spans, total loaded ${this.spansOffset}, hasOlder=${this.hasMoreSpans}`);
                 // Update timeline height and re-render
                 this.updateTimelinePanelHeight();
                 if (this.timelineEnabled) this.renderTimeline();
@@ -896,13 +897,13 @@ class HeartbeatViz {
     }
 
     async loadMoreSpans() {
-        // Called from UI to fetch next batch of spans
+        // Called from UI to fetch next (older) batch of spans
         await this.loadSpans(true);
     }
 
     async loadBuffer(loadMore = false) {
         // Load buffer events for buffer dynamics visualization (on-demand)
-        // loadMore=true fetches the next batch instead of initial
+        // Loads latest data first (direction=desc), "Load Older" fetches earlier data
         if (!loadMore && this.bufferLoaded) return;
         if (!loadMore) this.bufferLoaded = true;
 
@@ -910,8 +911,8 @@ class HeartbeatViz {
         const offset = loadMore ? this.bufferOffset : 0;
 
         try {
-            console.log(`[loadBuffer] Loading buffer offset=${offset} limit=${limit}...`);
-            const response = await fetch(`/trace?filter=buffer&offset=${offset}&limit=${limit}`);
+            console.log(`[loadBuffer] Loading buffer (latest-first) offset=${offset} limit=${limit}...`);
+            const response = await fetch(`/trace?filter=buffer&offset=${offset}&limit=${limit}&direction=desc`);
             if (response.ok) {
                 const text = await response.text();
                 console.log(`[loadBuffer] Received ${text.length} bytes`);
@@ -932,8 +933,9 @@ class HeartbeatViz {
                     }
                 }
                 this.bufferOffset = (this.bufferOffset || 0) + addedCount;
-                this.hasMoreBuffer = addedCount >= limit;  // Probably more if we hit the limit
-                console.log(`[loadBuffer] Added ${addedCount} buffer events, total offset now ${this.bufferOffset}, hasMore=${this.hasMoreBuffer}`);
+                // If we got fewer than limit, there's no older data left
+                this.hasMoreBuffer = addedCount >= limit;
+                console.log(`[loadBuffer] Added ${addedCount} buffer events, total loaded ${this.bufferOffset}, hasOlder=${this.hasMoreBuffer}`);
                 // Re-render buffer visualization
                 if (this.bufferEnabled) {
                     this.renderBuffer();
@@ -946,7 +948,7 @@ class HeartbeatViz {
     }
 
     async loadMoreBuffer() {
-        // Called from UI to fetch next batch of buffer events
+        // Called from UI to fetch next (older) batch of buffer events
         await this.loadBuffer(true);
     }
 
@@ -1570,7 +1572,7 @@ class HeartbeatViz {
     }
 
     updateLoadMoreButtons() {
-        // Show/hide "Load More" buttons based on whether there's more data
+        // Show/hide "Load Older" buttons based on whether there's older data to load
         const timelineLoadMore = document.getElementById('timeline-load-more');
         const bufferLoadMore = document.getElementById('buffer-load-more');
 
