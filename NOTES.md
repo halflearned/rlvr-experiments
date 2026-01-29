@@ -2439,3 +2439,50 @@ Training Qwen3-1.7B-Base on IF multi-constraints dataset to test different RL tr
 - All runs trained for 120 steps with checkpoint interval of 20
 - Evaluations used greedy decoding (temperature=0)
 
+---
+
+## MATH Ablation Results (2026-01-28)
+
+### Ablation Setup
+
+Training Qwen3-1.7B-Base on MATH dataset to test different RL training strategies.
+
+| Ablation | Description | Config | Run Directory |
+|----------|-------------|--------|---------------|
+| **Staleness=1** | Allow 1-step stale rollouts | `configs/ablations/math-staleness1.yaml` | `results/math-staleness1_20260128-014714` |
+| **Curriculum** | Easy-to-hard ordering by pass@k | `configs/ablations/math-curriculum.yaml` | `results/math-curriculum_20260128-014922` |
+| **Adaptive** | Early stopping (k_success=2, k_failure=2) | `configs/ablations/math-adaptive.yaml` | `results/math-adaptive_20260128-021106` |
+| **All Combined** | staleness + curriculum + adaptive | `configs/ablations/math-all.yaml` | Crashed at step 50 |
+
+### Eval Results (MathVerifier Greedy)
+
+| Model | Step | GSM8K | MATH |
+|-------|------|-------|------|
+| **Base (Qwen3-1.7B)** | - | 14% | 41% |
+| math-staleness1 | 40 | - | 61.46% |
+| math-staleness1 | 100 | 72.86% | - |
+| math-curriculum | 40 | - | 61.96% |
+| math-curriculum | 100 | - | 62.04% |
+| math-adaptive | 40 | - | 60.02% |
+| **Best (lr7e6 baseline)** | 160 | 76.88% | 62.94% |
+
+### Checkpoints Available
+
+- **math-staleness1**: step20, 40, 60, 80, 100, 120, 140, 160, final
+- **math-curriculum**: step20, 40, 60, 80, 100, 120, 140
+- **math-adaptive**: step20, 40, 60 (may have crashed early)
+
+### Preliminary Observations
+
+1. **All ablations improve significantly over base** (41% → 60-62% on MATH)
+2. **No ablation beats the lr7e6 baseline** (62.94% MATH, 76.88% GSM8K)
+3. **math-all (combined features) is unstable** - crashes with loss explosion around step 50
+4. **Curriculum provides marginal improvement** over staleness1 at step 40 (61.96% vs 61.46%)
+5. **Adaptive sampling shows slightly lower performance** at step 40 (60.02%)
+
+### TODO
+
+- [ ] Run final evals on math-staleness1 step160
+- [ ] Run final evals on math-curriculum step140
+- [ ] Investigate math-all crash (loss explosion)
+

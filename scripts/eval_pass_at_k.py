@@ -652,6 +652,12 @@ Examples:
         default=42,
         help="Seed for shuffling (default: 42)",
     )
+    parser.add_argument(
+        "--max-prompts",
+        type=int,
+        default=None,
+        help="Maximum number of prompts to evaluate (default: all)",
+    )
 
     # Verifier options
     parser.add_argument(
@@ -693,6 +699,11 @@ def main():
         random.seed(args.shuffle_seed)
         random.shuffle(items)
         print(f"Shuffled dataset with seed {args.shuffle_seed}")
+
+    # Limit number of prompts if requested
+    if args.max_prompts is not None and args.max_prompts < len(items):
+        items = items[:args.max_prompts]
+        print(f"Limited to {args.max_prompts} prompts")
 
     # Filter prompts that are too long
     max_prompt_len = args.max_prompt_len

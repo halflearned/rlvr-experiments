@@ -268,20 +268,29 @@ def load_math(
     local_cache = f"/tmp/math_{split}_cache"
 
     use_local_cache = False
-    if os.path.exists(local_cache):
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
         print(f"[load_math] Loading from local cache: {local_cache}")
         use_local_cache = True
     else:
         # Try S3 first, fall back to HuggingFace Hub
         try:
             print(f"[load_math] Trying S3 cache: {s3_cache}")
-            os.makedirs(local_cache, exist_ok=True)
-            subprocess.run(
-                ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
-                check=True, capture_output=True
-            )
-            print(f"[load_math] Loaded from S3 cache")
-            use_local_cache = True
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                subprocess.run(
+                    ["aws", "s3", "sync", s3_cache, tmp_dir, "--quiet"],
+                    check=True, capture_output=True
+                )
+                # Only move to local_cache if sync succeeded and has content
+                if os.path.exists(os.path.join(tmp_dir, "dataset_info.json")):
+                    import shutil
+                    if os.path.exists(local_cache):
+                        shutil.rmtree(local_cache)
+                    shutil.move(tmp_dir, local_cache)
+                    print(f"[load_math] Loaded from S3 cache")
+                    use_local_cache = True
+                else:
+                    print(f"[load_math] S3 cache empty, loading from HuggingFace Hub")
         except Exception as e:
             print(f"[load_math] S3 cache not available ({e}), loading from HuggingFace Hub")
 
@@ -437,16 +446,33 @@ def load_deepscaler(split: str = "train") -> ray.data.Dataset:
     import os
     import subprocess
 
-    # Check for S3 cache first (for SageMaker VPC environments without internet)
-    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/deepscaler_{split}/"
     local_cache = f"/tmp/deepscaler_{split}_cache"
+    s3_cache = f"s3://sagemaker-us-west-2-503561457547/rlvr-experiments/datasets/deepscaler_{split}/"
+    items = None
 
-    use_local_cache = False
+    # 1. Try local cache
     if os.path.exists(local_cache):
-        print(f"[load_deepscaler] Loading from local cache: {local_cache}")
-        use_local_cache = True
-    else:
-        # Try S3 first, fall back to HuggingFace Hub
+        try:
+            from datasets import Dataset
+            hf_dataset = Dataset.load_from_disk(local_cache)
+            items = list(hf_dataset)
+            print(f"[load_deepscaler] Loaded from local cache: {local_cache}")
+        except Exception as e:
+            print(f"[load_deepscaler] Local cache broken ({e}), removing it")
+            import shutil
+            shutil.rmtree(local_cache, ignore_errors=True)
+
+    # 2. Try HuggingFace Hub
+    if items is None:
+        try:
+            print(f"[load_deepscaler] Loading from HuggingFace Hub")
+            hf_dataset = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split=split)
+            items = list(hf_dataset)
+        except Exception as e:
+            print(f"[load_deepscaler] HuggingFace Hub failed ({e}), trying S3 cache")
+
+    # 3. Fall back to S3 (for SageMaker VPC environments without internet)
+    if items is None:
         try:
             print(f"[load_deepscaler] Trying S3 cache: {s3_cache}")
             os.makedirs(local_cache, exist_ok=True)
@@ -454,18 +480,16 @@ def load_deepscaler(split: str = "train") -> ray.data.Dataset:
                 ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
                 check=True, capture_output=True
             )
+            from datasets import Dataset
+            hf_dataset = Dataset.load_from_disk(local_cache)
+            items = list(hf_dataset)
             print(f"[load_deepscaler] Loaded from S3 cache")
-            use_local_cache = True
         except Exception as e:
-            print(f"[load_deepscaler] S3 cache not available ({e}), loading from HuggingFace Hub")
+            import shutil
+            shutil.rmtree(local_cache, ignore_errors=True)
+            raise RuntimeError(f"[load_deepscaler] Failed to load from all sources: {e}")
 
-    if use_local_cache:
-        from datasets import Dataset
-        hf_dataset = Dataset.load_from_disk(local_cache)
-        items = list(hf_dataset)
-    else:
-        hf_dataset = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split=split)
-        items = list(hf_dataset)
+    assert items, "[load_deepscaler] Dataset is empty"
 
     indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
     ds = ray.data.from_items(indexed_items)
@@ -996,6 +1020,32 @@ def load_allenai_gsm8k_mini(
     return ray.data.from_items(selected_rows)
 
 
+def load_sft_jsonl(path: str, split: str = "train") -> ray.data.Dataset:
+    """
+    Load an SFT dataset from a local JSONL file.
+
+    Each line should have: prompt_id, prompt, problem (dict), completion (str).
+    The completion is injected into problem["completion"] for use by make_sft_batch.
+    """
+    import json
+
+    rows = []
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            problem = dict(item["problem"])
+            problem["completion"] = item["completion"]
+            problem.setdefault("prompt_id", item.get("prompt_id", f"sft_{len(rows)}"))
+            rows.append({
+                "prompt": item["prompt"],
+                "problem": problem,
+            })
+    print(f"[load_sft_jsonl] Loaded {len(rows)} SFT examples from {path}")
+    return ray.data.from_items(rows)
+
+
 # --- Dataset registry for load_mixed ---
 
 DATASET_LOADERS = {
@@ -1010,6 +1060,7 @@ DATASET_LOADERS = {
     "dummy": load_dummy,
     "allenai_rlvr": load_allenai_rlvr,
     "allenai_gsm8k_mini": load_allenai_gsm8k_mini,
+    "sft_jsonl": load_sft_jsonl,
 }
 
 

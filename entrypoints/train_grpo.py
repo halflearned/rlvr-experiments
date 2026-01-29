@@ -686,7 +686,7 @@ async def main():
                     trainer, reference,
                     abort_in_flight=abort_in_flight,
                     trainer_version=trainer.version,
-                    wire_dtype="float16",
+                    wire_dtype="bfloat16",
                 )
 
             # Sync weights to rollout model
@@ -696,7 +696,7 @@ async def main():
                     trainer, rollout,
                     abort_in_flight=abort_in_flight,
                     trainer_version=trainer.version,
-                    wire_dtype="float16",
+                    wire_dtype="bfloat16",
                 )
 
             # Checkpoint (saves to SM_MODEL_DIR on SageMaker, uploaded at job end)
