@@ -2557,3 +2557,27 @@ Training Qwen3-1.7B-Base on MATH dataset to test different RL training strategie
 - The high skip rate (58%) is expected: DeepScaler problems are harder, so more prompts fall into "all 8 wrong" (zero variance) early in training
 - Run completed cleanly (both epochs finished, no crash)
 
+---
+
+## GSM8K LR Sweep: GRPO vs DAPO (Jan 29, 2026)
+
+Ran 4 jobs in parallel across secondary and tertiary nodes, evaluating GRPO and DAPO losses at two learning rates on GSM8K. All use Qwen3-1.7B-Base, 4 GPUs each, beta=0.001.
+
+### Eval Results (GSM8K accuracy)
+
+| Run | Loss | LR | Step | GSM8K |
+|-----|------|----|------|-------|
+| dapo-lr1e5 | DAPO | 1e-5 | 100 | **81.05%** |
+| grpo-lr5e6 | GRPO | 5e-6 | 200 | 79.38% |
+| grpo-lr1e5 | GRPO | 1e-5 | 100 | 79.30% |
+| dapo-lr5e6 | DAPO | 5e-6 | 200 | 79.15% |
+
+Baseline (Qwen3-1.7B-Base zero-shot): ~14%
+
+### Notes
+
+- DAPO at lr=1e-5 is the clear winner, reaching 81% in only 100 steps
+- All four runs perform similarly (~79-81%), suggesting the method is fairly robust to LR in this range
+- Higher LR (1e-5) converges in fewer steps (100 vs 200 at 5e-6)
+- DAPO slightly outperforms GRPO at both LRs, though the gap is small
+
