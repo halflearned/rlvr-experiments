@@ -33,6 +33,11 @@ training:
   alpha_grpo: 1.0
   alpha_sft: 0.5
 
+  sft:
+    seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+    completion_len_buckets: [512, 1024, 1536, 2048]
+    micro_batch_size: 2
+
 verifier:
   num_workers: 4
 

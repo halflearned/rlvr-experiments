@@ -1,5 +1,6 @@
 run:
-  name: qwen3_17b_if_grpo_sft
+  # v3: same as v2 but alpha_sft=0.001 (matched to GRPO loss magnitude)
+  name: qwen3_17b_if_grpo_sft_v3
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -30,7 +31,7 @@ training:
     2560: 4
 
   alpha_grpo: 1.0
-  alpha_sft: 1.0
+  alpha_sft: 0.001
 
   sft:
     seq_len_buckets: [768, 1280, 1536, 2048, 2560]
@@ -97,11 +98,11 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000005
-        eps: 0.0001
+        lr: 0.000007
+        eps: 0.00001
 
       lr_scheduler:
-        warmup_steps: 0
+        warmup_steps: 30
         decay_ratio: 0.0
 
       training:

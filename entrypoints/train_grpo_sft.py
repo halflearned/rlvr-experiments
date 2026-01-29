@@ -152,6 +152,13 @@ async def main() -> None:
     completion_len_buckets = training["completion_len_buckets"] or [max_completion_len]
     max_seq_len = seq_len_buckets[-1]
 
+    # SFT-specific parameters (independent of GRPO)
+    sft_training = training.get("sft", {})
+    sft_seq_len_buckets = sft_training.get("seq_len_buckets", seq_len_buckets)
+    sft_completion_len_buckets = sft_training.get("completion_len_buckets", completion_len_buckets)
+    sft_micro_batch_size = sft_training.get("micro_batch_size", training["prompts_per_forward_backward"])
+    sft_max_seq_len = sft_seq_len_buckets[-1]
+
     sampling_params = {**sampling, "logprobs": 0}
     policy_temperature = sampling_params.get("temperature", 1.0)
     rollout_max_model_len = roles["rollout"].config.get("max_model_len")
@@ -172,28 +179,27 @@ async def main() -> None:
         max_prompt = max(len(p) for p in prompt_tokens)
         max_comp = max(len(c) for c in completion_tokens)
 
-        # Snap completion length to nearest bucket to avoid torch.compile retracing
-        for bucket in completion_len_buckets:
+        # Snap completion length to nearest SFT bucket
+        for bucket in sft_completion_len_buckets:
             if max_comp <= bucket:
                 max_comp = bucket
                 break
         else:
-            max_comp = completion_len_buckets[-1]
+            max_comp = sft_completion_len_buckets[-1]
 
         # Truncate completions that exceed max bucket
         completion_tokens = [c[:max_comp] for c in completion_tokens]
 
-        # Compute max_seq bucket
+        # Snap total seq length to nearest SFT bucket
         max_seq = max_prompt + max_comp
-        for bucket in seq_len_buckets:
+        for bucket in sft_seq_len_buckets:
             if max_seq <= bucket:
                 max_seq = bucket
                 break
         else:
-            max_seq = seq_len_buckets[-1]
+            max_seq = sft_seq_len_buckets[-1]
 
         # If prompt + comp exceeds max_seq, truncate prompts (keep completions intact)
-        # so that compute_logprobs can slice prompt_len-1+max_comp within the seq_len.
         if max_prompt + max_comp > max_seq:
             max_prompt = max_seq - max_comp
 
@@ -201,7 +207,6 @@ async def main() -> None:
         # sees a single group (all prompt_lens equal) and avoids shape mismatch.
         padded_prompts = []
         for p in prompt_tokens:
-            # Truncate from the left if too long, pad from the left if too short
             if len(p) > max_prompt:
                 p = p[-max_prompt:]
             elif len(p) < max_prompt:
@@ -407,17 +412,7 @@ async def main() -> None:
             if sft_items:
                 print(f"[sft] making batch with {len(sft_items)} items", flush=True)
                 sft_input_ids, sft_completion_ids, sft_mask, sft_prompt_lens = make_sft_batch(sft_items)
-                # Pad SFT batch to match GRPO micro_batch_size so torch.compile
-                # reuses the same cached graph (avoids recompilation/hang).
-                sft_mb = _get_micro_batch_size(training["completions_per_micro_batch"], sft_input_ids.shape[1])
-                real_bs = sft_input_ids.shape[0]
-                if real_bs < sft_mb:
-                    pad_n = sft_mb - real_bs
-                    sft_input_ids = torch.cat([sft_input_ids, sft_input_ids.new_full((pad_n, sft_input_ids.shape[1]), pad_token_id)])
-                    sft_completion_ids = torch.cat([sft_completion_ids, sft_completion_ids.new_full((pad_n, sft_completion_ids.shape[1]), pad_token_id)])
-                    sft_mask = torch.cat([sft_mask, sft_mask.new_zeros(pad_n, sft_mask.shape[1])])
-                    sft_prompt_lens = torch.cat([sft_prompt_lens, sft_prompt_lens[:1].expand(pad_n)])
-                print(f"[sft] batch shapes: input={sft_input_ids.shape}, comp={sft_completion_ids.shape}, mask={sft_mask.shape} (real={real_bs})", flush=True)
+                print(f"[sft] batch shapes: input={sft_input_ids.shape}, comp={sft_completion_ids.shape}, mask={sft_mask.shape}", flush=True)
                 with trace_span("forward_backward_sft"):
                     loss_sft, _ = await trainer.forward_backward(
                         _sft_loss,
@@ -425,7 +420,7 @@ async def main() -> None:
                         loss_args=(sft_completion_ids,),
                         loss_kwargs={"padding_mask": sft_mask, "prompt_lens": sft_prompt_lens, "temperature": 1.0},
                         scale_loss=training["alpha_sft"] / accumulation_steps,
-                        micro_batch_size=sft_mb,
+                        micro_batch_size=sft_micro_batch_size,
                     )
                 print(f"[sft] loss={float(loss_sft):.4f}", flush=True)
                 for item in sft_items:
@@ -457,6 +452,7 @@ async def main() -> None:
             rw_metrics = reward_stats.get_metrics()
             stats.trace(tracer, step=trainer.version)
             tracer.counter("metrics", {"loss": avg_loss, "loss_grpo": avg_grpo, "loss_sft": avg_sft, "grad_norm": grad_norm, "avg_reward": avg_reward})
+            tracer.counter("grpo.debug", grpo_debug)
             titan_metrics = await trainer.log_metrics(avg_loss, grad_norm, accum_ntokens)
             if titan_metrics:
                 tracer.counter("titan.metrics", titan_metrics)
@@ -466,7 +462,7 @@ async def main() -> None:
                 buffer.stats.record_used(meta["trainer_version"])
                 log_sample("trained", prompt_id=meta["item_id"], trained_at_step=trainer.version, trainer_version=meta["trainer_version"], dataset=meta["dataset"], n_tokens=meta["n_tokens"])
 
-            print(f"[epoch {epoch}] step={trainer.version} loss={avg_loss:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f} reward_all={rw_metrics.get('reward_overall', avg_reward):.2f}")
+            print(f"[epoch {epoch}] step={trainer.version} loss={avg_loss:.4f} grpo={avg_grpo:.4f} sft={avg_sft:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f} reward_all={rw_metrics.get('reward_overall', avg_reward):.2f}")
 
             if trainer.version % sync_ref_every == 0:
                 await sync_titan_to_vllm(trainer, reference, abort_in_flight=training["abort_in_flight"], trainer_version=trainer.version, wire_dtype="float16")
