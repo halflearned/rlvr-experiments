@@ -144,7 +144,7 @@ class GRPOLoss(torch.nn.Module):
         prompt_lens: torch.Tensor | None = None,
         temperature: float = 1.0,
     ) -> torch.Tensor:
-        trainer_logprobs = compute_logprobs(
+        trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             response,
             temperature=temperature,
@@ -186,8 +186,7 @@ class GRPOLoss(torch.nn.Module):
                 kl_mean = kl_t[valid].mean().item()
                 kl_max = kl_t[valid].max().item()
                 ratio_max = ratio[valid].max().item()
-                # Entropy approximation: mean negative logprob of selected tokens at rollout time
-                entropy_mean = -old_lp[valid].mean().item()
+                entropy_mean = token_entropy.to(device)[valid].mean().item()
                 # Clip fraction: what fraction of tokens were clipped
                 if self.eps > 0:
                     clipped = (ratio[valid] < 1.0 - self.eps) | (ratio[valid] > 1.0 + self.eps)
@@ -284,7 +283,7 @@ class DrGRPOLoss(torch.nn.Module):
         prompt_lens: torch.Tensor | None = None,
         temperature: float = 1.0,
     ) -> torch.Tensor:
-        trainer_logprobs = compute_logprobs(
+        trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             response,
             temperature=temperature,
@@ -321,8 +320,7 @@ class DrGRPOLoss(torch.nn.Module):
                 kl_mean = kl_t[valid].mean().item()
                 kl_max = kl_t[valid].max().item()
                 ratio_max = ratio[valid].max().item()
-                # Entropy approximation: mean negative logprob of selected tokens at rollout time
-                entropy_mean = -old_lp[valid].mean().item()
+                entropy_mean = token_entropy.to(device)[valid].mean().item()
                 # Clip fraction: what fraction of tokens were clipped
                 if self.eps > 0:
                     clipped = (ratio[valid] < 1.0 - self.eps) | (ratio[valid] > 1.0 + self.eps)
@@ -425,7 +423,7 @@ class DAPOLoss(torch.nn.Module):
         group_sizes: list[int] | None = None,
         ref_logprobs: torch.Tensor | None = None,  # only used if beta>0
     ) -> torch.Tensor:
-        trainer_logprobs = compute_logprobs(
+        trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             response,
             temperature=temperature,
@@ -471,7 +469,7 @@ class DAPOLoss(torch.nn.Module):
             valid = mask.bool()
             if valid.any():
                 ratio_max = ratio[valid].max().item()
-                entropy_mean = -old_lp[valid].mean().item()
+                entropy_mean = token_entropy.to(device)[valid].mean().item()
                 up_clip_frac = (ratio[valid] > 1.0 + self.eps_high).float().mean().item()
                 low_clip_frac = (ratio[valid] < 1.0 - self.eps_low).float().mean().item()
                 clip_frac = ((ratio[valid] != ratio_clip[valid]).float().mean().item())

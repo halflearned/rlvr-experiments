@@ -30,7 +30,7 @@ def get_titan_style_logprobs(model, tokenizer, prompt, completion_ids, temperatu
     comp_ids_2d = completion_ids.unsqueeze(0).to(model.device)
     prompt_lens = torch.tensor([prompt_len], device=model.device)
 
-    logprobs = compute_logprobs(
+    logprobs, _ = compute_logprobs(
         logits,
         comp_ids_2d,
         temperature=temperature,

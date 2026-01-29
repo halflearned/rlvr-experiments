@@ -51,7 +51,7 @@ def test_dummy_reward_improves_over_steps():
     for _ in range(80):
         opt.zero_grad()
         logits = model.forward(batch_size=completion_ids.size(0))
-        ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+        ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
         rollout_logprobs = ref_logprobs.clone()
         advantages = compute_advantages(rewards)
         loss = loss_fn(

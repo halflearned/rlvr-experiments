@@ -36,7 +36,7 @@ def _compute_logprobs_dtensor(
     input_ids: torch.Tensor,
     prompt_lens: torch.Tensor,
     target_len: int,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """DTensor-compatible compute_logprobs using group-based slicing.
 
     Instead of using gather (which doesn't work with vocab-sharded DTensor),
@@ -45,6 +45,8 @@ def _compute_logprobs_dtensor(
     contiguous in the batch.
 
     Must be called inside a loss_parallel() context.
+
+    Returns (logprobs, entropy) both of shape [B, target_len].
     """
     vocab_size = logits.shape[-1]
     mesh = logits.device_mesh
@@ -53,7 +55,8 @@ def _compute_logprobs_dtensor(
     groups = _get_prompt_groups(prompt_lens)
 
     # Process each group
-    results = []
+    logprob_results = []
+    entropy_results = []
     for start, end, prompt_len in groups:
         # Simple slice - works with DTensor because we're slicing on batch and seq dims
         # which are replicated, not the vocab dim which is sharded
@@ -70,16 +73,27 @@ def _compute_logprobs_dtensor(
             reduction="none",
         )
         group_logprobs = group_logprobs.reshape(end - start, target_len)
-        results.append(group_logprobs)
+        logprob_results.append(group_logprobs)
+
+        # Compute entropy
+        with torch.no_grad():
+            log_p = F.log_softmax(group_logits.float().reshape(-1, vocab_size), dim=-1)
+            p = log_p.exp()
+            ent = -(p * log_p).sum(dim=-1)
+            ent = ent.reshape(end - start, target_len)
+            if isinstance(ent, DTensor):
+                ent = ent.to_local()
+            entropy_results.append(ent)
 
     # Concatenate results
-    logprobs = torch.cat(results, dim=0)
+    logprobs = torch.cat(logprob_results, dim=0)
+    entropy = torch.cat(entropy_results, dim=0)
 
     # Convert back to regular tensor if it's a DTensor
     if isinstance(logprobs, DTensor):
         logprobs = logprobs.to_local()
 
-    return logprobs
+    return logprobs, entropy
 
 
 def compute_logprobs(
@@ -88,10 +102,13 @@ def compute_logprobs(
     temperature: float = 1.0,
     align: bool = True,
     prompt_lens: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Computes the log probabilities of the input tokens given the model logits and temperature.
-    Always converts inputs to fp32 for numerical stability.
+    Computes log probabilities and entropy of input tokens given model logits.
+
+    Returns (logprobs, entropy) where:
+      - logprobs: [B, T] log-probability of each token under the model
+      - entropy: [B, T] Shannon entropy H = -sum(p * log p) over vocab per token position
 
     When `align=True`, assumes `input_ids` contains only the target tokens (e.g., the
     completion portion) and slices the logits so that each row predicts the next token in
@@ -114,16 +131,17 @@ def compute_logprobs(
     if align:
         target_len = input_ids.size(1)
         if target_len == 0:
-            return torch.zeros(
+            empty = torch.zeros(
                 (logits.size(0), 0),
                 device=input_ids.device,
                 dtype=torch.float32,
             )
+            return empty, empty
 
         # DTensor path: use group-based slicing instead of gather
         if isinstance(scaled_logits, DTensor) and prompt_lens is not None:
             prompt_lens = prompt_lens.to(input_ids.device)
-            logprobs = _compute_logprobs_dtensor(scaled_logits, input_ids, prompt_lens, target_len)
+            logprobs, entropy = _compute_logprobs_dtensor(scaled_logits, input_ids, prompt_lens, target_len)
 
             if _PROFILE_OPS:
                 torch.cuda.synchronize()
@@ -134,7 +152,7 @@ def compute_logprobs(
                     f"shape=[{logits.size(0)}, {target_len}, {logits.size(2)}]"
                 )
 
-            return logprobs
+            return logprobs, entropy
 
         # Regular tensor path
         if prompt_lens is not None:
@@ -195,4 +213,11 @@ def compute_logprobs(
             f"shape=[{batch_size}, {seq_len}, {vocab_size}]"
         )
 
-    return logprobs.reshape(batch_size, seq_len)
+    logprobs_out = logprobs.reshape(batch_size, seq_len)
+
+    with torch.no_grad():
+        log_p = F.log_softmax(sliced_logits.float(), dim=-1)  # [B, T, V]
+        p = log_p.exp()
+        entropy = -(p * log_p).sum(dim=-1).reshape(batch_size, seq_len)  # [B, T]
+
+    return logprobs_out, entropy

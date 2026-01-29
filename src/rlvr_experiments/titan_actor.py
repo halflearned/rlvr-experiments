@@ -335,7 +335,7 @@ class TitanModelRank:
         if isinstance(logits, DTensor) and prompt_lens is not None:
             # DTensor path: compute logprobs with vocab-sharded logits
             with loss_parallel():
-                logprobs = compute_logprobs(
+                logprobs, _ = compute_logprobs(
                     logits,
                     completion_ids,
                     temperature=temperature,
@@ -350,7 +350,7 @@ class TitanModelRank:
             # Regular path: gather logits first if DTensor
             if isinstance(logits, DTensor):
                 logits = logits.full_tensor()
-            logprobs = compute_logprobs(
+            logprobs, _ = compute_logprobs(
                 logits,
                 completion_ids,
                 temperature=temperature,

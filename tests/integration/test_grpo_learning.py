@@ -104,7 +104,7 @@ class TestGRPOLearningDirection:
 
             # Use current model for ref and rollout logprobs (on-policy)
             with torch.no_grad():
-                ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
             rollout_logprobs = ref_logprobs.clone()
 
             advantages = compute_advantages(rewards)
@@ -164,7 +164,7 @@ class TestGRPOLearningDirection:
             logits = model(input_ids)
 
             with torch.no_grad():
-                ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
             rollout_logprobs = ref_logprobs.clone()
 
             advantages = compute_advantages(rewards)
@@ -225,7 +225,7 @@ class TestGRPOLearningStability:
             logits = model(input_ids)
 
             with torch.no_grad():
-                ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
             rollout_logprobs = ref_logprobs.clone()
             advantages = compute_advantages(rewards)
 
@@ -266,7 +266,7 @@ class TestGRPOLearningStability:
             logits = model(input_ids)
 
             with torch.no_grad():
-                ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
             rollout_logprobs = ref_logprobs.clone()
             advantages = compute_advantages(rewards)
 
@@ -329,7 +329,7 @@ class TestGRPOMultiPrompt:
             logits = model(input_ids)
 
             with torch.no_grad():
-                ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
             rollout_logprobs = ref_logprobs.clone()
 
             # Group size = 2 (2 completions per prompt)
@@ -397,7 +397,7 @@ class TestDrGRPOLearning:
             logits = model(input_ids)
 
             with torch.no_grad():
-                ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
             rollout_logprobs = ref_logprobs.clone()
 
             # Dr. GRPO uses mean-centered advantages without std normalization
@@ -469,7 +469,7 @@ class TestKLPenalty:
         # Compute fixed reference logprobs from frozen model
         with torch.no_grad():
             ref_logits = ref_model(input_ids)
-            ref_logprobs = compute_logprobs(ref_logits, completion_ids, prompt_lens=prompt_lens)
+            ref_logprobs, _ = compute_logprobs(ref_logits, completion_ids, prompt_lens=prompt_lens)
 
         # Get initial probability
         prob_before = model_low_beta.get_token_prob(prompt, 10, prompt_len)
@@ -485,7 +485,7 @@ class TestKLPenalty:
 
                 # Use current model for rollout logprobs (on-policy)
                 with torch.no_grad():
-                    rollout_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                    rollout_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
                 advantages = compute_advantages(rewards)
 
                 # Use FIXED ref_logprobs (from frozen reference model)
@@ -562,7 +562,7 @@ class TestClipping:
                 logits = model(input_ids)
 
                 with torch.no_grad():
-                    ref_logprobs = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
+                    ref_logprobs, _ = compute_logprobs(logits.detach(), completion_ids, prompt_lens=prompt_lens)
                 rollout_logprobs = ref_logprobs.clone()
                 advantages = compute_advantages(rewards)
 

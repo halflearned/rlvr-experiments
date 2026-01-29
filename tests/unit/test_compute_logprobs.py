@@ -31,7 +31,7 @@ class TestComputeLogprobsBasic:
         # All prompts have same length
         prompt_lens = torch.tensor([seq_len - completion_len] * batch_size)
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         assert logprobs.shape == (batch_size, completion_len)
         # Logprobs should be negative (log of probability < 1)
@@ -50,7 +50,7 @@ class TestComputeLogprobsBasic:
         input_ids = torch.tensor([[2, 5, 7]])  # Target tokens
         prompt_lens = torch.tensor([seq_len - completion_len])  # = 5
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         # Manual computation:
         # For token at position 0 in completion, we use logits at position prompt_len-1 = 4
@@ -83,7 +83,7 @@ class TestComputeLogprobsPromptLens:
         # Different prompt lengths: 8 and 10
         prompt_lens = torch.tensor([8, 10])
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         # Manually verify first token position for each sample
         # Sample 0: first completion token predicted by logits at position 7 (8-1)
@@ -116,8 +116,8 @@ class TestComputeLogprobsPromptLens:
         # Wrong prompt lengths (shifted by 2)
         wrong_prompt_lens = torch.tensor([6, 8])
 
-        correct_logprobs = compute_logprobs(logits, input_ids, prompt_lens=correct_prompt_lens)
-        wrong_logprobs = compute_logprobs(logits, input_ids, prompt_lens=wrong_prompt_lens)
+        correct_logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=correct_prompt_lens)
+        wrong_logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=wrong_prompt_lens)
 
         # These should NOT be equal
         assert not torch.allclose(correct_logprobs, wrong_logprobs, atol=1e-3), \
@@ -136,7 +136,7 @@ class TestComputeLogprobsPromptLens:
         # prompt_len = 1 (minimum reasonable value)
         # This means completion starts at position 0
         prompt_lens = torch.tensor([1])
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         # First token uses logits at position 0 (prompt_len - 1)
         log_softmax = F.log_softmax(logits[0, 0], dim=-1)
@@ -160,7 +160,7 @@ class TestComputeLogprobsGroups:
         input_ids = torch.randint(0, vocab_size, (batch_size, completion_len))
         prompt_lens = torch.tensor([5, 5, 5, 8, 8])
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         # Verify each sample individually
         for i in range(batch_size):
@@ -195,7 +195,7 @@ class TestComputeLogprobsPadding:
 
         # This should compute logprobs for ALL positions (including padding)
         # The masking happens in the loss function, not here
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         assert logprobs.shape == (2, completion_len)
         # All values should be finite
@@ -216,7 +216,7 @@ class TestComputeLogprobsPadding:
         input_ids = torch.tensor([[0, 0, 0]])  # Target the high-prob token
         prompt_lens = torch.tensor([5])
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         # Should be close to 0 (probability close to 1)
         assert torch.isfinite(logprobs).all()
@@ -232,7 +232,7 @@ class TestComputeLogprobsEdgeCases:
         input_ids = torch.tensor([[3]])
         prompt_lens = torch.tensor([4])
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         assert logprobs.shape == (1, 1)
         assert torch.isfinite(logprobs).all()
@@ -248,7 +248,7 @@ class TestComputeLogprobsEdgeCases:
         input_ids = torch.randint(0, vocab_size, (batch_size, completion_len))
         prompt_lens = torch.randint(100, 192, (batch_size,))  # Variable prompt lengths
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         assert logprobs.shape == (batch_size, completion_len)
         assert torch.isfinite(logprobs).all()
@@ -259,9 +259,9 @@ class TestComputeLogprobsEdgeCases:
         input_ids = torch.tensor([[5, 3, 7]])
         prompt_lens = torch.tensor([5])
 
-        logprobs_t1 = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens, temperature=1.0)
-        logprobs_t2 = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens, temperature=2.0)
-        logprobs_t05 = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens, temperature=0.5)
+        logprobs_t1, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens, temperature=1.0)
+        logprobs_t2, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens, temperature=2.0)
+        logprobs_t05, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens, temperature=0.5)
 
         # Higher temperature -> logprobs closer to uniform -> smaller magnitude differences
         # Lower temperature -> logprobs more peaked -> larger magnitude differences
@@ -284,7 +284,7 @@ class TestComputeLogprobsAlignment:
         logits = torch.randn(batch_size, seq_len, vocab_size)
         input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
 
-        logprobs = compute_logprobs(logits, input_ids, align=False)
+        logprobs, _ = compute_logprobs(logits, input_ids, align=False)
 
         assert logprobs.shape == (batch_size, seq_len)
 
@@ -305,8 +305,8 @@ class TestComputeLogprobsIntegration:
         input_ids = torch.randint(0, 100, (4, 8))
         prompt_lens = torch.tensor([24, 24, 24, 24])
 
-        logprobs1 = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
-        logprobs2 = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs1, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs2, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         assert torch.equal(logprobs1, logprobs2)
 
@@ -329,6 +329,6 @@ class TestComputeLogprobsIntegration:
         # So prompt_len <= seq_len - completion_len = 768 - 256 = 512
         prompt_lens = torch.randint(100, 300, (batch_size,))
 
-        logprobs = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
+        logprobs, _ = compute_logprobs(logits, input_ids, prompt_lens=prompt_lens)
 
         assert logprobs.shape == (batch_size, completion_len)

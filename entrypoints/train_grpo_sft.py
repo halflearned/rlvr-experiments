@@ -74,7 +74,7 @@ def _sft_loss(logits, response, padding_mask, prompt_lens, temperature=1.0):
     """
     # Use compute_logprobs which handles DTensor correctly
     # The key: response must match the expected target_len
-    logprobs = compute_logprobs(logits, response, prompt_lens=prompt_lens, temperature=temperature)
+    logprobs, _ = compute_logprobs(logits, response, prompt_lens=prompt_lens, temperature=temperature)
     mask = padding_mask.to(logprobs.device, dtype=torch.float32)
     return -(logprobs * mask).sum() / mask.sum().clamp_min(1.0)
 
