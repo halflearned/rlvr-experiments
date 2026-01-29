@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 from rlvr_experiments.algorithms.grpo import RolloutSample, TrainSample, make_batch, RewardStats
 from rlvr_experiments.data import DataIterator, DATASET_LOADERS, load_apps, load_mbpp, load_humaneval, load_gsm8k, load_math, load_deepscaler, load_dummy, load_ifeval, load_if_multi_constraints, load_mixed
-from rlvr_experiments.losses import GRPOLoss, DrGRPOLoss, compute_grpo_advantages, compute_drgrpo_advantages
+from rlvr_experiments.losses import GRPOLoss, DrGRPOLoss, DAPOLoss, compute_grpo_advantages, compute_drgrpo_advantages
 from rlvr_experiments.ops import compute_logprobs
 from rlvr_experiments.rollout_logger import log_rollout
 from rlvr_experiments.runtime import Runtime
@@ -120,13 +120,18 @@ async def main() -> None:
     verifier = VerifierPool(verifier_cls, **verifier_cfg)
     verify_completions = verifier.verify_completions
 
-    sft_cfg = dict(plan.sft_data)
-    sft_name = sft_cfg.pop("dataset")
-    sft_load_fn = DATASET_LOADERS[sft_name]
-    sft_ds = sft_load_fn(**sft_cfg)
-    sft_iter_cfg = dict(plan.sft_data_iter)
-    sft_iter_cfg.setdefault("skip_chat_template", True)
-    sft_iter = DataIterator(sft_ds, tokenizer=tokenizer, **sft_iter_cfg)
+    sft_iter = None
+    if hasattr(plan, "sft_data") and plan.sft_data:
+        sft_cfg = dict(plan.sft_data)
+        sft_name = sft_cfg.pop("dataset")
+        sft_load_fn = DATASET_LOADERS[sft_name]
+        sft_ds = sft_load_fn(**sft_cfg)
+        sft_iter_cfg = dict(plan.sft_data_iter)
+        sft_iter_cfg.setdefault("skip_chat_template", True)
+        sft_iter = DataIterator(sft_ds, tokenizer=tokenizer, **sft_iter_cfg)
+        print(f"[init] SFT enabled with dataset: {sft_name}")
+    else:
+        print("[init] SFT disabled (no sft_data in config)")
 
     loss_cfg = dict(plan.loss)
     loss_name = loss_cfg.pop("name", "drgrpo")
@@ -134,6 +139,8 @@ async def main() -> None:
         loss_fn = GRPOLoss(**loss_cfg); compute_advantages = compute_grpo_advantages
     elif loss_name == "drgrpo":
         loss_fn = DrGRPOLoss(**loss_cfg); compute_advantages = compute_drgrpo_advantages
+    elif loss_name == "dapo":
+        loss_fn = DAPOLoss(**loss_cfg); compute_advantages = compute_grpo_advantages
     else:
         raise ValueError(f"Unknown loss name: {loss_name}. Must be 'grpo' or 'drgrpo'.")
     print(f"[init] Using loss: {loss_name}")
@@ -227,6 +234,8 @@ async def main() -> None:
         return input_ids, completion_ids, padding_mask, prompt_lens
 
     def next_sft_batch(batch_size):
+        if sft_iter is None:
+            return None
         items = []
         while len(items) < batch_size:
             item = sft_iter.get_next()
@@ -392,7 +401,8 @@ async def main() -> None:
             break
         data_iter.new_epoch(seed=seed + epoch)
         sft_epoch = 0
-        sft_iter.new_epoch(seed=seed + epoch)
+        if sft_iter is not None:
+            sft_iter.new_epoch(seed=seed + epoch)
         producer = asyncio.create_task(produce_epoch())
 
         async for batch, stats, item_ids, group_sizes, trained_meta in batches(producer):
@@ -400,11 +410,17 @@ async def main() -> None:
             trained_meta_accum.extend(trained_meta)
             advantages = compute_advantages(batch.rewards, group_sizes=group_sizes)
             with trace_span("forward_backward"):
+                if loss_name == "dapo":
+                    _loss_args = (batch.completion_ids, batch.logprobs, advantages)
+                    _loss_kwargs = {"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature, "ref_logprobs": batch.ref_logprobs}
+                else:
+                    _loss_args = (batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages)
+                    _loss_kwargs = {"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature}
                 loss_grpo, grpo_debug = await trainer.forward_backward(
                     loss_fn,
                     batch.input_ids,
-                    loss_args=(batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages),
-                    loss_kwargs={"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature},
+                    loss_args=_loss_args,
+                    loss_kwargs=_loss_kwargs,
                     scale_loss=training["alpha_grpo"] / accumulation_steps,
                     micro_batch_size=_get_micro_batch_size(training["completions_per_micro_batch"], stats.padded_seq_len),
                 )

@@ -340,3 +340,156 @@ class DrGRPOLoss(torch.nn.Module):
             print(f"[GRPO DEBUG] {self._last_debug}")
 
         return loss
+
+
+
+import torch
+from .ops import compute_logprobs
+
+
+class DAPOLoss(torch.nn.Module):
+    """
+    DAPO loss:
+      - Clip-Higher / decoupled clipping: clip(ratio, 1-eps_low, 1+eps_high)
+      - Token-level loss normalization within each prompt-group:
+            loss = mean_over_prompts( sum_{i,t in group} loss_{i,t} / (#valid tokens in group) )
+
+    Notes:
+      - To match DAPO, set beta=0.0 (no KL penalty term).
+      - Requires batches laid out as contiguous groups per prompt:
+            [prompt0 sample0..G-1, prompt1 sample0..G-1, ...]
+        If variable G per prompt, pass group_sizes instead of group_size.
+    """
+
+    def __init__(self, eps_low: float = 0.2, eps_high: float = 0.28, beta: float = 0.0):
+        super().__init__()
+        self.eps_low = float(eps_low)
+        self.eps_high = float(eps_high)
+        self.beta = float(beta)
+        self._last_debug: dict | None = None
+
+    def get_debug_metrics(self) -> dict | None:
+        metrics = self._last_debug
+        self._last_debug = None
+        return metrics
+
+    @staticmethod
+    def _token_level_group_reduce(
+        per_token_loss: torch.Tensor,  # [B, T] already masked (pad positions are 0)
+        mask: torch.Tensor,            # [B, T] float {0,1}
+        group_size: int | None,
+        group_sizes: list[int] | None,
+    ) -> torch.Tensor:
+        # Returns a scalar tensor.
+        if group_sizes is not None:
+            B = per_token_loss.shape[0]
+            if sum(group_sizes) != B:
+                raise ValueError(f"sum(group_sizes) must equal B={B}, got {sum(group_sizes)}")
+            losses = []
+            idx = 0
+            for g in group_sizes:
+                if g <= 0:
+                    raise ValueError(f"group_sizes must be positive, got {g}")
+                l_sum = per_token_loss[idx : idx + g].sum()
+                tok = mask[idx : idx + g].sum().clamp_min(1.0)
+                losses.append(l_sum / tok)
+                idx += g
+            return torch.stack(losses).mean()
+
+        if group_size is None:
+            return per_token_loss.sum() / mask.sum().clamp_min(1.0)
+
+        B = per_token_loss.shape[0]
+        if B % group_size != 0:
+            raise ValueError(f"B={B} must be divisible by group_size={group_size}")
+
+        # [num_groups, G, T]
+        l = per_token_loss.view(-1, group_size, per_token_loss.shape[1])
+        m = mask.view(-1, group_size, mask.shape[1])
+
+        group_loss = l.sum(dim=(1, 2)) / m.sum(dim=(1, 2)).clamp_min(1.0)  # [num_groups]
+        return group_loss.mean()
+
+    def forward(
+        self,
+        logits: torch.Tensor,            # [B, seq_len, vocab]
+        response: torch.Tensor,          # [B, T]
+        rollout_logprobs: torch.Tensor,  # [B, T] logprobs under behavior/old policy
+        advantages: torch.Tensor,        # [B] (typically GRPO-style group-normalized rewards)
+        padding_mask: torch.Tensor,      # [B, T] 1 for valid response tokens, 0 for pad
+        prompt_lens: torch.Tensor | None = None,
+        temperature: float = 1.0,
+        *,
+        group_size: int | None = None,
+        group_sizes: list[int] | None = None,
+        ref_logprobs: torch.Tensor | None = None,  # only used if beta>0
+    ) -> torch.Tensor:
+        trainer_logprobs = compute_logprobs(
+            logits,
+            response,
+            temperature=temperature,
+            prompt_lens=prompt_lens,
+        )  # [B, T]
+
+        device = trainer_logprobs.device
+        old_lp = rollout_logprobs.to(device=device, dtype=torch.float32)
+        mask = padding_mask.to(device=device, dtype=torch.float32)
+        adv = advantages.to(device=device, dtype=torch.float32).unsqueeze(-1)  # [B, 1]
+
+        # PPO ratio: πθ / πold
+        log_ratio = trainer_logprobs - old_lp
+        ratio = torch.exp(log_ratio)
+
+        # Clip-Higher / decoupled clipping range
+        ratio_clip = torch.clamp(ratio, 1.0 - self.eps_low, 1.0 + self.eps_high)
+
+        # PPO surrogate
+        surrogate = torch.minimum(ratio * adv, ratio_clip * adv)
+
+        # Optional KL penalty (DAPO sets this to 0 / removes KL)
+        if self.beta > 0.0:
+            if ref_logprobs is None:
+                raise ValueError("ref_logprobs must be provided when beta > 0")
+            ref_lp = ref_logprobs.to(device=device, dtype=torch.float32)
+            log_ratio_ref = trainer_logprobs - ref_lp
+            kl_t = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
+            per_token_loss = -(surrogate - self.beta * kl_t)
+        else:
+            kl_t = None
+            per_token_loss = -surrogate
+
+        # Apply padding mask
+        per_token_loss = per_token_loss * mask  # [B, T], pad positions are 0
+
+        # Token-level (per-prompt-group) normalization
+        loss = self._token_level_group_reduce(per_token_loss, mask, group_size, group_sizes)
+
+        # Debug (valid tokens only)
+        with torch.no_grad():
+            valid = mask.bool()
+            if valid.any():
+                ratio_max = ratio[valid].max().item()
+                entropy_mean = -old_lp[valid].mean().item()
+                up_clip_frac = (ratio[valid] > 1.0 + self.eps_high).float().mean().item()
+                low_clip_frac = (ratio[valid] < 1.0 - self.eps_low).float().mean().item()
+                clip_frac = ((ratio[valid] != ratio_clip[valid]).float().mean().item())
+                if kl_t is not None:
+                    kl_mean = kl_t[valid].mean().item()
+                    kl_max = kl_t[valid].max().item()
+                else:
+                    kl_mean = kl_max = 0.0
+            else:
+                ratio_max = entropy_mean = up_clip_frac = low_clip_frac = clip_frac = 0.0
+                kl_mean = kl_max = 0.0
+
+            self._last_debug = {
+                "ratio_max": ratio_max,
+                "entropy_mean": entropy_mean,
+                "clip_frac": clip_frac,
+                "up_clip_frac": up_clip_frac,
+                "low_clip_frac": low_clip_frac,
+                "kl_mean": kl_mean,
+                "kl_max": kl_max,
+            }
+
+        return loss

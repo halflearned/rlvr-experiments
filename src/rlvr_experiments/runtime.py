@@ -247,8 +247,10 @@ class Runtime:
 
         # Dynamically find free ports instead of hash-based allocation
         # This avoids collisions with ports still in TIME_WAIT from crashed runs
+        # Use run.port_start to pin a range (useful when running 2 jobs on 1 node)
+        port_start = plan.run.get("port_start", 29500) if hasattr(plan, "run") else 29500
         total_ports_needed = len(titan_roles) + len(channel_names)
-        all_ports = _find_free_ports(total_ports_needed, start=29500)
+        all_ports = _find_free_ports(total_ports_needed, start=port_start)
 
         titan_ports = {name: all_ports[i] for i, name in enumerate(titan_roles)}
         channel_ports = {name: all_ports[len(titan_roles) + i] for i, name in enumerate(channel_names)}
