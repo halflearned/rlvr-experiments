@@ -695,6 +695,40 @@ def load_ifeval(split: str = "train") -> ray.data.Dataset:
     return ds.map(preprocess)
 
 
+def load_ifbench(split: str = "train") -> ray.data.Dataset:
+    """
+    Load AllenAI IFBench_test dataset as a Ray Dataset.
+
+    IFBench_test contains 300 instruction-following prompts with verifiable
+    constraints. Each prompt includes instruction_id_list and kwargs for verification.
+
+    Args:
+        split: Dataset split (IFBench_test only has "train")
+
+    Returns dataset with columns: "prompt", "problem"
+    """
+    hf_dataset = load_dataset("allenai/IFBench_test", split="train")
+    items = list(hf_dataset)
+
+    indexed_items = [{"_idx": i, **item} for i, item in enumerate(items)]
+    ds = ray.data.from_items(indexed_items)
+
+    def preprocess(row):
+        prompt_id = f"ifbench_{row['_idx']}"
+        return {
+            "prompt": row["prompt"],
+            "problem": {
+                "prompt_id": prompt_id,
+                "instruction_id_list": row.get("instruction_id_list", []),
+                "kwargs": row.get("kwargs", []),
+                "verifier_type": "ifbench",
+                "dataset_name": "ifbench",
+            },
+        }
+
+    return ds.map(preprocess)
+
+
 def load_if_multi_constraints(split: str = "train") -> ray.data.Dataset:
     """
     Load IF_multi_constraints_upto5 dataset as a Ray Dataset.

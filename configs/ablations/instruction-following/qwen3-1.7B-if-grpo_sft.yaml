@@ -1,40 +1,37 @@
-# MATH ablation: ALL features combined
-# staleness=1 + adaptive sampling + curriculum ordering
-# Based on math-lr7e6-eps1e5-warmup30.yaml (our best MATH config)
 run:
-  name: math_all
+  name: qwen3_17b_if_grpo_sft
+  port_start: 29500
 
 model:
-  path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  path: "/efs/rlvr-experiments/results/qwen3-1.7B-if-grpo_sft_20260130-095310/checkpoints/qwen3-1.7B-if-grpo_sft_20260130-095310_step80"
 
 tokenizer:
-  pretrained_model_name_or_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+  pretrained_model_name_or_path: "/efs/rlvr-experiments/results/qwen3-1.7B-if-grpo_sft_20260130-095310/checkpoints/qwen3-1.7B-if-grpo_sft_20260130-095310_step80"
   use_fast: false
 
 training:
-  num_epochs: 10
-  max_steps: 120
+  max_steps: 200
+  resume_step: 80
   checkpoint_interval: 20
-  max_staleness: 1  # STALENESS
-  abort_in_flight: true
-  seq_len_buckets: [768, 1280]
-  completion_len_buckets: [512, 1024]
+  max_staleness: 0
+  abort_in_flight: false
+
+  seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+  completion_len_buckets: [512, 1024, 1536, 2048]
+
   prompts_per_rollout_sync: 128
   prompts_per_reference_sync: 9999999
   prompts_per_optim_step: 128
   prompts_per_forward_backward: 2
   completions_per_micro_batch:
-    768: 16
+    768: 64
     1280: 16
     1536: 8
     2048: 4
     2560: 4
-  # ADAPTIVE SAMPLING
-  adaptive_sampling:
-    k_success: 2
-    k_failure: 2
-    max_completions: 64
-    chunk_size: 16
+
+  alpha_grpo: 1.0
+  alpha_sft: 0.001
 
 verifier:
   num_workers: 4
@@ -42,29 +39,33 @@ verifier:
 loss:
   name: grpo
   beta: 0.001
-  eps: 0.2
+
 
 data:
-  dataset: math
-  split: train
-  # No level filter - curriculum file determines which problems to train on
+  dataset: if_multi_constraints
 
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
   skip_chat_template: true
-  order: "/efs/rlvr-experiments/assets/math_curriculum_order.txt"  # CURRICULUM
+
+sft_data:
+  dataset: sft_jsonl
+  path: "/efs/rlvr-experiments/data/ifeval_sft_20k_hardest.jsonl"
+
+sft_data_iter:
+  system_prompt: ""
+  assistant_prefix: ""
+  skip_chat_template: true
+  
 
 sampling:
   temperature: 1.
-  top_p: .95
+  top_p: 0.95
   top_k: 20
-  max_tokens: 1024
-  n: 16
+  max_tokens: 2048
+  n: 8
   logprobs: 0
-  stop:
-  - "Problem:"
-  - "\n\n\n"
 
 buffer:
   max_reads: 1
@@ -89,15 +90,15 @@ roles:
       model:
         name: "qwen3"
         flavor: "1.7B"
-        hf_assets_path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+        hf_assets_path: "/efs/rlvr-experiments/results/qwen3-1.7B-if-grpo_sft_20260130-095310/checkpoints/qwen3-1.7B-if-grpo_sft_20260130-095310_step80"
 
       optimizer:
         name: "AdamW"
-        lr: 0.000007   # 7e-6
-        eps: 0.00001   # 1e-5
+        lr: 0.000005
+        eps: 0.0001
 
       lr_scheduler:
-        warmup_steps: 30
+        warmup_steps: 0
         decay_ratio: 0.0
 
       training:
@@ -135,11 +136,11 @@ roles:
   - name: reference
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "/efs/rlvr-experiments/results/qwen3-1.7B-if-grpo_sft_20260130-095310/checkpoints/qwen3-1.7B-if-grpo_sft_20260130-095310_step80"
       max_concurrent_per_replica: 32
       max_num_seqs: 256
       tensor_parallel_size: 1
-      data_parallel_size: 1
+      data_parallel_size: 2
       max_model_len: 2561
       gpu_memory_utilization: 0.90
       dtype: "float16"
@@ -151,11 +152,11 @@ roles:
   - name: rollout
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      model: "/efs/rlvr-experiments/results/qwen3-1.7B-if-grpo_sft_20260130-095310/checkpoints/qwen3-1.7B-if-grpo_sft_20260130-095310_step80"
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 3
+      data_parallel_size: 4
       max_model_len: 2560
       gpu_memory_utilization: 0.90
       dtype: "float16"

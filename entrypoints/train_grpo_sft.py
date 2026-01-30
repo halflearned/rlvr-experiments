@@ -102,6 +102,15 @@ async def main() -> None:
     trainer = runtime.roles["trainer"]; reference = runtime.roles["reference"]; rollout = runtime.roles["rollout"]
     buffer = runtime.buffer; tracer = runtime.tracer
 
+    # Resume from a checkpoint: set the trainer version so step counting continues
+    resume_step = training.get("resume_step", 0)
+    if resume_step:
+        trainer.version = resume_step
+        # Propagate version to vLLM engines so they tag samples correctly
+        rollout.set_trainer_version(resume_step)
+        reference.set_trainer_version(resume_step)
+        print(f"[init] Resuming from step {resume_step}")
+
     tokenizer = AutoTokenizer.from_pretrained(**plan.tokenizer)
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
 

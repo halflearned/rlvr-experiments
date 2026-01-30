@@ -105,6 +105,12 @@ DATASET_REGISTRY = {
         "verifier_module": "rlvr_experiments.verifiers.multi",
         "answer_key": None,  # Uses verifier_type dispatch
     },
+    "ifbench": {
+        "loader": "load_ifbench",
+        "verifier": "IFBenchVerifier",
+        "verifier_module": "rlvr_experiments.verifiers.ifbench",
+        "answer_key": None,
+    },
 }
 
 

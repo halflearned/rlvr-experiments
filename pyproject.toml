@@ -21,6 +21,8 @@ dependencies = [
     "immutabledict>=4.2.2",
     "ipykernel>=7.1.0",
     "seaborn>=0.13.2",
+    "boto3>=1.42.38",
+    "pathspec>=1.0.4",
 ]
 
 [tool.uv]

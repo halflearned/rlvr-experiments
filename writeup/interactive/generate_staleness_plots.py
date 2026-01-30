@@ -316,6 +316,7 @@ def generate_plot_data(config: dict) -> dict:
         }
 
         # Add eval curves as eval_<bench>_steps / eval_<bench>_accuracy
+        # (base model step-0 anchor is prepended in JS using base_model.benchmarks)
         for bench_name, entries in eval_curves.items():
             run_entry[f"eval_{bench_name}_steps"] = [s for s, _ in entries]
             run_entry[f"eval_{bench_name}_accuracy"] = [a for _, a in entries]
@@ -625,8 +626,8 @@ const plotConfigs = [
         title: 'KL Divergence',
         yKey: 'kl_mean',
         yLabel: 'KL',
-        logScale: true,
-        format: '.2e'
+        logScale: false,
+        format: '.4f'
     }},
     {{
         id: 'plot-entropy',
@@ -700,12 +701,26 @@ function drawD3Plot(container, runs, config) {{
     // Collect all data points
     // stepsKey allows eval plots to use per-run step arrays (e.g. eval_gsm8k_steps)
     const stepsKey = config.stepsKey || 'steps';
+
+    // For eval plots, determine the base model anchor (step 0 = base model accuracy)
+    let baseAnchor = null;
+    if (config.stepsKey && stalenessData.base_model) {{
+        // Extract benchmark name from stepsKey: "eval_gsm8k_steps" -> "gsm8k"
+        const benchName = config.stepsKey.replace('eval_', '').replace('_steps', '');
+        const baseAcc = stalenessData.base_model.benchmarks[benchName];
+        if (baseAcc !== undefined) baseAnchor = baseAcc;
+    }}
+
     let allX = [];
     let allY = [];
 
     runs.forEach(run => {{
         const xArr = run[stepsKey];
         if (!xArr || xArr.length === 0) return;  // skip runs without this data
+        if (baseAnchor !== null) {{
+            allX.push(0);
+            allY.push(baseAnchor);
+        }}
         allX.push(...xArr);
         if (config.multiLine) {{
             config.yKeys.forEach(key => {{
@@ -718,9 +733,28 @@ function drawD3Plot(container, runs, config) {{
 
     if (allY.length === 0) return;
 
+    // Truncate x-axis at 200 steps
+    const xMax = 200;
+    allX = allX.filter(v => v <= xMax);
+    allY = [];  // recompute allY for only visible range
+    runs.forEach(run => {{
+        const xArr = run[stepsKey];
+        if (!xArr || xArr.length === 0) return;
+        if (config.multiLine) {{
+            config.yKeys.forEach(key => {{
+                const yArr = run[key] || [];
+                xArr.forEach((x, i) => {{ if (x <= xMax && yArr[i] !== null && yArr[i] !== undefined) allY.push(yArr[i]); }});
+            }});
+        }} else {{
+            const yArr = run[config.yKey] || [];
+            xArr.forEach((x, i) => {{ if (x <= xMax && yArr[i] !== null && yArr[i] !== undefined) allY.push(yArr[i]); }});
+        }}
+        if (baseAnchor !== null) allY.push(baseAnchor);
+    }});
+
     // X scale
     const xScale = d3.scaleLinear()
-        .domain(d3.extent(allX))
+        .domain([d3.min(allX), xMax])
         .range([0, width]);
 
     // Y scale
@@ -816,7 +850,7 @@ function drawD3Plot(container, runs, config) {{
                     y: (run[yKey] || [])[i],
                     label: run.label,
                     metric: config.yLabels[keyIdx]
-                }})).filter(d => d.y !== null && d.y !== undefined);
+                }})).filter(d => d.x <= xMax && d.y !== null && d.y !== undefined);
 
                 allLineData.push({{ data, color: run.color, runIdx, keyIdx, label: run.label, metric: config.yLabels[keyIdx] }});
 
@@ -832,11 +866,16 @@ function drawD3Plot(container, runs, config) {{
                     .attr('d', line);
             }});
         }} else {{
-            const data = xArr.map((step, i) => ({{
+            let data = xArr.map((step, i) => ({{
                 x: step,
                 y: (run[config.yKey] || [])[i],
                 label: run.label
-            }})).filter(d => d.y !== null && d.y !== undefined && (!config.logScale || d.y > 0));
+            }})).filter(d => d.x <= xMax && d.y !== null && d.y !== undefined && (!config.logScale || d.y > 0));
+
+            // Prepend base model anchor at step 0 for eval plots
+            if (baseAnchor !== null && data.length > 0) {{
+                data = [{{ x: 0, y: baseAnchor, label: 'Base model' }}, ...data];
+            }}
 
             allLineData.push({{ data, color: run.color, runIdx, label: run.label }});
 

@@ -1,7 +1,6 @@
-# IF ablation: staleness=1
-# Based on annotations-adhoc-20260125-083856 (vanilla IF config)
 run:
-  name: if_staleness1
+  name: qwen3_17b_if_dapo_lr75e5_beta1e3
+  port_start: 29500
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -11,17 +10,20 @@ tokenizer:
   use_fast: false
 
 training:
-  num_epochs: 1
-  max_steps: 120
+  max_steps: 400
   checkpoint_interval: 20
-  max_staleness: 1  # KEY CHANGE
+  max_staleness: 0
   abort_in_flight: false
+
   seq_len_buckets: [768, 1280, 1536, 2048, 2560]
   completion_len_buckets: [512, 1024, 1536, 2048]
+
   prompts_per_rollout_sync: 128
   prompts_per_reference_sync: 9999999
   prompts_per_optim_step: 128
   prompts_per_forward_backward: 2
+  alpha_grpo: 1.0
+  alpha_sft: 0.0
   completions_per_micro_batch:
     768: 64
     1280: 16
@@ -33,9 +35,8 @@ verifier:
   num_workers: 4
 
 loss:
-  name: grpo
+  name: dapo
   beta: 0.001
-  eps: 0.2
 
 data:
   dataset: if_multi_constraints
@@ -80,7 +81,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000005
+        lr: 0.000075
         eps: 0.0001
 
       lr_scheduler:
@@ -126,7 +127,7 @@ roles:
       max_concurrent_per_replica: 32
       max_num_seqs: 256
       tensor_parallel_size: 1
-      data_parallel_size: 1
+      data_parallel_size: 2
       max_model_len: 2561
       gpu_memory_utilization: 0.90
       dtype: "float16"
@@ -142,7 +143,7 @@ roles:
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
-      data_parallel_size: 3
+      data_parallel_size: 4
       max_model_len: 2560
       gpu_memory_utilization: 0.90
       dtype: "float16"

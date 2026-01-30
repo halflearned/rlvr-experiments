@@ -156,7 +156,7 @@ def run_training(config: str):
     ld_path = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = f"{nvidia_libs}:{ld_path}" if ld_path else nvidia_libs
 
-    script = "/opt/ml/code/entrypoints/train_grpo.py"
+    script = "/opt/ml/code/entrypoints/train_grpo_sft.py"
     cmd = [sys.executable, script, config]
     print(f"[launcher] Running: {' '.join(cmd)}", flush=True)
     subprocess.run(cmd, check=True, env=env)
