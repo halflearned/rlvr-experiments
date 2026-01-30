@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_grpo
-  port_start: 29500
+  name: qwen3_17b_gsm8k_grpo_sft_lr1e5
+  port_start: 29700
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -26,11 +26,11 @@ training:
     768: 64
 
   alpha_grpo: 1.0
-  alpha_sft: 1.0
+  alpha_sft: 0.001
 
   sft:
-    seq_len_buckets: [768, 1280, 1536, 2048, 2560]
-    completion_len_buckets: [512, 1024, 1536, 2048]
+    seq_len_buckets: [768]
+    completion_len_buckets: [512]
     micro_batch_size: 2
 
 verifier:
@@ -49,10 +49,9 @@ data_iter:
   assistant_prefix: ""
   skip_chat_template: true
 
-# Not using for now
-# sft_data:
-#   dataset: sft_jsonl
-#   path: "/efs/rlvr-experiments/data/ifeval_sft_20k_hardest.jsonl"
+sft_data:
+  dataset: sft_jsonl
+  path: "/efs/rlvr-experiments/data/gsm8k_sft_hard.jsonl"
 
 sft_data_iter:
   system_prompt: ""
@@ -101,7 +100,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.00001
         eps: 0.0001
 
       lr_scheduler:
@@ -110,8 +109,8 @@ roles:
 
       training:
         seq_len: 768
-        dtype: "bfloat16"
-        mixed_precision_param: "bfloat16"
+        dtype: "float16"
+        mixed_precision_param: "float16"
         mixed_precision_reduce: "float32"
 
       parallelism:
@@ -128,7 +127,7 @@ roles:
         initial_load_in_hf: true
         interval: 500
         last_save_model_only: false
-        export_dtype: "bfloat16"
+        export_dtype: "float16"
         async_mode: "disabled"
 
       activation_checkpoint:
@@ -150,7 +149,7 @@ roles:
       data_parallel_size: 1
       max_model_len: 769
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: false
@@ -166,7 +165,7 @@ roles:
       data_parallel_size: 1
       max_model_len: 2560
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: true

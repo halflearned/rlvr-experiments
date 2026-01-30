@@ -110,8 +110,8 @@ roles:
 
       training:
         seq_len: 768
-        dtype: "bfloat16"
-        mixed_precision_param: "bfloat16"
+        dtype: "float16"
+        mixed_precision_param: "float16"
         mixed_precision_reduce: "float32"
 
       parallelism:
@@ -128,7 +128,7 @@ roles:
         initial_load_in_hf: true
         interval: 500
         last_save_model_only: false
-        export_dtype: "bfloat16"
+        export_dtype: "float16"
         async_mode: "disabled"
 
       activation_checkpoint:
@@ -150,7 +150,7 @@ roles:
       data_parallel_size: 1
       max_model_len: 769
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: false
@@ -166,7 +166,7 @@ roles:
       data_parallel_size: 1
       max_model_len: 2560
       gpu_memory_utilization: 0.90
-      dtype: "bfloat16"
+      dtype: "float16"
       logprobs_mode: "raw_logprobs"
       max_num_batched_tokens: 65536
       enable_prefix_caching: true

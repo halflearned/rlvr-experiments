@@ -1,6 +1,7 @@
 run:
-  name: qwen3_17b_gsm8k_dapo
-  port_start: 29600
+  name: qwen3_17b_gsm8k_dapo_lr1e6
+  
+  port_start: 29500
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -10,7 +11,6 @@ tokenizer:
   use_fast: false
 
 training:
-  num_epochs: 5
   max_steps: 300
   checkpoint_interval: 20
   max_staleness: 0

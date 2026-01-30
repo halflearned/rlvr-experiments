@@ -1020,21 +1020,45 @@ def load_allenai_gsm8k_mini(
     return ray.data.from_items(selected_rows)
 
 
-def load_sft_jsonl(path: str, split: str = "train") -> ray.data.Dataset:
+def load_sft_jsonl(
+    path: str,
+    split: str = "train",
+    subset: str | list[str] | None = None,
+) -> ray.data.Dataset:
     """
     Load an SFT dataset from a local JSONL file.
 
     Each line should have: prompt_id, prompt, problem (dict), completion (str).
     The completion is injected into problem["completion"] for use by make_sft_batch.
+
+    Args:
+        path: Path to the JSONL file.
+        split: Ignored (for API compatibility).
+        subset: Filter by source dataset. Can be:
+            - None: Include all rows
+            - str: Single source (e.g., "gsm8k", "math")
+            - list[str]: Multiple sources (e.g., ["gsm8k", "math"])
     """
     import json
 
+    if isinstance(subset, str):
+        subset = [subset]
+    if subset is not None:
+        subset = set(subset)
+
     rows = []
+    filtered = 0
     with open(path) as f:
         for line in f:
             if not line.strip():
                 continue
             item = json.loads(line)
+            # Filter by subset if specified
+            if subset is not None:
+                source = item.get("source", item.get("problem", {}).get("dataset_name", ""))
+                if source not in subset:
+                    filtered += 1
+                    continue
             problem = dict(item["problem"])
             problem["completion"] = item["completion"]
             problem.setdefault("prompt_id", item.get("prompt_id", f"sft_{len(rows)}"))
@@ -1042,7 +1066,11 @@ def load_sft_jsonl(path: str, split: str = "train") -> ray.data.Dataset:
                 "prompt": item["prompt"],
                 "problem": problem,
             })
-    print(f"[load_sft_jsonl] Loaded {len(rows)} SFT examples from {path}")
+    subset_str = f" (subset={list(subset)})" if subset else ""
+    if filtered:
+        print(f"[load_sft_jsonl] Loaded {len(rows)} SFT examples from {path}{subset_str} (filtered {filtered})")
+    else:
+        print(f"[load_sft_jsonl] Loaded {len(rows)} SFT examples from {path}{subset_str}")
     return ray.data.from_items(rows)
 
 
