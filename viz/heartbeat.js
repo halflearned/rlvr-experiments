@@ -37,7 +37,7 @@ class HeartbeatViz {
         this.metrics = {
             // Training dynamics
             kl_mean: [],
-            loss: [],
+            loss: [], loss_grpo: [], loss_sft: [],
             grad_norm: [],
             // TorchTitan
             mfu: [],
@@ -1128,7 +1128,7 @@ class HeartbeatViz {
 
     async extractMetrics() {
         this.metrics = {
-            kl_mean: [], loss: [], grad_norm: [],
+            kl_mean: [], loss: [], loss_grpo: [], loss_sft: [], grad_norm: [],
             mfu: [], train_tps: [], memory_pct: [],
             vllm_tps: [], vllm_output_tokens: [], vllm_prompt_tokens: [],
             kl_max: [], ratio_max: [], entropy_mean: [], clip_frac: [],
@@ -1186,6 +1186,15 @@ class HeartbeatViz {
                 if (event.name === 'metrics') {
                     if (event.loss !== undefined) {
                         this.metrics.loss.push({ ts, value: event.loss });
+                    }
+                    if (event.loss_grpo !== undefined) {
+                        this.metrics.loss_grpo.push({ ts, value: event.loss_grpo });
+                    } else if (event.loss !== undefined) {
+                        // Fallback: old traces only emit 'loss', treat as grpo loss
+                        this.metrics.loss_grpo.push({ ts, value: event.loss });
+                    }
+                    if (event.loss_sft !== undefined) {
+                        this.metrics.loss_sft.push({ ts, value: event.loss_sft });
                     }
                     if (event.grad_norm !== undefined) {
                         this.metrics.grad_norm.push({ ts, value: event.grad_norm });
@@ -1951,24 +1960,30 @@ class HeartbeatViz {
             return;
         }
 
-        // Compute timeline duration from span data specifically (not global maxTs which includes metrics)
+        // Compute timeline time range from span data specifically (not global maxTs which includes metrics)
+        let spanMinTs = Infinity;
         let spanMaxTs = 0;
         for (const s of this.vllmSpans) {
+            if (s.ts < spanMinTs) spanMinTs = s.ts;
             const end = s.ts + s.dur;
             if (end > spanMaxTs) spanMaxTs = end;
         }
         for (const s of this.trainerSpans) {
+            if (s.ts < spanMinTs) spanMinTs = s.ts;
             const end = s.ts + s.dur;
             if (end > spanMaxTs) spanMaxTs = end;
         }
         for (const s of this.verifierSpans) {
+            if (s.ts < spanMinTs) spanMinTs = s.ts;
             const end = s.ts + s.dur;
             if (end > spanMaxTs) spanMaxTs = end;
         }
         for (const s of this.syncEvents) {
+            if (s.ts < spanMinTs) spanMinTs = s.ts;
             if (s.ts > spanMaxTs) spanMaxTs = s.ts;
         }
-        const duration = spanMaxTs || this.maxTs;  // Fallback to global if no spans
+        if (spanMinTs === Infinity) spanMinTs = 0;
+        const duration = (spanMaxTs || this.maxTs) - spanMinTs;
 
         const padding = { left: 100, right: 20, top: 20, bottom: 30 };
         const plotWidth = width - padding.left - padding.right;
@@ -1977,8 +1992,8 @@ class HeartbeatViz {
         // Apply zoom
         const zoom = this.timeZoom;
         const zoomRange = zoom.xMax - zoom.xMin;
-        const visibleStart = duration * zoom.xMin;
-        const visibleEnd = duration * zoom.xMax;
+        const visibleStart = spanMinTs + duration * zoom.xMin;
+        const visibleEnd = spanMinTs + duration * zoom.xMax;
         const visibleDuration = visibleEnd - visibleStart;
 
         // Helper to convert time to x coordinate
@@ -2166,9 +2181,10 @@ class HeartbeatViz {
             return;
         }
 
-        // Compute duration from buffer events specifically (not global maxTs which includes metrics)
+        // Compute time range from buffer events specifically (not global maxTs which includes metrics)
+        const bufferMinTs = Math.min(...this.bufferEvents.map(e => e.ts));
         const bufferMaxTs = Math.max(...this.bufferEvents.map(e => e.ts));
-        const duration = bufferMaxTs || this.maxTs;
+        const duration = (bufferMaxTs || this.maxTs) - bufferMinTs;
         const padding = { left: 50, right: 20, top: 20, bottom: 30 };
         const plotWidth = width - padding.left - padding.right;
         const plotHeight = height - padding.top - padding.bottom;
@@ -2176,8 +2192,8 @@ class HeartbeatViz {
         // Apply zoom (synced with timeline)
         const zoom = this.timeZoom;
         const zoomRange = zoom.xMax - zoom.xMin;
-        const visibleStart = duration * zoom.xMin;
-        const visibleEnd = duration * zoom.xMax;
+        const visibleStart = bufferMinTs + duration * zoom.xMin;
+        const visibleEnd = bufferMinTs + duration * zoom.xMax;
         const visibleDuration = visibleEnd - visibleStart;
 
         // Helper to convert time to x coordinate
@@ -2775,6 +2791,8 @@ class HeartbeatViz {
         const colors = {
             kl_mean: '#3fb950',               // green - main training metric
             loss: '#58a6ff',
+            loss_grpo: '#58a6ff',             // blue - same as loss
+            loss_sft: '#d29922',              // yellow
             grad_norm: '#f85149',
             mfu: '#a371f7',
             train_tps: '#d29922',
@@ -2999,6 +3017,8 @@ class HeartbeatViz {
             case 'reward':
                 return value.toFixed(2);
             case 'loss':
+            case 'loss_grpo':
+            case 'loss_sft':
                 return value.toFixed(4);
             case 'grad_norm':
                 return value.toFixed(2);

@@ -1141,7 +1141,7 @@
                 </div>
             </div>
             <div class="panel-content">
-                <div class="metrics-sections" style="grid-template-columns: repeat(3, 1fr); height: 100%;">
+                <div class="metrics-sections" style="grid-template-columns: repeat(4, 1fr); height: 100%;">
                     <div class="metrics-section">
                         <div class="section-cards" style="grid-template-rows: 1fr;">
                             <div class="metric-card">
@@ -1157,10 +1157,21 @@
                         <div class="section-cards" style="grid-template-rows: 1fr;">
                             <div class="metric-card">
                                 <div class="metric-info">
-                                    <div class="metric-label">Loss</div>
-                                    <div class="metric-value color-blue" id="metric-loss">-</div>
+                                    <div class="metric-label">GRPO Loss</div>
+                                    <div class="metric-value color-blue" id="metric-loss_grpo">-</div>
                                 </div>
-                                <div class="metric-chart"><canvas id="chart-loss"></canvas></div>
+                                <div class="metric-chart"><canvas id="chart-loss_grpo"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="metrics-section">
+                        <div class="section-cards" style="grid-template-rows: 1fr;">
+                            <div class="metric-card">
+                                <div class="metric-info">
+                                    <div class="metric-label">SFT Loss</div>
+                                    <div class="metric-value color-yellow" id="metric-loss_sft">-</div>
+                                </div>
+                                <div class="metric-chart"><canvas id="chart-loss_sft"></canvas></div>
                             </div>
                         </div>
                     </div>
