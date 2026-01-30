@@ -99,6 +99,8 @@ def extract_metrics(trace_path: str) -> tuple[list[dict], dict]:
         metrics = find_nearest(metrics_events, ts)
         if metrics:
             record["loss"] = metrics.get("loss")
+            record["loss_grpo"] = metrics.get("loss_grpo")
+            record["loss_sft"] = metrics.get("loss_sft")
 
         # Compute mean completion length from batch.padding
         comp_lens = padding.get("completion_lens", [])
@@ -261,34 +263,89 @@ def generate_plot_data(config: dict) -> dict:
         summaries[run_id]["label"] = label
         summaries[run_id]["color"] = color
 
-        # Load eval results if available
-        if evals_path and evals_path.exists():
-            print(f"  Loading evals from {evals_path}...", file=sys.stderr)
-            with open(evals_path) as f:
-                eval_data = json.load(f)
-            summaries[run_id]["eval_dataset"] = eval_data.get("dataset")
-            summaries[run_id]["eval_accuracy"] = eval_data.get("accuracy")
-        else:
-            summaries[run_id]["eval_dataset"] = None
-            summaries[run_id]["eval_accuracy"] = None
+        # Load benchmark eval results
+        summaries[run_id]["benchmarks"] = {}
+        eval_curves = {}  # bench_name -> sorted list of (step, accuracy)
+        if run_dir:
+            evals_dir = Path(run_dir) / "evals"
+            if evals_dir.exists():
+                for bench_dir in sorted(evals_dir.iterdir()):
+                    if not bench_dir.is_dir():
+                        continue
+                    bench_name = bench_dir.name
+                    summary_jsonl = bench_dir / "summary.jsonl"
+                    summary_json = bench_dir / "summary.json"
+                    if summary_jsonl.exists():
+                        step_to_acc = {}
+                        with open(summary_jsonl) as f:
+                            for line in f:
+                                entry = json.loads(line)
+                                if "step" in entry and "accuracy" in entry:
+                                    step_to_acc[entry["step"]] = entry["accuracy"]
+                                    if entry["step"] == 200:
+                                        summaries[run_id]["benchmarks"][bench_name] = {
+                                            "accuracy": entry["accuracy"],
+                                            "step": 200,
+                                        }
+                        if step_to_acc:
+                            entries = sorted(step_to_acc.items())
+                            eval_curves[bench_name] = entries
+                    elif summary_json.exists():
+                        with open(summary_json) as f:
+                            entry = json.load(f)
+                        if "accuracy" in entry:
+                            summaries[run_id]["benchmarks"][bench_name] = {
+                                "accuracy": entry.get("accuracy"),
+                                "step": entry.get("step"),
+                            }
 
-        runs_data.append(
-            {
-                "id": run_id,
-                "label": label,
-                "color": color,
-                "steps": [m["step"] for m in metrics],
-                "reward_overall": [m.get("reward_overall") for m in metrics],
-                "frac_all_correct": [m.get("frac_all_correct") for m in metrics],
-                "frac_all_wrong": [m.get("frac_all_wrong") for m in metrics],
-                "completion_len": [m.get("completion_len") for m in metrics],
-                "loss": [m.get("loss") for m in metrics],
-                "kl_mean": [m.get("kl_mean") for m in metrics],
-                "entropy_mean": [m.get("entropy_mean") for m in metrics],
-            }
-        )
+        run_entry = {
+            "id": run_id,
+            "label": label,
+            "color": color,
+            "steps": [m["step"] for m in metrics],
+            "reward_overall": [m.get("reward_overall") for m in metrics],
+            "frac_all_correct": [m.get("frac_all_correct") for m in metrics],
+            "frac_all_wrong": [m.get("frac_all_wrong") for m in metrics],
+            "completion_len": [m.get("completion_len") for m in metrics],
+            "loss": [m.get("loss") for m in metrics],
+            "loss_grpo": [m.get("loss_grpo") for m in metrics],
+            "loss_sft": [m.get("loss_sft") for m in metrics],
+            "kl_mean": [m.get("kl_mean") for m in metrics],
+            "entropy_mean": [m.get("entropy_mean") for m in metrics],
+        }
 
-    return {"runs": runs_data, "summaries": summaries}
+        # Add eval curves as eval_<bench>_steps / eval_<bench>_accuracy
+        for bench_name, entries in eval_curves.items():
+            run_entry[f"eval_{bench_name}_steps"] = [s for s, _ in entries]
+            run_entry[f"eval_{bench_name}_accuracy"] = [a for _, a in entries]
+
+        runs_data.append(run_entry)
+
+    # Load base model evals if configured
+    base_benchmarks = {}
+    base_config = config.get("base_model")
+    if base_config:
+        evals_dir = Path(base_config["evals_dir"])
+        if evals_dir.exists():
+            for bench_dir in sorted(evals_dir.iterdir()):
+                if not bench_dir.is_dir():
+                    continue
+                bench_name = bench_dir.name
+                summary_json = bench_dir / "summary.json"
+                if summary_json.exists():
+                    with open(summary_json) as f:
+                        entry = json.load(f)
+                    if "accuracy" in entry:
+                        base_benchmarks[bench_name] = entry["accuracy"]
+
+    result = {"runs": runs_data, "summaries": summaries}
+    if base_benchmarks:
+        result["base_model"] = {
+            "label": base_config.get("label", "Base"),
+            "benchmarks": base_benchmarks,
+        }
+    return result
 
 
 def generate_js(plot_data: dict, presets: list[dict] | None = None) -> str:
@@ -362,60 +419,44 @@ function generateComparisonTable() {{
 
     const runs = stalenessData.runs;
     const summaries = stalenessData.summaries;
+    const baseModel = stalenessData.base_model || null;
 
-    // Build table HTML
+    // Collect all benchmark names across all runs
+    const benchSet = new Set();
+    runs.forEach(run => {{
+        const s = summaries[run.id];
+        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => benchSet.add(b));
+    }});
+    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => benchSet.add(b));
+    const benchmarks = Array.from(benchSet).sort();
+
+    if (benchmarks.length === 0) return;
+
+    const ncols = runs.length + (baseModel ? 2 : 1); // +1 for row label, +1 for base
+
     let html = '<table class="results-table comparison-table">';
 
-    // Header row with run labels
-    html += '<thead><tr><th></th>';
+    // Header
+    html += '<thead><tr><th>Benchmark (step 200)</th>';
+    if (baseModel) html += `<th style="color:#999">${{baseModel.label}}</th>`;
     runs.forEach(run => {{
         html += `<th style="color: ${{run.color}}">${{run.label}}</th>`;
     }});
-    html += '</tr></thead>';
+    html += '</tr></thead><tbody>';
 
-    html += '<tbody>';
-
-    // Benchmarks section
-    html += '<tr class="section-header"><td colspan="' + (runs.length + 1) + '">Benchmarks</td></tr>';
-
-    // Get unique datasets across all runs
-    const datasets = new Set();
-    runs.forEach(run => {{
-        const s = summaries[run.id];
-        if (s && s.eval_dataset) datasets.add(s.eval_dataset);
-    }});
-
-    datasets.forEach(dataset => {{
-        html += `<tr><td>${{dataset.toUpperCase()}}</td>`;
+    benchmarks.forEach(bench => {{
+        html += `<tr><td>${{bench.toUpperCase()}}</td>`;
+        if (baseModel) {{
+            const bv = baseModel.benchmarks[bench];
+            html += bv !== undefined && bv !== null
+                ? `<td>${{d3.format('.1%')(bv)}}</td>`
+                : '<td>&mdash;</td>';
+        }}
         runs.forEach(run => {{
             const s = summaries[run.id];
-            if (s && s.eval_dataset === dataset && s.eval_accuracy !== null) {{
-                html += `<td>${{d3.format('.1%')(s.eval_accuracy)}}</td>`;
-            }} else {{
-                html += '<td>&mdash;</td>';
-            }}
-        }});
-        html += '</tr>';
-    }});
-
-    // Performance section
-    html += '<tr class="section-header"><td colspan="' + (runs.length + 1) + '">Performance</td></tr>';
-
-    const perfMetrics = [
-        {{ key: 'total_steps', label: 'Total Steps' }},
-        {{ key: 'total_training_time', label: 'Training Time' }},
-        {{ key: 'median_time_per_step', label: 'Time/Step (median)' }},
-        {{ key: 'median_mfu', label: 'MFU (median)' }},
-    ];
-
-    perfMetrics.forEach(metric => {{
-        html += `<tr><td>${{metric.label}}</td>`;
-        runs.forEach(run => {{
-            const s = summaries[run.id];
-            const value = s ? s[metric.key] : null;
-            if (value !== null && value !== undefined) {{
-                const fmt = metricFormats[metric.key] || {{ format: '.2f', suffix: '' }};
-                html += `<td>${{d3.format(fmt.format)(value)}}${{fmt.suffix}}</td>`;
+            const bdata = s && s.benchmarks && s.benchmarks[bench];
+            if (bdata && bdata.accuracy !== null && bdata.accuracy !== undefined) {{
+                html += `<td>${{d3.format('.1%')(bdata.accuracy)}}</td>`;
             }} else {{
                 html += '<td>&mdash;</td>';
             }}
@@ -424,7 +465,6 @@ function generateComparisonTable() {{
     }});
 
     html += '</tbody></table>';
-
     container.innerHTML = html;
 }}
 
@@ -565,9 +605,17 @@ const plotConfigs = [
     }},
     // Row 2: Training dynamics
     {{
-        id: 'plot-loss',
-        title: 'Loss',
-        yKey: 'loss',
+        id: 'plot-loss-grpo',
+        title: 'GRPO Loss',
+        yKey: 'loss_grpo',
+        yLabel: 'Loss',
+        logScale: false,
+        format: '.4f'
+    }},
+    {{
+        id: 'plot-loss-sft',
+        title: 'SFT Loss',
+        yKey: 'loss_sft',
         yLabel: 'Loss',
         logScale: false,
         format: '.4f'
@@ -587,6 +635,27 @@ const plotConfigs = [
         yLabel: 'Entropy',
         logScale: false,
         format: '.3f'
+    }},
+    // Row 3: Evaluation
+    {{
+        id: 'plot-eval-gsm8k',
+        title: 'GSM8K Accuracy',
+        stepsKey: 'eval_gsm8k_steps',
+        yKey: 'eval_gsm8k_accuracy',
+        yLabel: 'Accuracy',
+        logScale: false,
+        format: '.1%',
+        linear: true
+    }},
+    {{
+        id: 'plot-eval-math',
+        title: 'MATH Accuracy',
+        stepsKey: 'eval_math_steps',
+        yKey: 'eval_math_accuracy',
+        yLabel: 'Accuracy',
+        logScale: false,
+        format: '.1%',
+        linear: true
     }}
 ];
 
@@ -629,17 +698,21 @@ function drawD3Plot(container, runs, config) {{
         .attr('transform', `translate(${{margin.left}},${{margin.top}})`);
 
     // Collect all data points
+    // stepsKey allows eval plots to use per-run step arrays (e.g. eval_gsm8k_steps)
+    const stepsKey = config.stepsKey || 'steps';
     let allX = [];
     let allY = [];
 
     runs.forEach(run => {{
-        allX.push(...run.steps);
+        const xArr = run[stepsKey];
+        if (!xArr || xArr.length === 0) return;  // skip runs without this data
+        allX.push(...xArr);
         if (config.multiLine) {{
             config.yKeys.forEach(key => {{
-                allY.push(...run[key].filter(v => v !== null && v !== undefined));
+                allY.push(...(run[key] || []).filter(v => v !== null && v !== undefined));
             }});
         }} else {{
-            allY.push(...run[config.yKey].filter(v => v !== null && v !== undefined));
+            allY.push(...(run[config.yKey] || []).filter(v => v !== null && v !== undefined));
         }}
     }});
 
@@ -722,7 +795,7 @@ function drawD3Plot(container, runs, config) {{
         .defined(d => d.y !== null && d.y !== undefined && (!config.logScale || d.y > 0))
         .x(d => xScale(d.x))
         .y(d => yScale(d.y))
-        .curve(d3.curveMonotoneX);
+        .curve(config.linear ? d3.curveLinear : d3.curveMonotoneX);
 
     // Colors and styles for runs
     const lineWidths = [1.75, 1.75];
@@ -733,11 +806,14 @@ function drawD3Plot(container, runs, config) {{
     const allLineData = [];
 
     runs.forEach((run, runIdx) => {{
+        const xArr = run[stepsKey];
+        if (!xArr || xArr.length === 0) return;  // skip runs without this data
+
         if (config.multiLine) {{
             config.yKeys.forEach((yKey, keyIdx) => {{
-                const data = run.steps.map((step, i) => ({{
+                const data = xArr.map((step, i) => ({{
                     x: step,
-                    y: run[yKey][i],
+                    y: (run[yKey] || [])[i],
                     label: run.label,
                     metric: config.yLabels[keyIdx]
                 }})).filter(d => d.y !== null && d.y !== undefined);
@@ -756,9 +832,9 @@ function drawD3Plot(container, runs, config) {{
                     .attr('d', line);
             }});
         }} else {{
-            const data = run.steps.map((step, i) => ({{
+            const data = xArr.map((step, i) => ({{
                 x: step,
-                y: run[config.yKey][i],
+                y: (run[config.yKey] || [])[i],
                 label: run.label
             }})).filter(d => d.y !== null && d.y !== undefined && (!config.logScale || d.y > 0));
 
