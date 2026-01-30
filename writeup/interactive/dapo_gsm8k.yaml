@@ -4,25 +4,56 @@
 output: staleness_plots.js
 
 runs:
-  - id: dapo
+  # --- No SFT ---
+  - id: dapo-lr1e5
     run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr1e5_20260129-222310
-    label: "DAPO (lr=1e-5)"
+    label: "DAPO lr=1e-5"
     color: "#3b82f6"   # blue
-  - id: grpo
-    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr5e6_20260129-213606
-    label: "GRPO (lr=5e-6)"
+  - id: dapo-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr5e6_20260129-213056
+    label: "DAPO lr=5e-6"
+    color: "#93c5fd"   # light blue
+  - id: grpo-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr1e5_20260130-012436
+    label: "GRPO lr=1e-5"
     color: "#22c55e"   # green
+  - id: grpo-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr5e6_20260129-213606
+    label: "GRPO lr=5e-6"
+    color: "#86efac"   # light green
+
+  # --- With SFT ---
+  - id: dapo-sft-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-sft-lr1e5_20260130-005912
+    label: "DAPO+SFT lr=1e-5"
+    color: "#f97316"   # orange
+  - id: dapo-sft-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-sft-lr5e6_20260130-005852
+    label: "DAPO+SFT lr=5e-6"
+    color: "#fdba74"   # light orange
+  - id: grpo-sft-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-sft-lr1e5_20260130-022119
+    label: "GRPO+SFT lr=1e-5"
+    color: "#a855f7"   # purple
+  - id: grpo-sft-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-sft-lr5e6_20260130-002249
+    label: "GRPO+SFT lr=5e-6"
+    color: "#d8b4fe"   # light purple
+
+base_model:
+  label: "Qwen3-1.7B-Base"
+  evals_dir: /efs/rlvr-experiments/results/qwen3-1.7B-base/evals
 
 presets:
   - id: all
     label: "All Runs"
-    runs: [dapo, grpo]
-    text: "Comparison of DAPO and GRPO on GSM8K. Both use Qwen3-1.7B-Base with different learning rates and algorithm variants."
-  - id: dapo
-    label: "DAPO"
-    runs: [dapo]
-    text: "DAPO variant of GRPO with lr=1e-5. Reaches 83.9% accuracy on GSM8K test set."
-  - id: grpo
-    label: "GRPO"
-    runs: [grpo]
-    text: "Standard GRPO with lr=5e-6."
+    runs: [dapo-lr1e5, dapo-lr5e6, grpo-lr1e5, grpo-lr5e6, dapo-sft-lr1e5, dapo-sft-lr5e6, grpo-sft-lr1e5, grpo-sft-lr5e6]
+    text: "All 8 GSM8K runs: DAPO vs GRPO, with and without SFT auxiliary loss, at two learning rates."
+  - id: dapo-vs-grpo
+    label: "DAPO vs GRPO"
+    runs: [dapo-lr1e5, dapo-lr5e6, grpo-lr1e5, grpo-lr5e6]
+    text: "DAPO vs GRPO without SFT. DAPO removes length and std normalization from the GRPO objective."
+  - id: sft-effect
+    label: "+SFT Effect"
+    runs: [dapo-lr1e5, dapo-sft-lr1e5, grpo-lr1e5, grpo-sft-lr1e5]
+    text: "Effect of adding SFT as an auxiliary loss (alpha=0.001), comparing at lr=1e-5."
