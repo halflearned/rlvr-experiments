@@ -484,6 +484,108 @@ code {
 }
 
 /* Staleness comparison plots */
+/* Experiment plots container (replaces .staleness-plots) */
+.experiment-plots {
+    margin: 32px 0;
+}
+
+.experiment-plots h4 {
+    font-family: 'Lora', serif;
+    font-size: 14px;
+    font-weight: 500;
+    color: #555;
+    margin: 24px 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.experiment-plots h4:first-of-type {
+    margin-top: 16px;
+}
+
+/* Preset buttons */
+.preset-buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 16px;
+}
+
+.preset-buttons button {
+    font-family: 'Source Code Pro', monospace;
+    font-size: 12px;
+    padding: 6px 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #fff;
+    color: #374151;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.preset-buttons button:hover {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+}
+
+.preset-buttons button.active {
+    background: #1f2937;
+    color: #fff;
+    border-color: #1f2937;
+}
+
+/* Run legend with checkboxes */
+.run-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    justify-content: center;
+    margin-bottom: 16px;
+    font-size: 12px;
+    font-family: 'Source Code Pro', monospace;
+    color: #555;
+}
+
+.run-legend label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    user-select: none;
+    padding: 2px 0;
+}
+
+.run-legend label.unchecked {
+    opacity: 0.35;
+}
+
+.run-legend .legend-swatch {
+    display: inline-block;
+    width: 18px;
+    height: 3px;
+    border-radius: 1px;
+}
+
+.run-legend input[type="checkbox"] {
+    display: none;
+}
+
+/* Preset explanation text */
+.preset-explanation {
+    margin-top: 20px;
+    padding: 12px 16px;
+    background: #f9fafb;
+    border-left: 3px solid #d1d5db;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #374151;
+    min-height: 2em;
+}
+
+.preset-explanation:empty {
+    display: none;
+}
+
 .staleness-plots {
     margin: 32px 0;
 }

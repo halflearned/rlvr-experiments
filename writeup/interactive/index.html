@@ -183,12 +183,13 @@
 
 
 
-                <!-- EMBED: staleness-plots -->
-                <div class="staleness-plots">
-                    <div class="plot-legend">
-                        <span class="legend-item"><span class="legend-line" style="background: #3b82f6;"></span> max_staleness=0</span>
-                        <span class="legend-item"><span class="legend-line legend-dashed" style="background: #22c55e;"></span> max_staleness=1</span>
-                    </div>
+                <!-- EMBED: interactive experiment plots -->
+                <div class="experiment-plots">
+                    <!-- Preset buttons -->
+                    <div id="preset-buttons" class="preset-buttons"></div>
+
+                    <!-- Checkbox legend -->
+                    <div id="run-legend" class="run-legend"></div>
 
                     <h4>Rewards</h4>
                     <div class="plot-row">
@@ -203,12 +204,15 @@
                         <div class="plot-container" id="plot-kl"></div>
                         <div class="plot-container" id="plot-entropy"></div>
                     </div>
+
+                    <!-- Dynamic explanation text -->
+                    <div id="preset-explanation" class="preset-explanation"></div>
                 </div>
 
-                <!-- EMBED: staleness-comparison-table (auto-generated) -->
+                <!-- EMBED: comparison-table (auto-generated) -->
                 <div id="staleness-comparison-table" class="results-table-container"></div>
 
-            
+
             </section>
 
             <section id="curriculum">
@@ -478,6 +482,6 @@
     </article>
 
     <script src="viewer.js"></script>
-    <script src="staleness_plots.js?v=8"></script>
+    <script src="staleness_plots.js?v=10"></script>
 </body>
 </html>
