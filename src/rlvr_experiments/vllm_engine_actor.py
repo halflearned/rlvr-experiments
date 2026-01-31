@@ -214,6 +214,78 @@ class VLLMEngineRank:
 
         return results
 
+    async def get_logprobs_topk(
+        self,
+        token_ids_list: list[list[int]],
+        prompt_lens: list[int],
+        top_k: int = 32,
+        temperature: float = 1.0,
+    ) -> list[list[dict[int, float]]]:
+        """Get top-k logprobs at each completion position.
+
+        Like get_logprobs(), but returns the top-k token logprobs at each position
+        instead of just the chosen token's logprob.
+
+        Returns:
+            List (per sequence) of list (per completion position) of dict {token_id: logprob}.
+            Each dict has up to top_k entries.
+        """
+        t0 = time.perf_counter()
+
+        sp = SamplingParams(
+            max_tokens=1,
+            prompt_logprobs=top_k,
+            temperature=temperature,
+        )
+        sp.output_kind = RequestOutputKind.FINAL_ONLY
+
+        async def process_single(token_ids: list[int], prompt_len: int) -> list[dict[int, float]]:
+            req_id = str(uuid.uuid4())
+            self._active_requests.add(req_id)
+            try:
+                from vllm.inputs import TokensPrompt
+                prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+                final = None
+                async for out in self.engine.generate(prompt, sp.clone(), req_id):
+                    final = out if final is None else final.add(out, aggregate=False) or final
+
+                if final is None or final.prompt_logprobs is None:
+                    return [{} for _ in range(len(token_ids) - prompt_len)]
+
+                completion_logprobs = []
+                for i in range(prompt_len, len(token_ids)):
+                    if i < len(final.prompt_logprobs) and final.prompt_logprobs[i] is not None:
+                        lp_dict = final.prompt_logprobs[i]
+                        completion_logprobs.append({
+                            tid: lp_obj.logprob for tid, lp_obj in lp_dict.items()
+                        })
+                    else:
+                        completion_logprobs.append({})
+
+                return completion_logprobs
+            finally:
+                self._active_requests.discard(req_id)
+
+        results = await asyncio.gather(*[
+            process_single(tids, plen)
+            for tids, plen in zip(token_ids_list, prompt_lens)
+        ])
+
+        t1 = time.perf_counter()
+        total_tokens = sum(len(tids) for tids in token_ids_list)
+        print(
+            f"[vLLM LOGPROBS_TOPK replica={self.replica_id}] "
+            f"seqs={len(token_ids_list)}  "
+            f"total_tokens={total_tokens}  "
+            f"top_k={top_k}  "
+            f"time={t1-t0:.2f}s  "
+            f"tps={total_tokens/(t1-t0):.0f}",
+            flush=True
+        )
+
+        return results
+
     async def recv_chunk(self, channel: str, chunk: dict, dtype_str: str, src_rank: int):
         # channel is unused - vLLM only has one sync channel
         await self.engine.collective_rpc(
@@ -587,6 +659,55 @@ class VLLMHandle:
                     else:
                         # Real error - log and raise
                         logger.error(f"[get_logprobs_single] RayTaskError: {e}")
+                        raise
+            finally:
+                await self._router.release_slot(replica_idx, slot_idx)
+                self._in_flight -= 1
+                if self._in_flight == 0:
+                    self._in_flight_zero.set()
+
+    async def get_logprobs_topk_single(
+        self,
+        token_ids_list: list[list[int]],
+        prompt_lens: list[int],
+        top_k: int = 32,
+        temperature: float = 1.0,
+    ) -> list[list[dict[int, float]]]:
+        """Get top-k logprobs with load-aware routing.
+
+        Returns:
+            List (per seq) of list (per completion position) of dict {token_id: logprob}.
+        """
+        while True:
+            if not self._paused.is_set():
+                await self._paused.wait()
+
+            replica_idx, slot_idx = await self._router.acquire_slot()
+            self._in_flight += 1
+            if self._in_flight == 1:
+                self._in_flight_zero.clear()
+
+            try:
+                if not self._paused.is_set():
+                    continue
+
+                actor = self._actors[replica_idx]
+                try:
+                    with trace_span("vllm.get_logprobs_topk", args={"replica": replica_idx, "slot": slot_idx, "n_seqs": len(token_ids_list)}):
+                        result = await actor.get_logprobs_topk.remote(
+                            token_ids_list,
+                            prompt_lens,
+                            top_k,
+                            temperature,
+                        )
+                    return result
+                except asyncio.CancelledError:
+                    continue
+                except ray.exceptions.RayTaskError as e:
+                    if "AbortedError" in str(e):
+                        continue
+                    else:
+                        logger.error(f"[get_logprobs_topk_single] RayTaskError: {e}")
                         raise
             finally:
                 await self._router.release_slot(replica_idx, slot_idx)
