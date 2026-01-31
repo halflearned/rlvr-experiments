@@ -165,20 +165,21 @@ def build_teacher_template(
 # ---------------------------------------------------------------------------
 
 def build_gsm8k_teacher_template(original_template: str, ground_truth_answer: str) -> str:
-    """Build teacher prompt for GSM8k: original question + answer hint.
+    """Build teacher prompt for GSM8k: answer-first, then re-derive.
 
-    The teacher sees the correct answer so it can provide better per-token
-    targets for the student to learn from.
+    Shows the answer, then asks the model to produce a solution. This is the
+    most effective base-model-friendly template (88.8% pass@1 vs 45.8% plain
+    in ablation over 500 GSM8k prompts). See GKD_NOTES.md for details.
     """
     # original_template is "Q: {question}\nA:"
-    # Strip the trailing "A:" and rebuild with hint
+    # Strip the trailing "A:" and rebuild
     base = original_template.rstrip()
     if base.endswith("A:"):
         base = base[:-2].rstrip()
+    # v4_answer_first: show answer, then ask for solution
     return (
-        f"{base}\n"
-        f"The answer to this question is {ground_truth_answer}. "
-        f"With that in mind, please provide your reasoning.\nA:"
+        f"{base}\nA: {ground_truth_answer}\n\n"
+        f"Solution:\n{base}\nA:"
     )
 
 
@@ -260,6 +261,92 @@ class OPSDLoss(torch.nn.Module):
         self._last_debug = {
             "opsd_loss": float(loss.detach()),
             "mean_kl": float(mean_kl),
+            "mean_student_lp": float(mean_student_lp),
+        }
+        return loss
+
+
+class OPSDJSDLoss(torch.nn.Module):
+    """On-Policy Self-Distillation loss using Jensen-Shannon Divergence.
+
+    JSD(alpha) = alpha * KL(teacher || M) + (1-alpha) * KL(student || M)
+    where M = alpha * teacher + (1-alpha) * student
+
+    With alpha=0.9 (GKD recommendation), this is heavily weighted toward the
+    teacher. Key advantage over pure KL: bounded gradients because M always
+    includes a fraction of the student's own distribution, so M never assigns
+    zero probability where the student does.
+
+    Reference: Generalized Knowledge Distillation (Agarwal et al., 2024)
+    """
+
+    def __init__(self, alpha: float = 0.9):
+        super().__init__()
+        self.alpha = alpha
+        self._last_debug: dict | None = None
+
+    def get_debug_metrics(self) -> dict | None:
+        metrics = self._last_debug
+        self._last_debug = None
+        return metrics
+
+    def forward(self, logits, completion_ids, teacher_topk_ids, teacher_topk_lps,
+                padding_mask, prompt_lens, temperature=1.0):
+        B = logits.size(0)
+        T = completion_ids.size(1)
+        K = teacher_topk_ids.size(-1)
+
+        topk_ids = teacher_topk_ids.to(completion_ids.device).long()
+        topk_lps = teacher_topk_lps.to(completion_ids.device, dtype=torch.float32)
+
+        # Get student logprobs for all K teacher tokens at each position.
+        student_topk_lps = torch.zeros(B, T, K, device=completion_ids.device, dtype=torch.float32)
+        for k_idx in range(K):
+            lps_k, _ = compute_logprobs(
+                logits, topk_ids[:, :, k_idx], prompt_lens=prompt_lens, temperature=temperature,
+            )
+            student_topk_lps[:, :, k_idx] = lps_k
+
+        # Also get student logprob for the actual chosen token (for logging)
+        student_chosen_lps, _ = compute_logprobs(
+            logits, completion_ids, prompt_lens=prompt_lens, temperature=temperature,
+        )
+
+        # Renormalize teacher probs over top-k
+        teacher_probs_raw = topk_lps.exp()
+        teacher_probs_sum = teacher_probs_raw.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        teacher_probs = teacher_probs_raw / teacher_probs_sum  # [B, T, K]
+
+        # Student probs for top-k tokens (via logprobs, no .exp() on raw — use softmax-derived lps)
+        student_probs = student_topk_lps.exp()  # [B, T, K]
+
+        # Mixture: M = alpha * teacher + (1-alpha) * student
+        alpha = self.alpha
+        M = alpha * teacher_probs + (1.0 - alpha) * student_probs  # [B, T, K]
+        log_M = M.clamp_min(1e-12).log()
+
+        # KL(teacher || M) = sum_k teacher_k * (log teacher_k - log M_k)
+        teacher_log_probs = teacher_probs.clamp_min(1e-12).log()
+        kl_teacher_M = (teacher_probs * (teacher_log_probs - log_M)).sum(dim=-1)  # [B, T]
+
+        # KL(student || M) = sum_k student_k * (log student_k - log M_k)
+        student_log_probs = student_probs.clamp_min(1e-12).log()
+        kl_student_M = (student_probs * (student_log_probs - log_M)).sum(dim=-1)  # [B, T]
+
+        # JSD = alpha * KL(teacher||M) + (1-alpha) * KL(student||M)
+        jsd_per_token = alpha * kl_teacher_M + (1.0 - alpha) * kl_student_M  # [B, T]
+
+        mask = padding_mask.to(jsd_per_token.device, dtype=torch.float32)
+        per_response_loss = (jsd_per_token * mask).sum(dim=-1) / mask.sum(dim=-1).clamp_min(1.0)
+        loss = per_response_loss.mean()
+
+        with torch.no_grad():
+            mean_student_lp = (student_chosen_lps.detach() * mask).sum() / mask.sum().clamp_min(1.0)
+            mean_jsd = (jsd_per_token.detach() * mask).sum() / mask.sum().clamp_min(1.0)
+
+        self._last_debug = {
+            "opsd_loss": float(loss.detach()),
+            "mean_kl": float(mean_jsd),  # reuse key name for logging compat
             "mean_student_lp": float(mean_student_lp),
         }
         return loss
@@ -413,6 +500,13 @@ async def main() -> None:
     trainer = runtime.roles["trainer"]; rollout = runtime.roles["rollout"]
     buffer = runtime.buffer; tracer = runtime.tracer
 
+    # Separate teacher model (frozen, e.g. instruct) — falls back to rollout if not configured
+    teacher_model = runtime.roles.get("teacher", rollout)
+    if "teacher" in runtime.roles:
+        print(f"[init] Using separate teacher model (frozen, not synced)")
+    else:
+        print(f"[init] Using rollout as teacher (self-distillation)")
+
     reference = runtime.roles.get("reference")
 
     resume_step = training.get("resume_step", 0)
@@ -466,13 +560,21 @@ async def main() -> None:
     sampling_params = {**sampling, "logprobs": 0}
     policy_temperature = sampling_params.get("temperature", 1.0)
     rollout_max_model_len = roles["rollout"].config.get("max_model_len")
+    teacher_max_model_len = roles["teacher"].config.get("max_model_len") if "teacher" in roles else rollout_max_model_len
     rollout_timeout_s = training.get("rollout_timeout_s", 9999)
     max_concurrent_tasks = training.get("max_concurrent_tasks", 64)
 
-    opsd_loss_fn = OPSDLoss()
+    opsd_loss_type = training.get("opsd_loss_type", "kl")
+    if opsd_loss_type == "jsd":
+        jsd_alpha = training.get("jsd_alpha", 0.9)
+        opsd_loss_fn = OPSDJSDLoss(alpha=jsd_alpha)
+    elif opsd_loss_type == "l2":
+        opsd_loss_fn = OPSDL2Loss()
+    else:
+        opsd_loss_fn = OPSDLoss()
     print(f"[config] batch_size={batch_size}, minibatch_size={minibatch_size}, accumulation_steps={accumulation_steps}")
     print(f"[config] sync_every={sync_model_every}, max_staleness={max_staleness}")
-    print(f"[config] OPSD mode: pure self-distillation, discard perfect completions")
+    print(f"[config] OPSD mode: pure self-distillation, discard perfect completions, loss_type={opsd_loss_type}")
 
     def mark_filtered(prompt_id: str, trainer_version: int, dataset: str, reason: str) -> None:
         buffer.stats.record_filtered(trainer_version)
@@ -495,13 +597,13 @@ async def main() -> None:
         teacher_seq = teacher_prompt_ids + completion_token_ids
         teacher_prompt_len = len(teacher_prompt_ids)
 
-        if rollout_max_model_len is not None and len(teacher_seq) > rollout_max_model_len:
-            print(f"[opsd] teacher seq too long: {len(teacher_seq)} > {rollout_max_model_len}, skipping")
+        if teacher_max_model_len is not None and len(teacher_seq) > teacher_max_model_len:
+            print(f"[opsd] teacher seq too long: {len(teacher_seq)} > {teacher_max_model_len}, skipping")
             return None
 
         with trace_span("teacher_topk_logprobs"):
             # Returns list of list of dict {token_id: logprob}
-            results = await rollout.get_logprobs_topk_single(
+            results = await teacher_model.get_logprobs_topk_single(
                 [teacher_seq], [teacher_prompt_len],
                 top_k=teacher_top_k, temperature=policy_temperature,
             )
@@ -577,16 +679,23 @@ async def main() -> None:
                     detail_verifier.verify_detailed(comp, ground_truth) for comp in completions_text
                 ]
 
+            # Determine if we're using a separate (e.g. instruct) teacher
+            has_separate_teacher = "teacher" in runtime.roles
+
             for idx in kept_indices:
                 actual_len = rollout_sample.completion_lens[idx]
                 comp_token_ids = rollout_sample.completion_ids[idx, :actual_len].tolist()
 
-                # Build teacher template based on dataset type
-                if dataset_name == "gsm8k":
+                # Build teacher template based on dataset type and teacher mode
+                if has_separate_teacher:
+                    # Separate teacher (e.g. instruct model): use same prompt as student.
+                    # The instruct model's distribution is already better — no hint needed.
+                    teacher_tmpl = item["template"]
+                elif dataset_name == "gsm8k":
                     answer = item["problem"].get("answer", "")
                     teacher_tmpl = build_gsm8k_teacher_template(item["template"], answer)
                 else:
-                    # IF: use constraint feedback
+                    # IF self-distillation: use constraint feedback
                     per_constraint, inst_ids, kw_list = detailed_results[idx]
                     teacher_tmpl = build_teacher_template(
                         item["template"], per_constraint, inst_ids, kw_list

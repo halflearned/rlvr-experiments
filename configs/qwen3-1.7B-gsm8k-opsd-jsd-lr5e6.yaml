@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_topk
-  port_start: 29500
+  name: qwen3_17b_gsm8k_opsd_jsd_lr5e6
+  port_start: 29600
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -15,6 +15,8 @@ training:
   max_staleness: 0
   abort_in_flight: false
   teacher_top_k: 20
+  opsd_loss_type: jsd
+  jsd_alpha: 0.9
 
   # OPSD flat-completion batching
   batch_size: 512         # completions per optimizer step (GSM8k is faster)
@@ -82,7 +84,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.000005
         eps: 0.0001
 
       lr_scheduler:

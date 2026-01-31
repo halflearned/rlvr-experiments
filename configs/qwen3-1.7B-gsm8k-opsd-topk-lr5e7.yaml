@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_topk
+  name: qwen3_17b_gsm8k_opsd_topk_lr5e7
   port_start: 29500
 
 model:
@@ -18,7 +18,7 @@ training:
 
   # OPSD flat-completion batching
   batch_size: 512         # completions per optimizer step (GSM8k is faster)
-  minibatch_size: 16      # completions per forward-backward
+  minibatch_size: 32      # completions per forward-backward
   sync_every_n_steps: 1
 
   seq_len_buckets: [768]
@@ -82,7 +82,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.0000005
         eps: 0.0001
 
       lr_scheduler:

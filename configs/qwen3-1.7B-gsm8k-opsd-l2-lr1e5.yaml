@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_topk
+  name: qwen3_17b_gsm8k_opsd_l2_lr1e5
   port_start: 29500
 
 model:
@@ -15,10 +15,11 @@ training:
   max_staleness: 0
   abort_in_flight: false
   teacher_top_k: 20
+  opsd_loss_type: l2
 
   # OPSD flat-completion batching
   batch_size: 512         # completions per optimizer step (GSM8k is faster)
-  minibatch_size: 16      # completions per forward-backward
+  minibatch_size: 32      # completions per forward-backward
   sync_every_n_steps: 1
 
   seq_len_buckets: [768]
@@ -82,7 +83,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.00001
         eps: 0.0001
 
       lr_scheduler:
@@ -117,7 +118,7 @@ roles:
         selective_ac_option: "op"
 
       compile:
-        enable: true
+        enable: false
         components:
           - "model"
 

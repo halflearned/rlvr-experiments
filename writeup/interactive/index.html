@@ -136,13 +136,15 @@
         </section>
 
         <section id="experiments">
-            <h2>2. Experiments</h2>
+            <h2>2. Basic experiment setup</h2>
             <p>
-                All experiments run here use the <a href="https://arxiv.org/abs/2503.20783">GRPO Done Right</a> variation of the original GRPO implementation. Given a prompt, we generate $G$ completions $o_{i}$ from the current model $\pi_{\theta}$, and compute:
+                In this section, all experiments use one of two algorithm variants.
             </p>
 
+            <p>For <a href="https://arxiv.org/abs/2503.20783">GRPO</a>, given a prompt $p$, we generate $G$ completions $o_{i}$ from the current model $\pi_{\theta}$, and compute:</p>
+
             $$
-            J_{\text{DrGRPO}}
+            J_{\text{GRPO}}(g)
             =
             \frac{1}{G} \sum_{i=1}^{G} \sum_{t=1}^{|o_i|}
             \left\{ \min \left[
@@ -159,18 +161,43 @@
             $$
 
             <p>
-                The advantage $\hat{A}_{i,t}$ is the reward of that completion minus the mean: $\hat{A}_{i,t} = r_{i} - \frac{1}{G} \sum_{j=1}^{G} r_j$.
+                where the advantage $\hat{A}_{i} = (r_i - \bar{r}) / \sigma_r$ is the z-scored reward for completion $i$ within its group, $\pi_{\theta_{\text{old}}}$ is the rollout policy used to generate the completions, and the probability ratio is clipped following <a href="https://arxiv.org/pdf/1707.06347">PPO-Clip</a>.
             </p>
 
             <p>
-                Relative to the original GRPO implementation, Equation (1) removes standard deviation and length normalizations. TODO: why. The experiment parameters are as follows.
+                Our second algorithm is a variant of <a href="https://arxiv.org/pdf/2503.14476">DAPO</a> (Decoupled Clip and Dynamic Sampling Policy Optimization), which uses the following objective,
+            </p>
+
+            $$
+            J_{\text{DAPO}}(g)
+            =
+            \frac{1}{{\color{orange}\sum_{i} |o_i|}} \sum_{i=1}^{G} \sum_{t=1}^{|o_i|}
+            \left\{ \min \left[
+                \frac{ \pi_{\theta}(o_t | q, o_{\lt t}) }{ \pi_{\theta_{\text{old}}}(o_t | q, o_{\lt t})  } \hat{A}_{i,t}
+                ,
+                \text{clip}\left(
+                    \frac{ \pi_{\theta}(o_t | q, o_{\lt t}) }{ \pi_{\theta_{\text{old}}}(o_t | q, o_{\lt t})  },
+                    {\color{teal} 1 - \varepsilon_{\text{low}}},
+                    {\color{teal} 1 + \varepsilon_{\text{high}}}
+                 \right)
+                \hat{A}_{i,t}
+             \right] \right\}
+            \tag{2}
+            $$
+
+            <p>
+                the <span style="color: #e8a030;">normalization factor</span> divides by total tokens across the group rather than by $G$, removing a length bias that would otherwise discount longer completions. The <span style="color: teal;">clipping bounds</span> are asymmetric ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$), allowing the policy more room to increase probability on rewarded completions than to decrease it on penalized ones.
             </p>
 
             <p>
-                Note that in either implementation, when rewards are constant, their advantages become zero, and we filter out the sample. This <em>filtering</em> is one major source of waste....
+                In either implementation, when rewards are constant, we discard the entire prompt. In addition, we ensure that every batch has the same number of prompts per step.
             </p>
 
-            <!-- TODO: EMBED: table with hyperparameters, Vitor will provide later. -->
+            <p>
+                We keep a small penalty for divergence with respect to a frozen reference policy $\text{KL}(\pi_\theta \| \pi_{\text{ref}})$. This is implemented using the "<a href="http://joschu.net/blog/kl-approx.html">Schulman</a>" approximation to the forward divergence.
+            </p>
+
+            <!-- TODO: EMBED: table with hyperparameters -->
 
             <section id="staleness">
                 <h3>2.1 Staleness</h3>
@@ -222,15 +249,12 @@
 
             </section>
 
-            <section id="curriculum">
-                <h3>2.2 Curriculum Learning</h3>
+            <section id="gsm8k">
+                <h3>GSM8K</h3>
             </section>
 
-            <section id="llm-judge">
-                <h3>2.3 LLM-as-a-judge reward shaping</h3>
-
-                <h4>Results</h4>
-                <p>TODO: Curriculum vs random ordering comparison.</p>
+            <section id="instruction-following">
+                <h3>Instruction-following</h3>
             </section>
         </section>
 
@@ -317,8 +341,10 @@
             <section id="notes">
                 <h3>Notes</h3>
                 <ol>
-                    <li>Entropy</li>
                     <li>MFU</li>
+                    <li>Kernels: LIGER kernel probably faster than TP=2</li>
+                    <li>KL divergence: we use the Schulman "k3" estimator: given $r = \log(\pi_{\text{ref}} / \pi_\theta)$, the quantity $\exp(r) - r - 1$ is an unbiased estimator of $\text{KL}(\pi_\theta \| \pi_{\text{ref}})$, the "forward" KL (policy w.r.t. reference). This penalizes the policy for placing probability mass where the reference does not, which is the standard choice in RLHF/GRPO &mdash; it discourages the policy from straying too far from the reference in a mode-seeking direction.</li>
+                    <li>Precision: we use float16 (with dynamic loss scaling) for training rather than bfloat16. On A100 GPUs, we observed that bfloat16 training ran approximately 2x slower for the 1.7B model due to reduced throughput in the GRPO loss computation. One GRPO run (lr=1e-5) was initially launched with bfloat16 and had to be restarted with float16 after observing the slowdown. We did not observe numerical instability from float16 at this model scale.</li>
                 </ol>
             </section>
         </section>

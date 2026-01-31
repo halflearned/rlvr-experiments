@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_topk
-  port_start: 29500
+  name: qwen3_17b_gsm8k_opsd_jsd_instruct_teacher
+  port_start: 29600
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -15,16 +15,18 @@ training:
   max_staleness: 0
   abort_in_flight: false
   teacher_top_k: 20
+  opsd_loss_type: jsd
+  jsd_alpha: 0.9
 
   # OPSD flat-completion batching
-  batch_size: 512         # completions per optimizer step (GSM8k is faster)
+  batch_size: 512         # completions per optimizer step
   minibatch_size: 16      # completions per forward-backward
   sync_every_n_steps: 1
 
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  # No reference sync needed for pure OPSD (teacher = rollout model)
+  # No reference sync needed
   prompts_per_reference_sync: 9999999
 
 verifier:
@@ -82,7 +84,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.000005
         eps: 0.0001
 
       lr_scheduler:
@@ -137,8 +139,25 @@ roles:
       enable_prefix_caching: true
       enable_chunked_prefill: true
 
+  - name: teacher
+    kind: vllm
+    config:
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
+      max_concurrent_per_replica: 10
+      max_num_seqs: 64
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      max_model_len: 769
+      gpu_memory_utilization: 0.90
+      dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+
 sync:
   chunk_mb: 100
   wiring:
     - src: trainer
       dst: rollout
+    # teacher is NOT synced — frozen instruct model

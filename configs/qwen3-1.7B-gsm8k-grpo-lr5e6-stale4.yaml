@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_topk
-  port_start: 29500
+  name: qwen3_17b_gsm8k_grpo_stale4
+  port_start: 29700
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -12,31 +12,44 @@ tokenizer:
 training:
   max_steps: 300
   checkpoint_interval: 20
-  max_staleness: 0
+  max_staleness: 4
   abort_in_flight: false
-  teacher_top_k: 20
-
-  # OPSD flat-completion batching
-  batch_size: 512         # completions per optimizer step (GSM8k is faster)
-  minibatch_size: 16      # completions per forward-backward
-  sync_every_n_steps: 1
 
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  # No reference sync needed for pure OPSD (teacher = rollout model)
+  prompts_per_rollout_sync: 256
   prompts_per_reference_sync: 9999999
+  prompts_per_optim_step: 64
+  prompts_per_forward_backward: 2
+  completions_per_micro_batch:
+    768: 64
+
+  alpha_grpo: 1.0
+  alpha_sft: 1.0
+
+  sft:
+    seq_len_buckets: [768, 1280, 1536, 2048, 2560]
+    completion_len_buckets: [512, 1024, 1536, 2048]
+    micro_batch_size: 2
 
 verifier:
   num_workers: 4
 
 loss:
-  name: opsd
+  name: grpo
+  beta: 0.001
+  eps: 0.2
 
 data:
   dataset: gsm8k
 
 data_iter:
+  system_prompt: ""
+  assistant_prefix: ""
+  skip_chat_template: true
+
+sft_data_iter:
   system_prompt: ""
   assistant_prefix: ""
   skip_chat_template: true
@@ -54,6 +67,7 @@ sampling:
     - "Q:"
     - "\n\n\n"
     - "\n\n"
+
 
 buffer:
   max_reads: 1
@@ -82,7 +96,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.000005
         eps: 0.0001
 
       lr_scheduler:
@@ -121,6 +135,22 @@ roles:
         components:
           - "model"
 
+  - name: reference
+    kind: vllm
+    config:
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      max_model_len: 769
+      gpu_memory_utilization: 0.90
+      dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: false
+      enable_chunked_prefill: true
+
   - name: rollout
     kind: vllm
     config:
@@ -129,7 +159,7 @@ roles:
       max_num_seqs: 64
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 769
+      max_model_len: 2560
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"
@@ -140,5 +170,7 @@ roles:
 sync:
   chunk_mb: 100
   wiring:
+    - src: trainer
+      dst: reference
     - src: trainer
       dst: rollout
