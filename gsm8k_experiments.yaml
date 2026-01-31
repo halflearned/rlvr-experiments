@@ -1,0 +1,134 @@
+# GSM8K experiment plots config
+# Run: python generate_staleness_plots.py gsm8k_experiments.yaml
+# All runs trained on GSM8K with Qwen3-1.7B-Base
+
+output: gsm8k_plots.js
+html_prefix: gsm8k
+
+runs:
+  # ── DAPO ──
+  - id: dapo-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr1e5_20260129-222310
+    label: "DAPO lr=1e-5"
+    color: "#3b82f6"
+    family: dapo
+  - id: dapo-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr5e6_20260129-213056
+    label: "DAPO lr=5e-6"
+    color: "#60a5fa"
+    family: dapo
+
+  # ── GRPO ──
+  - id: grpo-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr1e5_20260130-012436
+    label: "GRPO lr=1e-5"
+    color: "#22c55e"
+    family: grpo
+  - id: grpo-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr5e6_20260129-213606
+    label: "GRPO lr=5e-6"
+    color: "#4ade80"
+    family: grpo
+
+  # ── DAPO + SFT ──
+  - id: dapo-sft-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-sft-lr1e5_20260130-005912
+    label: "DAPO+SFT lr=1e-5"
+    color: "#f97316"
+    family: dapo-sft
+  - id: dapo-sft-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-sft-lr5e6_20260130-005852
+    label: "DAPO+SFT lr=5e-6"
+    color: "#fb923c"
+    family: dapo-sft
+
+  # ── GRPO + SFT ──
+  - id: grpo-sft-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-sft-lr1e5_20260130-022119
+    label: "GRPO+SFT lr=1e-5"
+    color: "#a855f7"
+    family: grpo-sft
+  - id: grpo-sft-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-sft-lr5e6_20260130-002249
+    label: "GRPO+SFT lr=5e-6"
+    color: "#c084fc"
+    family: grpo-sft
+
+  # ── SFT only (best LR) ──
+  - id: sft-only-lr5e6
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-sft-only-lr5e6_20260131-170927
+    label: "SFT-only lr=5e-6"
+    color: "#78716c"
+    family: sft-only
+  - id: sft-only-lr1e5
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-sft-only-lr1e5_20260131-170435
+    label: "SFT-only lr=1e-5"
+    color: "#a8a29e"
+    family: sft-only
+
+  # ── Staleness ablation (DAPO, lr=5e-6) ──
+  # stale0 = dapo-lr5e6 above
+  - id: dapo-stale1
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr5e6-stale1_20260131-005831
+    label: "DAPO stale=1"
+    color: "#38bdf8"
+    family: staleness
+  - id: dapo-stale2
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr5e6-stale2_20260131-052241
+    label: "DAPO stale=2"
+    color: "#7dd3fc"
+    family: staleness
+  - id: dapo-stale4
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-dapo-lr5e6-stale4_20260131-070356
+    label: "DAPO stale=4"
+    color: "#bae6fd"
+    family: staleness
+
+  # ── Staleness ablation (GRPO, lr=5e-6) ──
+  # stale0 = grpo-lr5e6 above
+  - id: grpo-stale1
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr5e6-stale1_20260131-010105
+    label: "GRPO stale=1"
+    color: "#34d399"
+    family: staleness
+  - id: grpo-stale2
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr5e6-stale2_20260131-051827
+    label: "GRPO stale=2"
+    color: "#6ee7b7"
+    family: staleness
+  - id: grpo-stale4
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-grpo-lr5e6-stale4_20260131-070653
+    label: "GRPO stale=4"
+    color: "#a7f3d0"
+    family: staleness
+
+base_model:
+  label: "Qwen3-1.7B-Base"
+  evals_dir: /efs/rlvr-experiments/results/qwen3-1.7B-base/evals
+
+presets:
+  - id: best
+    label: "Best of each"
+    # Best GSM8k pass@1 at step 200 per family
+    runs: [dapo-lr1e5, grpo-lr1e5, dapo-sft-lr1e5, grpo-sft-lr1e5, sft-only-lr5e6]
+    text: "Best GSM8k run from each algorithm family at step 200. DAPO 1e-5 leads at 83.9% but trades off MATH accuracy; +SFT variants preserve MATH better."
+
+  - id: dapo
+    label: "DAPO"
+    runs: [dapo-lr1e5, dapo-lr5e6]
+    text: "DAPO at two learning rates. lr=1e-5 achieves higher GSM8k (83.9%) but lower MATH (43.3%); lr=5e-6 is more conservative (79.5% GSM8k, 56.2% MATH)."
+
+  - id: grpo
+    label: "GRPO"
+    runs: [grpo-lr1e5, grpo-lr5e6]
+    text: "GRPO at two learning rates. Similar pattern to DAPO: lr=1e-5 wins on GSM8k (83.2%) but loses MATH (49.6%); lr=5e-6 preserves both (78.9% / 56.4%)."
+
+  - id: sft-effect
+    label: "+SFT"
+    runs: [dapo-lr1e5, dapo-sft-lr1e5, grpo-lr1e5, grpo-sft-lr1e5, sft-only-lr5e6]
+    text: "Effect of adding SFT as auxiliary loss (alpha=0.001) at lr=1e-5, plus SFT-only baseline. SFT alone barely moves GSM8k from base model (62.6% vs 62.8%)."
+
+  - id: staleness
+    label: "Staleness"
+    runs: [dapo-lr5e6, dapo-stale1, dapo-stale2, dapo-stale4, grpo-lr5e6, grpo-stale1, grpo-stale2, grpo-stale4]
+    text: "Staleness ablation at lr=5e-6. max_staleness=0 (on-policy) vs 1, 2, 4 steps of allowed staleness for both DAPO and GRPO."
