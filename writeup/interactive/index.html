@@ -10,6 +10,10 @@
     <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
     <!-- D3.js for plots -->
     <script src="https://d3js.org/d3.v7.min.js"></script>
+    <!-- Highlight.js for code syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
     <!-- KaTeX for math rendering -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -64,6 +68,45 @@
                 <img src="figures/producer.jpg" alt="Producer loop diagram">
             </figure>
 
+            <details class="code-details">
+                <summary>Producer code (<code>train_grpo_minimal.py</code>)</summary>
+<pre><code class="language-python">async def produce_epoch():
+    async def worker():
+        while True:
+            item = await data_iter.get_next_async()
+            if item is None:
+                return
+            prompt_id = item["problem"]["prompt_id"]
+            try:
+                # Generate completions from current policy
+                response = await rollout.generate_single(item["template"], **sampling_params)
+                completions = [out.text for out in response.outputs]
+                rollout_sample = RolloutSample.from_vllm(response, pad_token_id)
+
+                # Score with verifier
+                rewards = await verify(item["problem"], completions)
+
+                # Skip if all rewards identical (no signal)
+                if torch.tensor(rewards).std() &lt; 1e-6:
+                    data_iter.mark_done(prompt_id)
+                    return
+
+                # Get reference model logprobs (for KL penalty)
+                ref_logprobs = await compute_ref_logprobs(rollout_sample)
+
+                # Push to buffer for consumer
+                # Tag with trainer_version so consumer can check staleness later
+                sample = TrainSample(rollout_sample, rewards, ref_logprobs,
+                                     item_id=prompt_id, trainer_version=rollout.trainer_version)
+                await buffer.put(sample, rollout.trainer_version, item_id=prompt_id)
+            except Exception:
+                data_iter.mark_failed(prompt_id)
+
+    async with asyncio.TaskGroup() as tg:
+        for _ in range(64):
+            tg.create_task(worker())</code></pre>
+            </details>
+
             <h3>Consumer loop</h3>
             <p>
                 The consumer is a standard training loop: pull samples, batch them, forward/backward, optimizer step. Only two things are different. First, samples are checked for <em>staleness</em>: if the trainer has moved too far ahead of the weights used for generation, the sample is (lazily) evicted and the prompt is re-queued for generation within this epoch. Note this is a second source of inefficiency. Second, after each optimizer step the trainer version increments, and consumed prompts are marked done so they won't be sampled again this epoch.
@@ -72,6 +115,79 @@
             <figure>
                 <img src="figures/consumer.png" alt="Consumer loop diagram">
             </figure>
+
+            <details class="code-details">
+                <summary>Consumer code (<code>train_grpo_minimal.py</code>)</summary>
+<pre><code class="language-python">for epoch in range(training.get("num_epochs", 1)):
+    data_iter.new_epoch(seed=42 + epoch)
+    producer = asyncio.create_task(produce_epoch())
+
+    pending = []
+    accum_count = 0
+
+    while True:
+        entry = await buffer.pop()
+        if entry is None:
+            break
+
+        pending.append(entry.item)
+        if len(pending) &lt; training["prompts_per_forward_backward"]:
+            continue
+
+        # ── Evict stale samples ────────────────────────────────────
+        pending = evict_stale(pending)
+        if len(pending) &lt; training["prompts_per_forward_backward"]:
+            continue  # not enough left after eviction, keep collecting
+
+        # ── Make batch ─────────────────────────────────────────────
+        batch, stats = make_batch(pending, pad_token_id)
+        group_sizes = [group_size] * len(pending)
+        item_ids = [s.item_id for s in pending]
+        pending = []
+
+        # ── Compute advantages ────
+        advantages = compute_grpo_advantages(batch.rewards, group_sizes=group_sizes)
+
+        # ── Forward + backward (with micro-batching) ───────────────
+        loss, _ = await trainer.forward_backward(
+            loss_fn,
+            batch.input_ids,
+            loss_args=(batch.completion_ids, batch.ref_logprobs,
+                       batch.logprobs, advantages),
+            loss_kwargs={"padding_mask": batch.mask,
+                         "prompt_lens": batch.prompt_lens,
+                         "temperature": temperature},
+            scale_loss=1.0 / accumulation_steps,
+            micro_batch_size=get_micro_batch_size(stats.padded_seq_len),
+        )
+
+        # Mark items as consumed
+        for item_id in item_ids:
+            data_iter.mark_done(item_id)
+
+        accum_count += 1
+        if accum_count &lt; accumulation_steps:
+            continue
+
+        # ── Optimizer step ─────────────────────────────────────────
+        grad_norm = await trainer.optim_step()
+        accum_count = 0
+
+        # ── Weight sync ──────────────────────────────────────────
+        if trainer.version % sync_ref_every == 0:
+            await sync_titan_to_vllm(trainer, reference,
+                                     trainer_version=trainer.version)
+        if trainer.version % sync_model_every == 0:
+            await sync_titan_to_vllm(trainer, rollout,
+                                     trainer_version=trainer.version)
+
+        if training.get("max_steps") and trainer.version >= training["max_steps"]:
+            break
+
+    producer.cancel()
+    await asyncio.gather(producer, return_exceptions=True)
+    buffer.reset()</code></pre>
+            </details>
 
             <h3>Weight sync</h3>
             <p>
@@ -516,5 +632,6 @@
 
     <script src="viewer.js"></script>
     <script src="staleness_plots.js?v=10"></script>
+    <script>hljs.highlightAll();</script>
 </body>
 </html>
