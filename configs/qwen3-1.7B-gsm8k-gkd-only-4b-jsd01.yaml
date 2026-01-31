@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_jsd_instruct_teacher
-  port_start: 29600
+  name: qwen3_17b_gsm8k_gkd_only_4b_jsd01
+  port_start: 29700
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -16,18 +16,18 @@ training:
   abort_in_flight: false
   teacher_top_k: 20
   opsd_loss_type: jsd
-  jsd_alpha: 0.9
+  jsd_alpha: 0.1
   teacher_use_chat_template: true
+  discard_perfect_completions: false
 
-  # OPSD flat-completion batching
-  batch_size: 512         # completions per optimizer step
-  minibatch_size: 16      # completions per forward-backward
+  # Smaller batches for faster iteration
+  batch_size: 512
+  minibatch_size: 16
   sync_every_n_steps: 1
 
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  # No reference sync needed
   prompts_per_reference_sync: 9999999
 
 verifier:
@@ -120,7 +120,7 @@ roles:
         selective_ac_option: "op"
 
       compile:
-        enable: true
+        enable: false
         components:
           - "model"
 
@@ -143,9 +143,9 @@ roles:
   - name: teacher
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
-      max_concurrent_per_replica: 10
-      max_num_seqs: 64
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-4B"
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 1
       max_model_len: 800
@@ -161,4 +161,4 @@ sync:
   wiring:
     - src: trainer
       dst: rollout
-    # teacher is NOT synced — frozen instruct model
+    # teacher is NOT synced — frozen 4B model

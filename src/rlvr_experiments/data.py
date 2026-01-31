@@ -59,7 +59,7 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
     local_cache = f"/tmp/gsm8k_{split}_cache"
 
     use_local_cache = False
-    if os.path.exists(local_cache):
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
         print(f"[load_gsm8k] Loading from local cache: {local_cache}")
         use_local_cache = True
     else:
@@ -71,10 +71,18 @@ def load_gsm8k(split: str = "train") -> ray.data.Dataset:
                 ["aws", "s3", "sync", s3_cache, local_cache, "--quiet"],
                 check=True, capture_output=True
             )
-            print(f"[load_gsm8k] Loaded from S3 cache")
-            use_local_cache = True
+            # Verify the cache is valid
+            if os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+                print(f"[load_gsm8k] Loaded from S3 cache")
+                use_local_cache = True
+            else:
+                print(f"[load_gsm8k] S3 cache invalid (no dataset_info.json), falling back to HuggingFace Hub")
+                import shutil
+                shutil.rmtree(local_cache, ignore_errors=True)
         except Exception as e:
             print(f"[load_gsm8k] S3 cache not available ({e}), loading from HuggingFace Hub")
+            import shutil
+            shutil.rmtree(local_cache, ignore_errors=True)
 
     if use_local_cache:
         from datasets import Dataset

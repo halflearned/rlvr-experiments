@@ -163,7 +163,7 @@ async def main():
             item_ids = [s.item_id for s in pending]
             pending = []
 
-            # ── Compute advantages (per-group reward normalization) ────
+            # ── Compute advantages ────
             advantages = compute_grpo_advantages(batch.rewards, group_sizes=group_sizes)
 
             # ── Forward + backward (with micro-batching) ───────────────

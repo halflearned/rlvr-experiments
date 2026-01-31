@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_jsd_instruct_teacher
+  name: qwen3_17b_gsm8k_opsd_jsd_teacher_4B
   port_start: 29600
 
 model:
@@ -20,14 +20,13 @@ training:
   teacher_use_chat_template: true
 
   # OPSD flat-completion batching
-  batch_size: 512         # completions per optimizer step
-  minibatch_size: 16      # completions per forward-backward
+  batch_size: 512
+  minibatch_size: 16
   sync_every_n_steps: 1
 
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  # No reference sync needed
   prompts_per_reference_sync: 9999999
 
 verifier:
@@ -143,7 +142,7 @@ roles:
   - name: teacher
     kind: vllm
     config:
-      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-4B"
       max_concurrent_per_replica: 10
       max_num_seqs: 64
       tensor_parallel_size: 1
@@ -161,4 +160,3 @@ sync:
   wiring:
     - src: trainer
       dst: rollout
-    # teacher is NOT synced — frozen instruct model

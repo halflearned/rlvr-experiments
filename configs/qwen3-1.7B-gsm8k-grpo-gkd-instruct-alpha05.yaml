@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_jsd_instruct_teacher
-  port_start: 29600
+  name: qwen3_17b_gsm8k_grpo_gkd_instruct_alpha05
+  port_start: 29700
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -14,27 +14,30 @@ training:
   checkpoint_interval: 20
   max_staleness: 0
   abort_in_flight: false
-  teacher_top_k: 20
-  opsd_loss_type: jsd
-  jsd_alpha: 0.9
-  teacher_use_chat_template: true
-
-  # OPSD flat-completion batching
-  batch_size: 512         # completions per optimizer step
-  minibatch_size: 16      # completions per forward-backward
-  sync_every_n_steps: 1
 
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  # No reference sync needed
+  prompts_per_rollout_sync: 16
   prompts_per_reference_sync: 9999999
+  prompts_per_optim_step: 16
+  prompts_per_forward_backward: 4
+  completions_per_micro_batch:
+    768: 8
+
+  alpha_grpo: 1.0
+  alpha_gkd: 0.5
+  jsd_alpha: 0.9
+  teacher_top_k: 20
+  teacher_use_chat_template: true
 
 verifier:
   num_workers: 4
 
 loss:
-  name: opsd
+  name: grpo
+  beta: 0.001
+  eps: 0.2
 
 data:
   dataset: gsm8k
@@ -102,7 +105,7 @@ roles:
         data_parallel_replicate_degree: 1
         data_parallel_shard_degree: 1
         fsdp_reshard_after_forward: "default"
-        tensor_parallel_degree: 2
+        tensor_parallel_degree: 1
         context_parallel_degree: 1
         disable_loss_parallel: false
 
@@ -124,6 +127,22 @@ roles:
         components:
           - "model"
 
+  - name: reference
+    kind: vllm
+    config:
+      model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      max_model_len: 769
+      gpu_memory_utilization: 0.90
+      dtype: "bfloat16"
+      logprobs_mode: "raw_logprobs"
+      max_num_batched_tokens: 65536
+      enable_prefix_caching: false
+      enable_chunked_prefill: true
+
   - name: rollout
     kind: vllm
     config:
@@ -144,8 +163,8 @@ roles:
     kind: vllm
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B"
-      max_concurrent_per_replica: 10
-      max_num_seqs: 64
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 1
       max_model_len: 800
@@ -159,6 +178,8 @@ roles:
 sync:
   chunk_mb: 100
   wiring:
+    - src: trainer
+      dst: reference
     - src: trainer
       dst: rollout
     # teacher is NOT synced — frozen instruct model

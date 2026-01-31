@@ -54,7 +54,7 @@ def load_plan(path: str) -> Plan:
 
     roles_in = y.pop("roles")             # required
     sync_in = dict(y.pop("sync", {}))
-    wiring = sync_in["wiring"]            # required
+    wiring = sync_in.get("wiring", [])
     chunk_mb = int(sync_in.get("chunk_mb", 100))
 
     def titan_world_size(cfg: Dict[str, Any]) -> int:

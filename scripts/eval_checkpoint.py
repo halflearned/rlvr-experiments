@@ -68,6 +68,12 @@ def find_free_gpu():
 
 def setup_gpu():
     """Parse --gpu argument early and set CUDA_VISIBLE_DEVICES before any CUDA imports."""
+    # If CUDA_VISIBLE_DEVICES is already set externally, respect it
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        gpu_str = os.environ["CUDA_VISIBLE_DEVICES"]
+        print(f"[eval] Using CUDA_VISIBLE_DEVICES={gpu_str} (set externally)")
+        return int(gpu_str.split(",")[0])
+
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--gpu", type=int, default=None)
     args, _ = parser.parse_known_args()
@@ -124,6 +130,11 @@ BENCHMARK_CONFIGS = {
         "max_tokens": 2048,
         "max_model_len": 4096,
         "stop_sequences": None,
+    },
+    "mmlu": {
+        "max_tokens": 32,
+        "max_model_len": 2048,
+        "stop_sequences": ["\n", "Question:", "Q:"],
     },
 }
 
@@ -221,11 +232,35 @@ def load_ifbench():
     return rows
 
 
+def load_mmlu():
+    """Load CAIS MMLU test set (zero-shot multiple choice)."""
+    from datasets import load_dataset
+
+    ds = load_dataset("cais/mmlu", "all", split="test")
+
+    LETTERS = ["A", "B", "C", "D"]
+    rows = []
+    for i, item in enumerate(ds):
+        choices_str = "\n".join(f"({LETTERS[j]}) {c}" for j, c in enumerate(item["choices"]))
+        prompt = f"Question: {item['question'].strip()}\nChoices:\n{choices_str}\nAnswer: ("
+        gold_letter = LETTERS[item["answer"]]
+        rows.append({
+            "id": f"mmlu_{i}",
+            "prompt": prompt,
+            "gold_answer": gold_letter,
+            "subject": item.get("subject", "unknown"),
+        })
+
+    print(f"[load_mmlu] Loaded {len(rows)} examples")
+    return rows
+
+
 LOADERS = {
     "gsm8k": load_gsm8k_test,
     "math": load_math_test,
     "ifeval": load_ifeval,
     "ifbench": load_ifbench,
+    "mmlu": load_mmlu,
 }
 
 
@@ -360,11 +395,36 @@ def verify_ifbench(completions: list[str], rows: list[dict]) -> list[dict]:
     return results
 
 
+def verify_mmlu(completions: list[str], rows: list[dict]) -> list[dict]:
+    """Verify MMLU completions by extracting A/B/C/D answer."""
+    import re
+
+    results = []
+    for completion, row in zip(completions, rows):
+        gold = row["gold_answer"]
+        text = completion.strip()
+        # Try to extract first A-D letter
+        extracted = None
+        match = re.search(r'\(?([A-D])\)?', text)
+        if match:
+            extracted = match.group(1)
+        correct = extracted == gold if extracted else False
+        results.append({
+            "correct": correct,
+            "extracted": extracted,
+            "gold_answer": gold,
+            "subject": row.get("subject", "unknown"),
+        })
+
+    return results
+
+
 VERIFIERS = {
     "gsm8k": verify_gsm8k,
     "math": verify_math,
     "ifeval": verify_ifeval,
     "ifbench": verify_ifbench,
+    "mmlu": verify_mmlu,
 }
 
 
@@ -450,11 +510,40 @@ def compute_summary_math(results: list[dict], rows: list[dict]) -> dict:
     }
 
 
+def compute_summary_mmlu(results: list[dict], rows: list[dict]) -> dict:
+    """Compute summary metrics for MMLU, including per-subject breakdown."""
+    n_correct = sum(1 for r in results if r["correct"])
+    n_total = len(results)
+    accuracy = n_correct / n_total if n_total > 0 else 0.0
+
+    subject_stats = {}
+    for r in results:
+        subject = r.get("subject", "unknown")
+        if subject not in subject_stats:
+            subject_stats[subject] = {"correct": 0, "total": 0}
+        subject_stats[subject]["total"] += 1
+        if r["correct"]:
+            subject_stats[subject]["correct"] += 1
+
+    subject_accuracy = {
+        subject: stats["correct"] / stats["total"] if stats["total"] > 0 else 0.0
+        for subject, stats in sorted(subject_stats.items())
+    }
+
+    return {
+        "n_examples": n_total,
+        "n_correct": n_correct,
+        "accuracy": accuracy,
+        "subject_accuracy": subject_accuracy,
+    }
+
+
 SUMMARY_FUNCTIONS = {
     "gsm8k": compute_summary_gsm8k,
     "math": compute_summary_math,
     "ifeval": compute_summary_ifeval,
     "ifbench": compute_summary_ifeval,  # Same metrics as IFEval
+    "mmlu": compute_summary_mmlu,
 }
 
 
@@ -467,7 +556,7 @@ def main():
     parser.add_argument("checkpoint_path", type=str, help="Path to checkpoint")
     parser.add_argument("output_dir", type=str, help="Output directory for results")
     parser.add_argument("--benchmark", type=str, required=True,
-                        choices=list(BENCHMARK_CONFIGS.keys()),
+                        choices=["gsm8k", "math", "ifeval", "ifbench", "mmlu"],
                         help="Benchmark to evaluate on")
     parser.add_argument("--gpu", type=int, default=0, help="GPU to use")
     parser.add_argument("--max-tokens", type=int, default=None,
@@ -583,6 +672,15 @@ def main():
             print(f"  {level}: {acc:.4f}")
         print(f"\nPer-subject accuracy:")
         for subject, acc in metrics["subject_accuracy"].items():
+            print(f"  {subject}: {acc:.4f}")
+    elif args.benchmark == "mmlu":
+        print(f"Overall Accuracy: {metrics['accuracy']:.4f} ({metrics['n_correct']}/{metrics['n_examples']})")
+        print(f"\nPer-subject accuracy (showing top/bottom 5):")
+        sorted_subjects = sorted(metrics["subject_accuracy"].items(), key=lambda x: x[1], reverse=True)
+        for subject, acc in sorted_subjects[:5]:
+            print(f"  {subject}: {acc:.4f}")
+        print(f"  ...")
+        for subject, acc in sorted_subjects[-5:]:
             print(f"  {subject}: {acc:.4f}")
     else:
         print(f"Prompt-level strict accuracy: {metrics['prompt_pass']}/{metrics['n_prompts']} = {metrics['prompt_level_strict_acc']:.2%}")

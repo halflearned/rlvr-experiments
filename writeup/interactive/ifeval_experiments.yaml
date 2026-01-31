@@ -1,0 +1,77 @@
+# IF experiment plots config
+# Run: python generate_staleness_plots.py ifeval_experiments.yaml
+# All runs trained on IFEval-multi-constraints with Qwen3-1.7B-Base
+
+output: ifeval_plots.js
+html_prefix: ifeval
+
+runs:
+  # ── Local runs ──
+  - id: grpo
+    run_dir: /efs/rlvr-experiments/results/annotations-adhoc-20260125-083856
+    label: "GRPO"
+    color: "#22c55e"
+    family: grpo
+
+  - id: dapo
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-if-dapo_20260130-101403
+    label: "DAPO"
+    color: "#3b82f6"
+    family: dapo
+
+  - id: dapo-sft
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-if-dapo_sft_20260130-073008
+    label: "DAPO+SFT"
+    color: "#f97316"
+    family: dapo-sft
+
+  - id: grpo-sft
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-if-grpo_sft_20260130-223405
+    label: "GRPO+SFT"
+    color: "#a855f7"
+    family: grpo-sft
+
+  # ── SageMaker LR / beta sweep (all DAPO) ──
+  - id: sm-lr1e5-beta1e4
+    run_dir: /efs/rlvr-experiments/results/annotations-adhoc-20260130-181815
+    label: "DAPO lr=1e-5 β=1e-4"
+    color: "#14b8a6"
+    family: sm-sweep
+
+  - id: sm-lr1e5-beta1e3
+    run_dir: /efs/rlvr-experiments/results/vlm-experiment-20260130-183425
+    label: "DAPO lr=1e-5 β=1e-3"
+    color: "#5eead4"
+    family: sm-sweep
+
+  - id: sm-lr75e5-beta1e4
+    run_dir: /efs/rlvr-experiments/results/vlm-experiment-20260130-183444
+    label: "DAPO lr=7.5e-5 β=1e-4"
+    color: "#e879f9"
+    family: sm-sweep
+
+  - id: sm-lr75e5-beta1e3
+    run_dir: /efs/rlvr-experiments/results/vlm-experiment-20260130-183458
+    label: "DAPO lr=7.5e-5 β=1e-3"
+    color: "#f0abfc"
+    family: sm-sweep
+
+base_model:
+  label: "Qwen3-1.7B-Base"
+  evals_dir: /efs/rlvr-experiments/results/qwen3-1.7B-base/evals
+
+presets:
+  - id: best
+    label: "Best of each"
+    runs: [grpo-sft, dapo, dapo-sft, grpo, sm-lr1e5-beta1e4]
+    text: "Best runs from each algorithm family. GRPO+SFT achieves 27.0% IFBench prompt-strict; DAPO lr=1e-5/β=1e-4 closely matches at 27.7%."
+
+  - id: local
+    label: "Algorithm comparison"
+    runs: [grpo, dapo, dapo-sft, grpo-sft]
+    text: "DAPO vs GRPO, with and without SFT auxiliary loss. GRPO+SFT dominates at 27.0% IFBench / 50.6% IFEval prompt-strict."
+
+  - id: sm-sweep
+    label: "DAPO LR / β sweep"
+    runs: [sm-lr1e5-beta1e4, sm-lr1e5-beta1e3, sm-lr75e5-beta1e4, sm-lr75e5-beta1e3]
+    text: "DAPO hyperparameter sweep: LR ∈ {1e-5, 7.5e-5}, KL penalty β ∈ {1e-4, 1e-3}. Lower LR with lower β works best (50.3% IFEval prompt-strict)."

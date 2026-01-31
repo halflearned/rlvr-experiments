@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_jsd_instruct_teacher
+  name: qwen3_17b_gsm8k_opsd_jsd_instruct_lr1e5
   port_start: 29600
 
 model:
@@ -20,14 +20,13 @@ training:
   teacher_use_chat_template: true
 
   # OPSD flat-completion batching
-  batch_size: 512         # completions per optimizer step
-  minibatch_size: 16      # completions per forward-backward
+  batch_size: 512
+  minibatch_size: 16
   sync_every_n_steps: 1
 
   seq_len_buckets: [768]
   completion_len_buckets: [512]
 
-  # No reference sync needed
   prompts_per_reference_sync: 9999999
 
 verifier:
@@ -85,7 +84,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000005
+        lr: 0.00001
         eps: 0.0001
 
       lr_scheduler:
@@ -161,4 +160,3 @@ sync:
   wiring:
     - src: trainer
       dst: rollout
-    # teacher is NOT synced — frozen instruct model

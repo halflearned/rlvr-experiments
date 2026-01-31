@@ -161,6 +161,21 @@ def build_teacher_template(
 
 
 # ---------------------------------------------------------------------------
+# ChatML teacher template (for instruct teacher models)
+# ---------------------------------------------------------------------------
+
+def build_chatml_teacher_template(question: str) -> str:
+    """Wrap a question in ChatML format for instruct teacher models.
+
+    Qwen3 instruct models expect <|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
+    """
+    return (
+        f"<|im_start|>user\n{question}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+
+
+# ---------------------------------------------------------------------------
 # GSM8k teacher template
 # ---------------------------------------------------------------------------
 
@@ -563,6 +578,8 @@ async def main() -> None:
     teacher_max_model_len = roles["teacher"].config.get("max_model_len") if "teacher" in roles else rollout_max_model_len
     rollout_timeout_s = training.get("rollout_timeout_s", 9999)
     max_concurrent_tasks = training.get("max_concurrent_tasks", 64)
+    teacher_use_chat_template = training.get("teacher_use_chat_template", True)
+    discard_perfect = training.get("discard_perfect_completions", True)
 
     opsd_loss_type = training.get("opsd_loss_type", "kl")
     if opsd_loss_type == "jsd":
@@ -574,7 +591,8 @@ async def main() -> None:
         opsd_loss_fn = OPSDLoss()
     print(f"[config] batch_size={batch_size}, minibatch_size={minibatch_size}, accumulation_steps={accumulation_steps}")
     print(f"[config] sync_every={sync_model_every}, max_staleness={max_staleness}")
-    print(f"[config] OPSD mode: pure self-distillation, discard perfect completions, loss_type={opsd_loss_type}")
+    print(f"[config] OPSD mode: loss_type={opsd_loss_type}, discard_perfect={discard_perfect}")
+    print(f"[config] teacher_use_chat_template={teacher_use_chat_template}")
 
     def mark_filtered(prompt_id: str, trainer_version: int, dataset: str, reason: str) -> None:
         buffer.stats.record_filtered(trainer_version)
@@ -662,12 +680,15 @@ async def main() -> None:
 
             # --- OPSD-specific: compute teacher logprobs for incorrect completions ---
 
-            # Filter: keep only completions with reward < 1.0
-            kept_indices = [i for i, r in enumerate(rewards) if r < 1.0 - 1e-6]
-            if not kept_indices:
-                reward_stats.record(rewards, used=False)
-                mark_filtered(prompt_id, trainer_version, dataset, reason="all_perfect_opsd")
-                return
+            # Filter: optionally keep only completions with reward < 1.0
+            if discard_perfect:
+                kept_indices = [i for i, r in enumerate(rewards) if r < 1.0 - 1e-6]
+                if not kept_indices:
+                    reward_stats.record(rewards, used=False)
+                    mark_filtered(prompt_id, trainer_version, dataset, reason="all_perfect_opsd")
+                    return
+            else:
+                kept_indices = list(range(len(rewards)))
 
             # Build individual OPSDCompletion items for each kept completion
             opsd_completions = []
@@ -688,9 +709,13 @@ async def main() -> None:
 
                 # Build teacher template based on dataset type and teacher mode
                 if has_separate_teacher:
-                    # Separate teacher (e.g. instruct model): use same prompt as student.
-                    # The instruct model's distribution is already better — no hint needed.
-                    teacher_tmpl = item["template"]
+                    # Separate teacher (e.g. instruct model)
+                    if teacher_use_chat_template:
+                        # Wrap in ChatML for instruct models
+                        teacher_tmpl = build_chatml_teacher_template(item["prompt"])
+                    else:
+                        # Use same plain prompt as student
+                        teacher_tmpl = item["template"]
                 elif dataset_name == "gsm8k":
                     answer = item["problem"].get("answer", "")
                     teacher_tmpl = build_gsm8k_teacher_template(item["template"], answer)

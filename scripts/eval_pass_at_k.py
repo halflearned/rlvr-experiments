@@ -146,23 +146,174 @@ class PromptResult:
 # =============================================================================
 
 def load_dataset_items(dataset_name: str, split: str, **loader_kwargs) -> list[dict]:
-    """Load dataset using the appropriate loader from data.py."""
-    from rlvr_experiments import data
+    """Load dataset without Ray to avoid CPU contention in multi-shard runs.
 
-    loader_name = DATASET_REGISTRY[dataset_name]["loader"]
-    loader_fn = getattr(data, loader_name)
-
-    # Call loader with split and any extra kwargs
-    if dataset_name == "humaneval":
-        # HumanEval only has "test" split
-        ray_ds = loader_fn(**loader_kwargs)
-    else:
-        ray_ds = loader_fn(split=split, **loader_kwargs)
-
-    # Materialize to list
-    items = list(ray_ds.iter_rows())
+    Instead of calling data.py loaders (which return ray.data.Dataset), we replicate
+    the HuggingFace loading + preprocessing logic directly here.
+    """
+    items = _load_dataset_items_no_ray(dataset_name, split, **loader_kwargs)
     print(f"Loaded {len(items)} prompts from {dataset_name} ({split})")
     return items
+
+
+def _load_hf_gsm8k(split: str) -> list[dict]:
+    """Load GSM8k without Ray."""
+    from datasets import load_dataset as hf_load_dataset
+    import os
+
+    local_cache = f"/tmp/gsm8k_{split}_cache"
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+    else:
+        hf_dataset = hf_load_dataset("openai/gsm8k", "main", split=split)
+
+    from rlvr_experiments.data import GSM8K_SYSTEM_PROMPT, GSM8K_ASSISTANT_PREFIX, GSM8K_MAX_COMPLETION_LEN
+    results = []
+    for i, row in enumerate(hf_dataset):
+        question = f"Q: {row['question'].strip()}\nA:"
+        answer = row["answer"].split("####")[-1].strip()
+        results.append({
+            "prompt": question,
+            "problem": {
+                "answer": answer,
+                "prompt_id": f"gsm8k_{i}",
+                "verifier_type": "gsm8k",
+                "dataset_name": "gsm8k",
+                "system_prompt": GSM8K_SYSTEM_PROMPT,
+                "assistant_prefix": GSM8K_ASSISTANT_PREFIX,
+                "max_completion_len": GSM8K_MAX_COMPLETION_LEN,
+            },
+        })
+    return results
+
+
+def _load_hf_math(split: str, **kwargs) -> list[dict]:
+    """Load MATH without Ray, matching data.py's load_math exactly."""
+    from datasets import load_dataset as hf_load_dataset
+    import os
+    from rlvr_experiments.data import MATH_SYSTEM_PROMPT, MATH_ASSISTANT_PREFIX, MATH_MAX_COMPLETION_LEN
+
+    level_filter = kwargs.get("level", None)
+
+    # Try local cache first
+    local_cache = f"/tmp/math_{split}_cache"
+    if os.path.exists(local_cache) and os.path.exists(os.path.join(local_cache, "dataset_info.json")):
+        from datasets import Dataset
+        hf_dataset = Dataset.load_from_disk(local_cache)
+        all_rows = list(hf_dataset)
+    else:
+        subjects = [
+            "algebra", "counting_and_probability", "geometry",
+            "intermediate_algebra", "number_theory", "prealgebra", "precalculus",
+        ]
+        all_rows = []
+        for subject in subjects:
+            hf_dataset = hf_load_dataset("EleutherAI/hendrycks_math", subject, split=split)
+            all_rows.extend(list(hf_dataset))
+
+    # Filter by level if specified
+    if level_filter is not None:
+        level_strs = {f"Level {l}" for l in level_filter}
+        all_rows = [row for row in all_rows if row["level"] in level_strs]
+
+    # Build subject-based prompt IDs (matching data.py)
+    subject_counters = {}
+    results = []
+    for row in all_rows:
+        subject = row["type"].lower()
+        if subject not in subject_counters:
+            subject_counters[subject] = 0
+        subject_idx = subject_counters[subject]
+        subject_counters[subject] += 1
+
+        prompt = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
+        prompt_id = f"math_{subject}_{subject_idx}"
+        results.append({
+            "prompt": prompt,
+            "problem": {
+                "answer": row["solution"],
+                "prompt_id": prompt_id,
+                "verifier_type": "math",
+                "dataset_name": "math",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": MATH_MAX_COMPLETION_LEN,
+            },
+        })
+    return results
+
+
+def _load_hf_aime(split: str) -> list[dict]:
+    """Load AIME without Ray, matching data.py's load_aime exactly."""
+    from datasets import load_dataset as hf_load_dataset
+    from rlvr_experiments.data import MATH_SYSTEM_PROMPT, MATH_ASSISTANT_PREFIX, MATH_MAX_COMPLETION_LEN
+
+    # AIME always uses train split
+    hf_dataset = hf_load_dataset("AI-MO/aimo-validation-aime", split="train")
+    results = []
+    for i, row in enumerate(hf_dataset):
+        prompt = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
+        results.append({
+            "prompt": prompt,
+            "problem": {
+                "answer": row["answer"],
+                "prompt_id": f"aime_{i}",
+                "verifier_type": "math",
+                "dataset_name": "aime",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": MATH_MAX_COMPLETION_LEN,
+            },
+        })
+    return results
+
+
+def _load_hf_beyondaime(split: str) -> list[dict]:
+    """Load BeyondAIME without Ray, matching data.py's load_beyondaime exactly."""
+    from datasets import load_dataset as hf_load_dataset
+    from rlvr_experiments.data import MATH_SYSTEM_PROMPT, MATH_ASSISTANT_PREFIX, MATH_MAX_COMPLETION_LEN
+
+    # BeyondAIME always uses test split
+    hf_dataset = hf_load_dataset("ByteDance-Seed/BeyondAIME", split="test")
+    results = []
+    for i, row in enumerate(hf_dataset):
+        prompt = f"Problem:\n{row['problem'].strip()}\n\nSolution:"
+        results.append({
+            "prompt": prompt,
+            "problem": {
+                "answer": str(row["answer"]),
+                "prompt_id": f"beyondaime_{i}",
+                "verifier_type": "math",
+                "dataset_name": "beyondaime",
+                "system_prompt": MATH_SYSTEM_PROMPT,
+                "assistant_prefix": MATH_ASSISTANT_PREFIX,
+                "max_completion_len": MATH_MAX_COMPLETION_LEN,
+            },
+        })
+    return results
+
+
+def _load_dataset_items_no_ray(dataset_name: str, split: str, **loader_kwargs) -> list[dict]:
+    """Dispatch to Ray-free loaders for known datasets, fall back to Ray for others."""
+    if dataset_name == "gsm8k":
+        return _load_hf_gsm8k(split)
+    elif dataset_name == "math":
+        return _load_hf_math(split, **loader_kwargs)
+    elif dataset_name == "aime":
+        return _load_hf_aime(split)
+    elif dataset_name == "beyondaime":
+        return _load_hf_beyondaime(split)
+    else:
+        # Fall back to Ray-based loader for other datasets
+        from rlvr_experiments import data
+        loader_name = DATASET_REGISTRY[dataset_name]["loader"]
+        loader_fn = getattr(data, loader_name)
+        if dataset_name == "humaneval":
+            ray_ds = loader_fn(**loader_kwargs)
+        else:
+            ray_ds = loader_fn(split=split, **loader_kwargs)
+        return list(ray_ds.iter_rows())
 
 
 def get_verifier(dataset_name: str, **verifier_kwargs):

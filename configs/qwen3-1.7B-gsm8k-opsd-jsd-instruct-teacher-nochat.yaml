@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_gsm8k_opsd_jsd_instruct_teacher
-  port_start: 29600
+  name: qwen3_17b_gsm8k_opsd_jsd_instruct_nochat
+  port_start: 29700
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -17,7 +17,7 @@ training:
   teacher_top_k: 20
   opsd_loss_type: jsd
   jsd_alpha: 0.9
-  teacher_use_chat_template: true
+  teacher_use_chat_template: false
 
   # OPSD flat-completion batching
   batch_size: 512         # completions per optimizer step
@@ -148,7 +148,7 @@ roles:
       max_num_seqs: 64
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 800
+      max_model_len: 769
       gpu_memory_utilization: 0.90
       dtype: "bfloat16"
       logprobs_mode: "raw_logprobs"
