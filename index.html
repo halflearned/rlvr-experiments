@@ -30,22 +30,27 @@
     <article>
         <header>
             <h1>RLVR Experiments</h1>
-            <p class="subtitle">Subtitle goes here</p>
         </header>
 
         <section class="intro">
-            <p>The first part of this post described our package RLVR Experiments. The second presents a few experiments run with it.</p>
+            <p>The first post has two parts. Part 1 gives an overview of our RLVR experiments package. Part 2 presents a few experiments we ran with it.</p>
         </section>
 
         <section id="system-architecture">
             <h3>System overview</h3>
-            <p>This report describes the architecture of our GRPO training system—a distributed, asynchronous pipeline for reinforcement learning from verifiable rewards. The system runs generation, verification, and training concurrently, using Ray for orchestration and NCCL for fast weight synchronization. We'll walk through the producer-consumer design, explain the coordination mechanisms, and share what we learned building it.</p>
+
+            <p>The main type of problem this package focuses on is Monte Carlo-based RLVR algorithm such as Group Relative Policy Optimzation (GRPO) and its variants. For this sort of problem, the canonical setup is a system that runs in a <b>producer-consumer pipeline</b>: 
+            <ul>
+                <li>PRODUCER LOOP: samples prompts, generates completions using a copy of the model, verifies these completions, and puts all results in a buffer</li>
+                <li>CONSUMER LOOP: pops from the buffer, waits until there are enough samples, batches samples together and trains its own model copy</li>
+                <li>WEIGHT SYNC: once the model weights are updated, trainer's new weights may be synced to the producer's weights to keep generations on policy</li>
+            </ul>
+            This sort of design, decoupling generation from training, has been used in <a href=https://arxiv.org/pdf/2501.12599>Kimi 1.5</a> and taken up by modern RLVR packages like <a href="https://pytorch.org/blog/introducing-torchforge/">torchforge</a>. 
+
 
             <h3>Components</h3>
 
-            <p>In typical usage, the system runs in a producer-consumer pipeline. The producer generates completions and verifies them; the consumer batches them and trains. They run concurrently, communicating through a versioned buffer. This sort of design, decoupling generation from training, has been used in [Kimi 1.5]() and [torchforge](https://pytorch.org/blog/introducing-torchforge/).
-
-            <p>This package provides 5 components:</p>
+            <p>A typical GRPO-like flow will have the following components</p>
 
             <ul>
                 <li><strong>Trainer</strong> (TorchTitan): holds the policy model, runs forward/backward, steps the optimizer</li>
@@ -55,7 +60,7 @@
                 <li><strong>Data iterator</strong>: serves prompts, tracks which are pending/in-flight/done</li>
             </ul>
 
-            <p>Each component is one or more Ray actors. The trainer and vLLM engines can be sharded across GPUs with different parallelism strategies. Weight sync happens periodically over NCCL, transferring updated policy weights from the trainer to the rollout and reference models.</p>
+            <p>The trainer's and vLLM engines's weights can be sharded across GPUs for different parallelism strategies. Weight sync happens periodically over NCCL, transferring updated policy weights from the trainer to the rollout and reference models.</p>
             <h3>Producer loop</h3>
             <p>
                 The producer runs dozens of async workers concurrently, all competing for prompts from the data iterator. Each worker independently shepherds one prompt through the full pipeline: generation, verification, reference logprobs, then buffer.
@@ -362,21 +367,21 @@
                         <div class="plot-container" id="gsm8k-plot-eval-math"></div>
                     </div>
 
+                    <h4>Pass@k (step 200)</h4>
+                    <div class="plot-row">
+                        <div class="plot-container" id="gsm8k-plot-passk-gsm8k"></div>
+                        <div class="plot-container" id="gsm8k-plot-passk-math"></div>
+                        <div class="plot-container" id="gsm8k-plot-passk-aime"></div>
+                        <div class="plot-container" id="gsm8k-plot-passk-beyondaime"></div>
+                    </div>
+
                     <div id="gsm8k-preset-explanation" class="preset-explanation"></div>
                 </div>
 
                 <!-- GSM8K comparison table (auto-generated) -->
                 <div id="gsm8k-comparison-table" class="results-table-container"></div>
 
-                <h4>Distillation experiments (GKD / OPSD)</h4>
-                <p>
-                    We also explored on-policy self-distillation (OPSD) and generalized knowledge distillation (GKD),
-                    using either the model's own earlier checkpoint or a stronger Qwen3 instruct model as teacher.
-                    Pure OPSD (distillation-only, no reward signal) consistently degraded GSM8k performance,
-                    confirming that reward signal is essential. GRPO+GKD (combining reward with JSD distillation
-                    in a single forward pass) maintained reward while adding the distillation term, and is a
-                    promising direction for future work.
-                </p>
+
             </section>
 
             <section id="instruction-following">
@@ -422,6 +427,22 @@
             </section>
         </section>
 
+        <section id="code">
+            <h3>2.3 Code</h3>
+        </section>
+
+        <section id="going-further">
+            <h3>Distillation experiments (GKD / OPSD)</h3>
+                <p>
+                    We also explored on-policy self-distillation (OPSD) and generalized knowledge distillation (GKD),
+                    using either the model's own earlier checkpoint or a stronger Qwen3 instruct model as teacher.
+                    Pure OPSD (distillation-only, no reward signal) consistently degraded GSM8k performance,
+                    confirming that reward signal is essential. GRPO+GKD (combining reward with JSD distillation
+                    in a single forward pass) maintained reward while adding the distillation term, and is a
+                    promising direction for future work.
+                </p>
+        </section>        
+
         <section id="appendix" class="appendix">
             <h2>Appendix</h2>
 
@@ -430,78 +451,8 @@
                 <p><strong>GSM8K:</strong> The MathVerifier achieves only 8-9% on base model completions compared to lm_eval's 66% strict-match accuracy. This discrepancy is intentional and correct. The base model often continues generating after providing the answer, producing additional unrelated Q&A pairs. MathVerifier extracts the <em>last</em> number in the response, which in these cases comes from the spurious continuation rather than the actual answer. lm_eval's strict-match, by contrast, extracts the <em>first</em> occurrence of "The answer is X." and ignores everything after. While lm_eval's approach is appropriate for evaluation (measuring whether the model <em>can</em> solve the problem), MathVerifier's stricter approach is the right training signal for RL: it rewards completions that both solve the problem correctly <em>and</em> terminate appropriately, rather than giving credit to responses that ramble indefinitely after stating the answer.</p>
                 <p><strong>MATH:</strong></p>
             </section>
-
  
-            <section id="passk-rates">
-                <h3>Base model pass@k rates</h3>
-                <p>
-                    We measure prompt difficulty using <strong>pass@k</strong>: the probability of getting at least one
-                    correct answer in k samples from the base model. Low pass@k indicates a "hard" prompt (model rarely
-                    solves it), while high pass@k indicates an "easy" prompt.
-                </p>
-                <p>
-                    GSM8K is nearly saturated (99.81% solvable with 1024 samples), while IFEval is challenging for
-                    base models (only 27% solvable). We generate curriculum orderings by sorting prompts by pass@16
-                    in ascending order (hard-to-easy).
-                </p>
-
-                <!-- EMBED: passk-table -->
-                <div class="results-table-container">
-                    <table class="results-table">
-                        <thead>
-                            <tr>
-                                <th>Dataset</th>
-                                <th>Prompts</th>
-                                <th>pass@1</th>
-                                <th>pass@8</th>
-                                <th>pass@64</th>
-                                <th>pass@256</th>
-                                <th>pass@512</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td>GSM8K</td>
-                                <td>7,473</td>
-                                <td>75.0%</td>
-                                <td>95.6%</td>
-                                <td>99.2%</td>
-                                <td>99.7%</td>
-                                <td>99.8%</td>
-                            </tr>
-                            <tr>
-                                <td>MATH (L3-5)</td>
-                                <td>5,584</td>
-                                <td>29.7%</td>
-                                <td>57.4%</td>
-                                <td>76.5%</td>
-                                <td>82.3%</td>
-                                <td>84.0%</td>
-                            </tr>
-                            <tr>
-                                <td>MBPP</td>
-                                <td>374</td>
-                                <td>26.6%</td>
-                                <td>54.8%</td>
-                                <td>78.6%</td>
-                                <td>87.2%</td>
-                                <td>89.6%</td>
-                            </tr>
-                            <tr>
-                                <td>IFEval</td>
-                                <td>3,200</td>
-                                <td>7.6%</td>
-                                <td>16.5%</td>
-                                <td>23.4%</td>
-                                <td>26.0%</td>
-                                <td>27.0%</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                    <p class="table-caption"><strong>Table 2.</strong> Pass@k rates on training splits. Model: Qwen3-1.7B-Base.</p>
-                </div>
-            </section>
-
+        
             <section id="notes">
                 <h3>Notes</h3>
                 <ol>
@@ -675,6 +626,8 @@
                     </div>
                 </details>
             </section>
+
+
 
     </article>
 
