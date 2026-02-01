@@ -329,17 +329,25 @@ async def main() -> None:
                 log_sample("failed", prompt_id=prompt_id, version=trainer_version, error=str(e), traceback=tb)
                 data_iter.mark_failed(prompt_id)
 
+        _producer_epoch = [0]  # mutable counter for seamless epoch looping
+
         async def worker() -> None:
             while True:
-                item = await data_iter.get_next_async()
+                item = await data_iter.get_next_async(wait_for_in_flight=False)
                 if item is None:
                     return
                 await safe_process_one(item)
 
         try:
-            async with asyncio.TaskGroup() as tg:
-                for _ in range(max_concurrent_tasks):
-                    tg.create_task(worker())
+            while True:
+                async with asyncio.TaskGroup() as tg:
+                    for _ in range(max_concurrent_tasks):
+                        tg.create_task(worker())
+                # All workers returned None (epoch exhausted) — seamlessly start next epoch
+                _producer_epoch[0] += 1
+                new_seed = seed + _producer_epoch[0]
+                data_iter.new_epoch(seed=new_seed)
+                print(f"[producer] epoch {_producer_epoch[0]} started (seed={new_seed})", flush=True)
         finally:
             await buffer.mark_done()
 
@@ -379,17 +387,14 @@ async def main() -> None:
         while True:
             if producer_task.done() and producer_task.exception():
                 raise producer_task.exception()
-            if buffer.size() == 0 and data_iter.pending_count() == 0 and data_iter.in_flight_count() == len(pending_batch):
-                entry = None
-            else:
-                entry = await buffer.pop()
+            entry = await buffer.pop()
 
             if entry is None:
+                # Producer sent done sentinel — training is over
                 if pending_batch:
                     pending_batch = evict_stale(pending_batch)
-                    if not pending_batch:
-                        return
-                    yield emit(pending_batch)
+                    if pending_batch:
+                        yield emit(pending_batch)
                 return
 
             pending_batch.append(entry.item)
@@ -405,108 +410,103 @@ async def main() -> None:
     trained_meta_accum = []
 
     sft_epoch = 0
-    for epoch in range(training.get("num_epochs") or 999999):
+    data_iter.new_epoch(seed=seed)
+    if sft_iter is not None:
+        sft_iter.new_epoch(seed=seed)
+    producer = asyncio.create_task(produce_epoch())
+
+    async for batch, stats, item_ids, group_sizes, trained_meta in batches(producer):
+        accum_count += 1
+        trained_meta_accum.extend(trained_meta)
+        advantages = compute_advantages(batch.rewards, group_sizes=group_sizes)
+        with trace_span("forward_backward"):
+            if loss_name == "dapo":
+                _loss_args = (batch.completion_ids, batch.logprobs, advantages)
+                _loss_kwargs = {"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature, "ref_logprobs": batch.ref_logprobs}
+            else:
+                _loss_args = (batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages)
+                _loss_kwargs = {"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature}
+            loss_grpo, grpo_debug = await trainer.forward_backward(
+                loss_fn,
+                batch.input_ids,
+                loss_args=_loss_args,
+                loss_kwargs=_loss_kwargs,
+                scale_loss=training["alpha_grpo"] / accumulation_steps,
+                micro_batch_size=_get_micro_batch_size(training["completions_per_micro_batch"], stats.padded_seq_len),
+            )
+        sft_items = next_sft_batch(training["prompts_per_forward_backward"])
+        if sft_items:
+            print(f"[sft] making batch with {len(sft_items)} items", flush=True)
+            sft_input_ids, sft_completion_ids, sft_mask, sft_prompt_lens = make_sft_batch(sft_items)
+            print(f"[sft] batch shapes: input={sft_input_ids.shape}, comp={sft_completion_ids.shape}, mask={sft_mask.shape}", flush=True)
+            with trace_span("forward_backward_sft"):
+                loss_sft, _ = await trainer.forward_backward(
+                    _sft_loss,
+                    sft_input_ids,
+                    loss_args=(sft_completion_ids,),
+                    loss_kwargs={"padding_mask": sft_mask, "prompt_lens": sft_prompt_lens, "temperature": 1.0},
+                    scale_loss=training["alpha_sft"] / accumulation_steps,
+                    micro_batch_size=sft_micro_batch_size,
+                )
+            print(f"[sft] loss={float(loss_sft):.4f}", flush=True)
+            for item in sft_items:
+                sft_iter.mark_done(item["problem"]["prompt_id"])
+            if sft_iter.all_done():
+                sft_epoch += 1
+                sft_iter.new_epoch(seed=seed + sft_epoch)
+        else:
+            loss_sft = 0.0
+            print("[sft] no items available", flush=True)
+
+        accum_grpo += float(loss_grpo)
+        accum_sft += float(loss_sft)
+        accum_loss += training["alpha_grpo"] * loss_grpo + training["alpha_sft"] * loss_sft
+        accum_ntokens += batch.input_ids.numel()
+        del advantages
+        for item_id in item_ids:
+            data_iter.mark_done(item_id)
+        if accum_count < accumulation_steps:
+            continue
+
+        with trace_span("optim_step"):
+            grad_norm = await trainer.optim_step()
+        avg_loss = accum_loss / accumulation_steps
+        avg_grpo = accum_grpo / accumulation_steps
+        avg_sft = accum_sft / accumulation_steps
+
+        avg_reward = batch.rewards.mean().item()
+        rw_metrics = reward_stats.get_metrics()
+        stats.trace(tracer, step=trainer.version)
+        tracer.counter("metrics", {"loss": avg_loss, "loss_grpo": avg_grpo, "loss_sft": avg_sft, "grad_norm": grad_norm, "avg_reward": avg_reward})
+        tracer.counter("grpo.debug", grpo_debug)
+        titan_metrics = await trainer.log_metrics(avg_loss, grad_norm, accum_ntokens)
+        if titan_metrics:
+            tracer.counter("titan.metrics", titan_metrics)
+        tracer.counter("reward_stats", rw_metrics)
+
+        for meta in trained_meta_accum:
+            buffer.stats.record_used(meta["trainer_version"])
+            log_sample("trained", prompt_id=meta["item_id"], trained_at_step=trainer.version, trainer_version=meta["trainer_version"], dataset=meta["dataset"], n_tokens=meta["n_tokens"])
+
+        print(f"step={trainer.version} loss={avg_loss:.4f} grpo={avg_grpo:.4f} sft={avg_sft:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f} reward_all={rw_metrics.get('reward_overall', avg_reward):.2f}")
+
+        if trainer.version % sync_ref_every == 0:
+            await sync_titan_to_vllm(trainer, reference, abort_in_flight=training["abort_in_flight"], trainer_version=trainer.version, wire_dtype="float16")
+        if trainer.version % sync_model_every == 0:
+            await sync_titan_to_vllm(trainer, rollout, abort_in_flight=training["abort_in_flight"], trainer_version=trainer.version, wire_dtype="float16")
+        if training["checkpoint_interval"] and trainer.version % training["checkpoint_interval"] == 0:
+            ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_step{trainer.version}")
+            await trainer.export_to_hf(ckpt_path)
+        if trainer.version % 10 == 0:
+            upload_traces_to_s3(runtime.trace_dir, run_id)
+
+        accum_count = 0; accum_loss = 0.0; accum_ntokens = 0; accum_grpo = 0.0; accum_sft = 0.0
+        trained_meta_accum = []
         if training["max_steps"] and trainer.version >= training["max_steps"]:
             break
-        data_iter.new_epoch(seed=seed + epoch)
-        sft_epoch = 0
-        if sft_iter is not None:
-            sft_iter.new_epoch(seed=seed + epoch)
-        producer = asyncio.create_task(produce_epoch())
 
-        async for batch, stats, item_ids, group_sizes, trained_meta in batches(producer):
-            accum_count += 1
-            trained_meta_accum.extend(trained_meta)
-            advantages = compute_advantages(batch.rewards, group_sizes=group_sizes)
-            with trace_span("forward_backward"):
-                if loss_name == "dapo":
-                    _loss_args = (batch.completion_ids, batch.logprobs, advantages)
-                    _loss_kwargs = {"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature, "ref_logprobs": batch.ref_logprobs}
-                else:
-                    _loss_args = (batch.completion_ids, batch.ref_logprobs, batch.logprobs, advantages)
-                    _loss_kwargs = {"padding_mask": batch.mask, "prompt_lens": batch.prompt_lens, "temperature": policy_temperature}
-                loss_grpo, grpo_debug = await trainer.forward_backward(
-                    loss_fn,
-                    batch.input_ids,
-                    loss_args=_loss_args,
-                    loss_kwargs=_loss_kwargs,
-                    scale_loss=training["alpha_grpo"] / accumulation_steps,
-                    micro_batch_size=_get_micro_batch_size(training["completions_per_micro_batch"], stats.padded_seq_len),
-                )
-            sft_items = next_sft_batch(training["prompts_per_forward_backward"])
-            if sft_items:
-                print(f"[sft] making batch with {len(sft_items)} items", flush=True)
-                sft_input_ids, sft_completion_ids, sft_mask, sft_prompt_lens = make_sft_batch(sft_items)
-                print(f"[sft] batch shapes: input={sft_input_ids.shape}, comp={sft_completion_ids.shape}, mask={sft_mask.shape}", flush=True)
-                with trace_span("forward_backward_sft"):
-                    loss_sft, _ = await trainer.forward_backward(
-                        _sft_loss,
-                        sft_input_ids,
-                        loss_args=(sft_completion_ids,),
-                        loss_kwargs={"padding_mask": sft_mask, "prompt_lens": sft_prompt_lens, "temperature": 1.0},
-                        scale_loss=training["alpha_sft"] / accumulation_steps,
-                        micro_batch_size=sft_micro_batch_size,
-                    )
-                print(f"[sft] loss={float(loss_sft):.4f}", flush=True)
-                for item in sft_items:
-                    sft_iter.mark_done(item["problem"]["prompt_id"])
-                if sft_iter.all_done():
-                    sft_epoch += 1
-                    sft_iter.new_epoch(seed=seed + epoch + sft_epoch)
-            else:
-                loss_sft = 0.0
-                print("[sft] no items available", flush=True)
-
-            accum_grpo += float(loss_grpo)
-            accum_sft += float(loss_sft)
-            accum_loss += training["alpha_grpo"] * loss_grpo + training["alpha_sft"] * loss_sft
-            accum_ntokens += batch.input_ids.numel()
-            del advantages
-            for item_id in item_ids:
-                data_iter.mark_done(item_id)
-            if accum_count < accumulation_steps:
-                continue
-
-            with trace_span("optim_step"):
-                grad_norm = await trainer.optim_step()
-            avg_loss = accum_loss / accumulation_steps
-            avg_grpo = accum_grpo / accumulation_steps
-            avg_sft = accum_sft / accumulation_steps
-
-            avg_reward = batch.rewards.mean().item()
-            rw_metrics = reward_stats.get_metrics()
-            stats.trace(tracer, step=trainer.version)
-            tracer.counter("metrics", {"loss": avg_loss, "loss_grpo": avg_grpo, "loss_sft": avg_sft, "grad_norm": grad_norm, "avg_reward": avg_reward})
-            tracer.counter("grpo.debug", grpo_debug)
-            titan_metrics = await trainer.log_metrics(avg_loss, grad_norm, accum_ntokens)
-            if titan_metrics:
-                tracer.counter("titan.metrics", titan_metrics)
-            tracer.counter("reward_stats", rw_metrics)
-
-            for meta in trained_meta_accum:
-                buffer.stats.record_used(meta["trainer_version"])
-                log_sample("trained", prompt_id=meta["item_id"], trained_at_step=trainer.version, trainer_version=meta["trainer_version"], dataset=meta["dataset"], n_tokens=meta["n_tokens"])
-
-            print(f"[epoch {epoch}] step={trainer.version} loss={avg_loss:.4f} grpo={avg_grpo:.4f} sft={avg_sft:.4f} grad_norm={grad_norm:.4f} reward={avg_reward:.2f} reward_all={rw_metrics.get('reward_overall', avg_reward):.2f}")
-
-            if trainer.version % sync_ref_every == 0:
-                await sync_titan_to_vllm(trainer, reference, abort_in_flight=training["abort_in_flight"], trainer_version=trainer.version, wire_dtype="float16")
-            if trainer.version % sync_model_every == 0:
-                await sync_titan_to_vllm(trainer, rollout, abort_in_flight=training["abort_in_flight"], trainer_version=trainer.version, wire_dtype="float16")
-            if training["checkpoint_interval"] and trainer.version % training["checkpoint_interval"] == 0:
-                ckpt_path = os.path.join(checkpoint_dir, f"{run_id}_step{trainer.version}")
-                await trainer.export_to_hf(ckpt_path)
-            if trainer.version % 10 == 0:
-                upload_traces_to_s3(runtime.trace_dir, run_id)
-
-            accum_count = 0; accum_loss = 0.0; accum_ntokens = 0; accum_grpo = 0.0; accum_sft = 0.0
-            trained_meta_accum = []
-            if training["max_steps"] and trainer.version >= training["max_steps"]:
-                break
-
-        producer.cancel()
-        await asyncio.gather(producer, return_exceptions=True)
-        buffer.reset()
+    producer.cancel()
+    await asyncio.gather(producer, return_exceptions=True)
 
     print("\n=== Training complete ===")
     await rollout.stop(abort=True)

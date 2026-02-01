@@ -82,6 +82,31 @@ def start_ray_worker(head_addr: str):
     run(cmd)
 
 
+def _s3_sync(s3_uri: str, local_dir: str):
+    """Download all objects under an S3 prefix to a local directory (like aws s3 sync)."""
+    import boto3
+    from urllib.parse import urlparse
+
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip("/")
+    if not prefix.endswith("/"):
+        prefix += "/"
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            rel = key[len(prefix):]
+            if not rel:
+                continue
+            dest = os.path.join(local_dir, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            s3.download_file(bucket, key, dest)
+    print(f"[launcher] S3 sync complete: {s3_uri} -> {local_dir}", flush=True)
+
+
 def download_model_and_rewrite_config(config_path: str) -> str:
     """Download model from S3 and rewrite config with local paths.
 
@@ -118,7 +143,7 @@ def download_model_and_rewrite_config(config_path: str) -> str:
 
         print(f"[launcher] Downloading model from S3: {s3_path}", flush=True)
         os.makedirs(local_path, exist_ok=True)
-        run(["aws", "s3", "sync", s3_path, local_path, "--quiet"])
+        _s3_sync(s3_path, local_path)
         print(f"[launcher] Model downloaded to: {local_path}", flush=True)
 
         # Rewrite all occurrences of the original path to local path in the config

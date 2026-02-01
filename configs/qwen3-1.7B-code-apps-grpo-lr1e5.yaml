@@ -1,5 +1,5 @@
 run:
-  name: qwen3_17b_code_grpo_lr1e6
+  name: qwen3_17b_code_apps_grpo_lr1e5
   port_start: 29500
 
 model:
@@ -32,9 +32,11 @@ training:
   alpha_sft: 0.0
 
   rollout_timeout_s: 120
+  max_concurrent_tasks: 256
 
 verifier:
-  num_workers: 8  # code verification is slower (subprocess execution)
+  num_workers: 16
+  max_concurrent: 8  # 16×8 = 128 concurrent Docker containers
 
 loss:
   name: grpo
@@ -44,13 +46,13 @@ loss:
 data:
   dataset: mixed
   datasets:
+    - name: apps
+      split: train
+      difficulty: ["introductory"]
+      weight: 0.8
     - name: mbpp
       split: train
-      weight: 1.
-    # - name: apps
-    #   split: train
-    #   difficulty: ["introductory"]
-    #   weight: 0.5
+      weight: 0.2
   seed: 42
 
 data_iter:
@@ -68,7 +70,7 @@ sampling:
   top_p: 0.95
   top_k: 20
   max_tokens: 1024
-  n: 8
+  n: 4
   logprobs: 0
   stop:
     - "\n\n\n"
@@ -100,7 +102,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.00001
         eps: 0.00001
 
       lr_scheduler:
@@ -159,10 +161,10 @@ roles:
     kind: vllm
     config:
       model: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
-      max_concurrent_per_replica: 10
-      max_num_seqs: 64
+      max_concurrent_per_replica: 32
+      max_num_seqs: 256
       tensor_parallel_size: 1
-      data_parallel_size: 1
+      data_parallel_size: 5
       max_model_len: 4096
       gpu_memory_utilization: 0.90
       dtype: "float16"

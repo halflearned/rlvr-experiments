@@ -346,7 +346,11 @@ async def verify_completions_batch(
 
     # Use the verifier's verify_completions method if available
     if hasattr(verifier, "verify_completions"):
-        return await verifier.verify_completions(problem, completions)
+        result = await verifier.verify_completions(problem, completions)
+        # CodeVerifier returns (scores, durations_ms) tuple; extract just scores
+        if isinstance(result, tuple):
+            return result[0]
+        return result
 
     # Fall back to individual verification
     answer_key = config.get("answer_key")

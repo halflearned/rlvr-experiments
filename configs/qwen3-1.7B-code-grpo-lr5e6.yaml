@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_code_grpo_lr1e6
-  port_start: 29500
+  name: qwen3_17b_code_grpo_lr5e6
+  port_start: 29600
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -100,7 +100,7 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
+        lr: 0.000005
         eps: 0.00001
 
       lr_scheduler:

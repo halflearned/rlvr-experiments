@@ -1,6 +1,6 @@
 run:
-  name: qwen3_17b_code_grpo_lr1e6
-  port_start: 29500
+  name: qwen3_17b_gsm8k_dapo_sft_lr5e6_v2
+  port_start: 29600
 
 model:
   path: "/efs/rlvr-experiments/assets/hf/Qwen3-1.7B-Base"
@@ -15,48 +15,43 @@ training:
   max_staleness: 0
   abort_in_flight: false
 
-  # Code completions are longer than math — use bigger buckets
-  seq_len_buckets: [1536, 2048, 2560]
+  seq_len_buckets: [768, 1536]
   completion_len_buckets: [512, 1024]
 
-  prompts_per_rollout_sync: 128
+  prompts_per_rollout_sync: 64
   prompts_per_reference_sync: 9999999
-  prompts_per_optim_step: 128
+  prompts_per_optim_step: 64
   prompts_per_forward_backward: 2
   completions_per_micro_batch:
-    1536: 16
-    2048: 8
-    2560: 4
+    768: 64
+    1536: 32
 
   alpha_grpo: 1.0
-  alpha_sft: 0.0
+  alpha_sft: 0.001
 
-  rollout_timeout_s: 120
+  sft:
+    seq_len_buckets: [768, 1536]
+    completion_len_buckets: [512, 1024]
+    micro_batch_size: 2
 
 verifier:
-  num_workers: 8  # code verification is slower (subprocess execution)
+  num_workers: 4
 
 loss:
-  name: grpo
-  beta: 0.001
-  eps: 0.2
+  name: dapo
+  beta: 0.000001
 
 data:
-  dataset: mixed
-  datasets:
-    - name: mbpp
-      split: train
-      weight: 1.
-    # - name: apps
-    #   split: train
-    #   difficulty: ["introductory"]
-    #   weight: 0.5
-  seed: 42
+  dataset: gsm8k
 
 data_iter:
   system_prompt: ""
   assistant_prefix: ""
   skip_chat_template: true
+
+sft_data:
+  dataset: sft_jsonl
+  path: "/efs/rlvr-experiments/data/gsm8k_sft_hard.jsonl"
 
 sft_data_iter:
   system_prompt: ""
@@ -64,14 +59,19 @@ sft_data_iter:
   skip_chat_template: true
 
 sampling:
-  temperature: 1.0
+  temperature: 1.
   top_p: 0.95
   top_k: 20
   max_tokens: 1024
   n: 8
   logprobs: 0
   stop:
+    - "[Question]"
+    - "Question:"
+    - "Q:"
     - "\n\n\n"
+    - "\n\n"
+
 
 buffer:
   max_reads: 1
@@ -100,15 +100,15 @@ roles:
 
       optimizer:
         name: "AdamW"
-        lr: 0.000001
-        eps: 0.00001
+        lr: 0.000005
+        eps: 0.0001
 
       lr_scheduler:
         warmup_steps: 0
         decay_ratio: 0.0
 
       training:
-        seq_len: 2560
+        seq_len: 1536
         dtype: "float16"
         mixed_precision_param: "float16"
         mixed_precision_reduce: "float32"
@@ -147,7 +147,7 @@ roles:
       max_num_seqs: 256
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 2561
+      max_model_len: 1537
       gpu_memory_utilization: 0.90
       dtype: "float16"
       logprobs_mode: "raw_logprobs"
@@ -163,7 +163,7 @@ roles:
       max_num_seqs: 64
       tensor_parallel_size: 1
       data_parallel_size: 1
-      max_model_len: 4096
+      max_model_len: 2560
       gpu_memory_utilization: 0.90
       dtype: "float16"
       logprobs_mode: "raw_logprobs"

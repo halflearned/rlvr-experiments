@@ -1099,6 +1099,18 @@ def load_sft_jsonl(
             - list[str]: Multiple sources (e.g., ["gsm8k", "math"])
     """
     import json
+    import tempfile
+
+    # Support S3 paths: download to a temp file first
+    if path.startswith("s3://"):
+        import boto3
+        from urllib.parse import urlparse
+        parsed = urlparse(path)
+        bucket, key = parsed.netloc, parsed.path.lstrip("/")
+        tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        print(f"[load_sft_jsonl] Downloading {path} to {tmp.name}")
+        boto3.client("s3").download_file(bucket, key, tmp.name)
+        path = tmp.name
 
     if isinstance(subset, str):
         subset = [subset]
@@ -1579,18 +1591,26 @@ class DataIterator:
 
     # --- Async iteration interface ---
 
-    async def get_next_async(self, poll_interval: float = 0.01) -> dict | None:
+    async def get_next_async(self, poll_interval: float = 0.01, wait_for_in_flight: bool = True) -> dict | None:
         """Await the next pending item, or return None when the epoch is exhausted.
 
         This is a simple async wrapper around `get_next()` that waits when there
         are no pending items but some are still in-flight (e.g. waiting to be
         marked done, retried, or failed).
+
+        Args:
+            poll_interval: How often to check for newly pending items.
+            wait_for_in_flight: If True (default), wait for in-flight items to
+                resolve before returning None. If False, return None as soon as
+                there are no pending items, even if some are still in-flight.
+                Use False when the producer loops over epochs seamlessly and
+                shouldn't block on items the consumer hasn't trained yet.
         """
         while True:
             item = self.get_next()
             if item is not None:
                 return item
-            if self.all_done():
+            if not wait_for_in_flight or self.all_done():
                 return None
             await asyncio.sleep(poll_interval)
 

@@ -106,6 +106,8 @@ base_model:
   label: "Qwen3-1.7B-Base"
   evals_dir: /efs/rlvr-experiments/results/qwen3-1.7B-base/evals
 
+exclude_benchmarks: [ifeval, ifbench_test, if_multi_constraints]
+
 presets:
   - id: best
     label: "Best of each"

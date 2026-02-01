@@ -75,39 +75,49 @@ def extract_metrics(trace_path: str) -> tuple[list[dict], dict]:
         return best
 
     results = []
-    steps = sorted(step_to_padding.keys())
 
-    for step in steps:
-        padding = step_to_padding[step]
-        ts = padding["ts"]
+    if step_to_padding:
+        # Standard RL path: use batch.padding as step anchor
+        steps = sorted(step_to_padding.keys())
 
-        record = {"step": step}
+        for step in steps:
+            padding = step_to_padding[step]
+            ts = padding["ts"]
 
-        # Find matching events
-        reward_stat = find_nearest(reward_stats_events, ts)
-        if reward_stat:
-            record["reward_overall"] = reward_stat.get("reward_overall")
-            record["reward_used"] = reward_stat.get("reward_used")
-            record["frac_all_correct"] = reward_stat.get("frac_all_correct")
-            record["frac_all_wrong"] = reward_stat.get("frac_all_wrong")
+            record = {"step": step}
 
-        grpo_debug = find_nearest(grpo_debug_events, ts)
-        if grpo_debug:
-            record["kl_mean"] = grpo_debug.get("kl_mean")
-            record["entropy_mean"] = grpo_debug.get("entropy_mean")
+            # Find matching events
+            reward_stat = find_nearest(reward_stats_events, ts)
+            if reward_stat:
+                record["reward_overall"] = reward_stat.get("reward_overall")
+                record["reward_used"] = reward_stat.get("reward_used")
+                record["frac_all_correct"] = reward_stat.get("frac_all_correct")
+                record["frac_all_wrong"] = reward_stat.get("frac_all_wrong")
 
-        metrics = find_nearest(metrics_events, ts)
-        if metrics:
-            record["loss"] = metrics.get("loss")
-            record["loss_grpo"] = metrics.get("loss_grpo")
-            record["loss_sft"] = metrics.get("loss_sft")
+            grpo_debug = find_nearest(grpo_debug_events, ts)
+            if grpo_debug:
+                record["kl_mean"] = grpo_debug.get("kl_mean")
+                record["entropy_mean"] = grpo_debug.get("entropy_mean")
 
-        # Compute mean completion length from batch.padding
-        comp_lens = padding.get("completion_lens", [])
-        if comp_lens:
-            record["completion_len"] = sum(comp_lens) / len(comp_lens)
+            metrics = find_nearest(metrics_events, ts)
+            if metrics:
+                record["loss"] = metrics.get("loss")
+                record["loss_grpo"] = metrics.get("loss_grpo")
+                record["loss_sft"] = metrics.get("loss_sft")
 
-        results.append(record)
+            # Compute mean completion length from batch.padding
+            comp_lens = padding.get("completion_lens", [])
+            if comp_lens:
+                record["completion_len"] = sum(comp_lens) / len(comp_lens)
+
+            results.append(record)
+    elif metrics_events:
+        # SFT-only path: no batch.padding, use metrics events sequentially
+        for step_idx, m in enumerate(metrics_events, 1):
+            record = {"step": step_idx}
+            record["loss"] = m.get("loss")
+            record["loss_sft"] = m.get("loss")  # surface as SFT loss too
+            results.append(record)
 
     # Return raw events for summary computation
     raw_events = {
@@ -273,6 +283,9 @@ def generate_plot_data(config: dict) -> dict:
                     if not bench_dir.is_dir():
                         continue
                     bench_name = bench_dir.name
+                    # Normalize ifbench -> ifbench_test (same benchmark, different dir names)
+                    if bench_name == "ifbench":
+                        bench_name = "ifbench_test"
                     summary_jsonl = bench_dir / "summary.jsonl"
                     summary_json = bench_dir / "summary.json"
                     # Helper: extract accuracy from eval entry
@@ -280,6 +293,24 @@ def generate_plot_data(config: dict) -> dict:
                     # "prompt_level_strict_acc" (ifeval/ifbench)
                     def _get_acc(entry):
                         return entry.get("accuracy") or entry.get("prompt_level_strict_acc")
+
+                    def _store_benchmark(entry, step):
+                        """Store benchmark data, splitting ifeval/ifbench into prompt/inst rows."""
+                        acc = _get_acc(entry)
+                        inst_acc = entry.get("inst_level_acc")
+                        if acc is not None:
+                            if inst_acc is not None:
+                                # Split into prompt-level and inst-level rows
+                                summaries[run_id]["benchmarks"][f"{bench_name} (prompt)"] = {
+                                    "accuracy": acc, "step": step,
+                                }
+                                summaries[run_id]["benchmarks"][f"{bench_name} (inst)"] = {
+                                    "accuracy": inst_acc, "step": step,
+                                }
+                            else:
+                                summaries[run_id]["benchmarks"][bench_name] = {
+                                    "accuracy": acc, "step": step,
+                                }
 
                     if summary_jsonl.exists():
                         step_to_acc = {}
@@ -291,22 +322,34 @@ def generate_plot_data(config: dict) -> dict:
                                 if step is not None and acc is not None:
                                     step_to_acc[step] = acc
                                     if step == 200:
-                                        summaries[run_id]["benchmarks"][bench_name] = {
-                                            "accuracy": acc,
-                                            "step": 200,
-                                        }
+                                        _store_benchmark(entry, 200)
                         if step_to_acc:
                             entries = sorted(step_to_acc.items())
                             eval_curves[bench_name] = entries
                     elif summary_json.exists():
                         with open(summary_json) as f:
                             entry = json.load(f)
-                        acc = _get_acc(entry)
-                        if acc is not None:
-                            summaries[run_id]["benchmarks"][bench_name] = {
-                                "accuracy": acc,
-                                "step": entry.get("step"),
-                            }
+                        _store_benchmark(entry, entry.get("step"))
+                    else:
+                        # Fallback: check step*/summary.json subdirectories
+                        step_to_acc = {}
+                        for step_dir in sorted(bench_dir.glob("step*")):
+                            sj = step_dir / "summary.json"
+                            if sj.exists():
+                                with open(sj) as f:
+                                    entry = json.load(f)
+                                acc = _get_acc(entry)
+                                try:
+                                    step = int(step_dir.name.replace("step", ""))
+                                except ValueError:
+                                    continue
+                                if acc is not None:
+                                    step_to_acc[step] = acc
+                                    if step == 200:
+                                        _store_benchmark(entry, 200)
+                        if step_to_acc:
+                            entries = sorted(step_to_acc.items())
+                            eval_curves[bench_name] = entries
 
         run_entry = {
             "id": run_id,
@@ -330,6 +373,33 @@ def generate_plot_data(config: dict) -> dict:
             run_entry[f"eval_{bench_name}_steps"] = [s for s, _ in entries]
             run_entry[f"eval_{bench_name}_accuracy"] = [a for _, a in entries]
 
+        # Load pass@k curves from merged_summary.json files
+        if run_dir:
+            evals_dir = Path(run_dir) / "evals"
+            if evals_dir.exists():
+                for bench_dir in sorted(evals_dir.iterdir()):
+                    if not bench_dir.is_dir():
+                        continue
+                    bench_name = bench_dir.name
+                    # Only look at pass@k directories (e.g. gsm8k_pass128, aime_pass32)
+                    if "_pass" not in bench_name:
+                        continue
+                    merged = bench_dir / "step200" / "merged_summary.json"
+                    if not merged.exists():
+                        continue
+                    with open(merged) as f:
+                        pdata = json.load(f)
+                    pass_at_k = pdata.get("pass_at_k", {})
+                    if pass_at_k:
+                        # Store as passk_<bench_name>_k and passk_<bench_name>_rate
+                        ks = []
+                        rates = []
+                        for key in sorted(pass_at_k.keys(), key=lambda x: int(x.split("@")[1])):
+                            ks.append(int(key.split("@")[1]))
+                            rates.append(pass_at_k[key])
+                        run_entry[f"passk_{bench_name}_k"] = ks
+                        run_entry[f"passk_{bench_name}_rate"] = rates
+
         runs_data.append(run_entry)
 
     # Load base model evals if configured
@@ -348,6 +418,41 @@ def generate_plot_data(config: dict) -> dict:
                         entry = json.load(f)
                     if "accuracy" in entry:
                         base_benchmarks[bench_name] = entry["accuracy"]
+                    elif "prompt_level_strict_acc" in entry:
+                        base_benchmarks[f"{bench_name} (prompt)"] = entry["prompt_level_strict_acc"]
+                        if "inst_level_acc" in entry:
+                            base_benchmarks[f"{bench_name} (inst)"] = entry["inst_level_acc"]
+
+    # Load base model pass@k curves
+    base_passk = {}
+    if base_config:
+        evals_dir = Path(base_config["evals_dir"])
+        if evals_dir.exists():
+            for bench_dir in sorted(evals_dir.iterdir()):
+                if not bench_dir.is_dir():
+                    continue
+                passk_dir = bench_dir / "pass-at-k"
+                merged = passk_dir / "merged_summary.json"
+                if not merged.exists():
+                    merged = passk_dir / "summary.json"
+                if not merged.exists():
+                    continue
+                with open(merged) as f:
+                    pdata = json.load(f)
+                pass_at_k = pdata.get("pass_at_k", {})
+                if pass_at_k:
+                    bench_name = bench_dir.name
+                    # Map base model bench names to the trained model pass@k key names
+                    # e.g. "gsm8k" -> "gsm8k_pass128", "math" -> "math_pass128"
+                    # Try to match by finding the max k
+                    max_k = max(int(key.split("@")[1]) for key in pass_at_k)
+                    mapped_name = f"{bench_name}_pass{max_k}"
+                    ks = []
+                    rates = []
+                    for key in sorted(pass_at_k.keys(), key=lambda x: int(x.split("@")[1])):
+                        ks.append(int(key.split("@")[1]))
+                        rates.append(pass_at_k[key])
+                    base_passk[mapped_name] = {"k": ks, "rate": rates}
 
     result = {"runs": runs_data, "summaries": summaries}
     if base_benchmarks:
@@ -355,6 +460,10 @@ def generate_plot_data(config: dict) -> dict:
             "label": base_config.get("label", "Base"),
             "benchmarks": base_benchmarks,
         }
+        if base_passk:
+            result["base_model"]["passk"] = base_passk
+    if config.get("exclude_benchmarks"):
+        result["exclude_benchmarks"] = config["exclude_benchmarks"]
     return result
 
 
@@ -438,11 +547,12 @@ function {var_prefix}GenerateTable() {{
     const baseModel = {var_prefix}Data.base_model || null;
 
     const benchSet = new Set();
+    const exclude = new Set({var_prefix}Data.exclude_benchmarks || []);
     runs.forEach(run => {{
         const s = summaries[run.id];
-        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => benchSet.add(b));
+        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => {{ if (!exclude.has(b)) benchSet.add(b); }});
     }});
-    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => benchSet.add(b));
+    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => {{ if (!exclude.has(b)) benchSet.add(b); }});
     const benchmarks = Array.from(benchSet).sort();
     if (benchmarks.length === 0) return;
 
@@ -602,11 +712,23 @@ const {var_prefix}PlotConfigs = [
        yKey: 'eval_ifbench_test_accuracy', format: '.1%', linear: true }},
 ];
 
+const {var_prefix}PassKConfigs = [
+    {{ id: '{id_prefix}plot-passk-gsm8k', title: 'GSM8K Pass@k', kKey: 'passk_gsm8k_pass128_k', rateKey: 'passk_gsm8k_pass128_rate', format: '.1%' }},
+    {{ id: '{id_prefix}plot-passk-math', title: 'MATH Pass@k', kKey: 'passk_math_pass128_k', rateKey: 'passk_math_pass128_rate', format: '.1%' }},
+    {{ id: '{id_prefix}plot-passk-aime', title: 'AIME Pass@k', kKey: 'passk_aime_pass32_k', rateKey: 'passk_aime_pass32_rate', format: '.1%' }},
+    {{ id: '{id_prefix}plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' }},
+];
+
 function {var_prefix}Redraw() {{
     {var_prefix}PlotConfigs.forEach(config => {{
         const container = document.getElementById(config.id);
         if (!container) return;
         {var_prefix}DrawPlot(container, {var_prefix}Data.runs, config, {var_prefix}Visible);
+    }});
+    {var_prefix}PassKConfigs.forEach(config => {{
+        const container = document.getElementById(config.id);
+        if (!container) return;
+        {var_prefix}DrawPassKPlot(container, {var_prefix}Data.runs, config, {var_prefix}Visible);
     }});
 }}
 
@@ -769,6 +891,151 @@ function {var_prefix}DrawPlot(container, runs, config, highlightedSet) {{
                 if (d && d.y != null) {{
                     const ml = li.metric ? ` (${{li.metric}})` : '';
                     html += `<span style="color:${{li.color}}">●</span> ${{li.label}}${{ml}}: ${{fmt(d.y)}}<br>`;
+                    hoverDots.append('circle').attr('cx', xScale(d.x)).attr('cy', yScale(d.y))
+                        .attr('r', 4).attr('fill', li.color).attr('stroke', '#fff').attr('stroke-width', 1.5);
+                }}
+            }});
+            tt.html(html).style('left', (event.pageX + 15) + 'px').style('top', (event.pageY - 10) + 'px').style('opacity', 1);
+        }})
+        .on('mouseleave', function() {{
+            hoverLine.style('opacity', 0);
+            hoverDots.selectAll('circle').remove();
+            tt.style('opacity', 0);
+        }});
+}}
+
+// --- Pass@k plot drawing ---
+function {var_prefix}DrawPassKPlot(container, runs, config, highlightedSet) {{
+    container.innerHTML = '';
+
+    const margin = {{ top: 24, right: 12, bottom: 32, left: 48 }};
+    const width = 280 - margin.left - margin.right;
+    const height = 170 - margin.top - margin.bottom;
+
+    const svg = d3.select(container)
+        .append('svg')
+        .attr('viewBox', `0 0 ${{width + margin.left + margin.right}} ${{height + margin.top + margin.bottom}}`)
+        .attr('preserveAspectRatio', 'xMidYMid meet');
+
+    const g = svg.append('g')
+        .attr('transform', `translate(${{margin.left}},${{margin.top}})`);
+
+    // Collect all k values and rates (including base model)
+    let allK = [];
+    let allY = [];
+    // Extract benchmark key from config (e.g. "passk_gsm8k_pass128_k" -> "gsm8k_pass128")
+    const benchKey = config.kKey.replace('passk_', '').replace('_k', '');
+    const basePassk = {var_prefix}Data.base_model && {var_prefix}Data.base_model.passk && {var_prefix}Data.base_model.passk[benchKey];
+    if (basePassk) {{
+        allK.push(...basePassk.k);
+        allY.push(...basePassk.rate);
+    }}
+    runs.forEach(run => {{
+        const kArr = run[config.kKey];
+        const rArr = run[config.rateKey];
+        if (!kArr || !rArr) return;
+        allK.push(...kArr);
+        allY.push(...rArr.filter(v => v != null));
+    }});
+
+    if (allY.length === 0) return;
+
+    const kMin = d3.min(allK);
+    const kMax = d3.max(allK);
+    const xScale = d3.scaleLog().base(2).domain([kMin, kMax]).range([0, width]).nice();
+    const yMin = d3.min(allY), yMax_ = d3.max(allY);
+    const yPad = (yMax_ - yMin) * 0.1 || 0.01;
+    const yScale = d3.scaleLinear().domain([Math.max(0, yMin - yPad), Math.min(1, yMax_ + yPad)]).range([height, 0]).nice();
+
+    // Grid
+    g.append('g').attr('class', 'grid').selectAll('line').data(yScale.ticks(4)).enter().append('line')
+        .attr('x1', 0).attr('x2', width).attr('y1', d => yScale(d)).attr('y2', d => yScale(d))
+        .attr('stroke', '#e5e7eb').attr('stroke-width', 1);
+
+    // X axis (log2 ticks: 1, 2, 4, 8, 16, 32, 64, 128)
+    const tickVals = [1, 2, 4, 8, 16, 32, 64, 128].filter(v => v >= kMin && v <= kMax);
+    g.append('g').attr('transform', `translate(0,${{height}})`)
+        .call(d3.axisBottom(xScale).tickValues(tickVals).tickFormat(d => d).tickSize(0).tickPadding(6))
+        .call(g => g.select('.domain').attr('stroke', '#d1d5db'))
+        .call(g => g.selectAll('.tick text').attr('fill', '#6b7280').attr('font-size', '10px').attr('font-family', 'Source Code Pro, monospace'));
+
+    // Y axis
+    g.append('g').call(d3.axisLeft(yScale).ticks(4).tickFormat(d3.format('.0%')).tickSize(0).tickPadding(6))
+        .call(g => g.select('.domain').remove())
+        .call(g => g.selectAll('.tick text').attr('fill', '#6b7280').attr('font-size', '10px').attr('font-family', 'Source Code Pro, monospace'));
+
+    // Title
+    svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
+
+    // X-axis label
+    svg.append('text').attr('x', margin.left + width / 2).attr('y', height + margin.top + 28)
+        .attr('text-anchor', 'middle').attr('fill', '#9ca3af').attr('font-size', '9px')
+        .attr('font-family', 'Source Code Pro, monospace').text('k');
+
+    const line = d3.line()
+        .defined(d => d.y != null)
+        .x(d => xScale(d.x)).y(d => yScale(d.y))
+        .curve(d3.curveMonotoneX);
+
+    const GRAY = '#d1d5db';
+    const allLineData = [];
+
+    const drawPass = (runSubset, isHighlighted) => {{
+        runSubset.forEach(run => {{
+            const kArr = run[config.kKey];
+            const rArr = run[config.rateKey];
+            if (!kArr || !rArr) return;
+            const data = kArr.map((k, i) => ({{ x: k, y: rArr[i], label: run.label }}));
+            const drawColor = isHighlighted ? run.color : GRAY;
+            const drawWidth = isHighlighted ? 1.75 : 1;
+            const drawOpacity = isHighlighted ? 0.9 : 0.35;
+            if (isHighlighted) allLineData.push({{ data, color: run.color, label: run.label }});
+            g.append('path').datum(data).attr('fill', 'none').attr('stroke', drawColor)
+                .attr('stroke-width', drawWidth).attr('stroke-opacity', drawOpacity)
+                .attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round').attr('d', line);
+        }});
+    }};
+
+    drawPass(runs.filter(r => !highlightedSet.has(r.id)), false);
+    drawPass(runs.filter(r => highlightedSet.has(r.id)), true);
+
+    // Draw base model line (dashed)
+    if (basePassk) {{
+        const baseData = basePassk.k.map((k, i) => ({{ x: k, y: basePassk.rate[i], label: {var_prefix}Data.base_model.label }}));
+        // Filter to same k range as trained models
+        const filteredBase = baseData.filter(d => d.x >= kMin && d.x <= kMax);
+        g.append('path').datum(filteredBase).attr('fill', 'none').attr('stroke', '#999')
+            .attr('stroke-width', 1.5).attr('stroke-opacity', 0.7)
+            .attr('stroke-dasharray', '4,3')
+            .attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round').attr('d', line);
+        allLineData.push({{ data: filteredBase, color: '#999', label: {var_prefix}Data.base_model.label }});
+    }}
+
+    // Tooltip
+    const tt = {var_prefix}GetTooltip();
+    const fmt = d3.format(config.format || '.1%');
+
+    const hoverLine = g.append('line').attr('stroke', '#9ca3af').attr('stroke-width', 1)
+        .attr('stroke-dasharray', '3,3').attr('y1', 0).attr('y2', height).style('opacity', 0);
+    const hoverDots = g.append('g').attr('class', 'hover-dots');
+
+    g.append('rect').attr('width', width).attr('height', height).attr('fill', 'transparent')
+        .on('mousemove', function(event) {{
+            const [mx] = d3.pointer(event);
+            const x0 = xScale.invert(mx);
+            const bisect = d3.bisector(d => d.x).left;
+            let html = `<strong>k=${{Math.round(x0)}}</strong><br>`;
+            hoverLine.attr('x1', mx).attr('x2', mx).style('opacity', 1);
+            hoverDots.selectAll('circle').remove();
+            allLineData.forEach(li => {{
+                const i = bisect(li.data, x0, 1);
+                const d0 = li.data[i - 1], d1 = li.data[i];
+                if (!d0 && !d1) return;
+                const d = !d1 ? d0 : !d0 ? d1 : (x0 - d0.x > d1.x - x0 ? d1 : d0);
+                if (d && d.y != null) {{
+                    html += `<span style="color:${{li.color}}">●</span> ${{li.label}}: ${{fmt(d.y)}}<br>`;
                     hoverDots.append('circle').attr('cx', xScale(d.x)).attr('cy', yScale(d.y))
                         .attr('r', 4).attr('fill', li.color).attr('stroke', '#fff').attr('stroke-width', 1.5);
                 }}
