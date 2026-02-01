@@ -553,6 +553,12 @@ def load_apps(
     )
     print(f"[load_apps] Loaded {split} from: {path}")
 
+    # APPS contains test cases with huge integers (10000+ digits) that exceed
+    # Python's default integer string conversion limit during JSON parsing.
+    import sys
+    old_limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(100000)
+
     # Parse JSONL
     all_rows = []
     with open(path) as f:
@@ -564,9 +570,12 @@ def load_apps(
             all_rows.append(row)
 
     print(f"[load_apps] Loaded {len(all_rows)} problems (difficulty filter: {difficulty})")
-    ds = ray.data.from_items(all_rows)
 
-    def preprocess(row):
+    # Preprocess eagerly (not via Ray .map) to avoid Arrow schema mismatches.
+    # Empty lists get inferred as list<null> while populated ones are list<string>,
+    # causing struct field conflicts when Ray concatenates batches.
+    processed = []
+    for row in all_rows:
         prompt_id = f"apps_{row['id']}"
         question = row["question"]
 
@@ -575,13 +584,20 @@ def load_apps(
         if isinstance(io_data, str):
             io_data = json.loads(io_data) if io_data else {}
 
-        # Ensure inputs/outputs are always lists (for consistent Arrow schema)
+        # Ensure inputs/outputs are always lists of strings.
         inputs = io_data.get("inputs", [])
         outputs = io_data.get("outputs", [])
         if not isinstance(inputs, list):
             inputs = []
         if not isinstance(outputs, list):
             outputs = []
+        inputs = [str(x) for x in inputs]
+        outputs = [str(x) for x in outputs]
+        # Guarantee at least one element so Arrow always sees list<string>
+        if not inputs:
+            inputs = [""]
+        if not outputs:
+            outputs = [""]
 
         # Parse solutions - it's a JSON string containing a list
         solutions = row.get("solutions", "[]")
@@ -600,13 +616,13 @@ def load_apps(
         else:
             prompt = question
 
-        return {
+        processed.append({
             "prompt": prompt,
             "problem": {
                 "question": question,
                 "inputs": inputs,
                 "outputs": outputs,
-                "num_solutions": len(solutions),  # Store count instead of list to avoid schema issues
+                "num_solutions": len(solutions),
                 "starter_code": starter,
                 "difficulty": row.get("difficulty", "unknown"),
                 "task_id": row["id"],
@@ -617,9 +633,10 @@ def load_apps(
                 "assistant_prefix": CODE_ASSISTANT_PREFIX,
                 "max_completion_len": CODE_MAX_COMPLETION_LEN,
             },
-        }
+        })
 
-    return ds.map(preprocess)
+    sys.set_int_max_str_digits(old_limit)
+    return ray.data.from_items(processed)
 
 
 def load_ifeval(split: str = "train") -> ray.data.Dataset:

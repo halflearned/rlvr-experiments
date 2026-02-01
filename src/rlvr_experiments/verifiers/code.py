@@ -158,29 +158,33 @@ class SimpleCodeVerifier(CodeVerifier):
 class APPSStdinVerifier(CodeVerifier):
     """APPS verifier for stdin/stdout format problems.
 
-    These are competitive programming style problems where:
-    - inputs are strings (simulating stdin)
-    - outputs are strings (expected stdout)
-    - The model generates a complete program that reads from stdin and writes to stdout.
+    Runs all test cases in a single container invocation using internal subprocesses.
+    This avoids the N-containers-per-problem bottleneck that causes progressive slowdown.
     """
 
+    # Per-test subprocess timeout inside the container (seconds)
+    PER_TEST_TIMEOUT = 3
+
+    def __init__(self, executor: CodeExecutor | None = None, timeout: float = 10.0, max_concurrent: int = 4):
+        # Don't pass timeout to super — we override execute with a dynamic timeout
+        self._base_timeout = timeout
+        self._max_concurrent = max_concurrent
+        self.executor = executor or CodeExecutor(ExecutorConfig(timeout=timeout), max_concurrent=max_concurrent)
+
     def assemble_code(self, problem: dict, completion: str) -> str:
-        """Extract and clean code from completion."""
         return extract_code_from_markdown(completion)
 
     def count_tests(self, problem: dict) -> int:
-        """Count number of test cases."""
-        inputs = problem.get("inputs", [])
+        inputs = list(problem.get("inputs", []))
         return max(len(inputs), 1)
 
     async def verify(self, problem: dict, completion: str) -> TestResult:
-        """Verify completion against all input/output test cases."""
+        """Verify completion against all input/output test cases in a single container."""
         code = self.assemble_code(problem, completion)
-        inputs = problem.get("inputs", [])
-        outputs = problem.get("outputs", [])
+        inputs = list(problem.get("inputs", []))
+        outputs = list(problem.get("outputs", []))
 
-        if not inputs or not outputs:
-            # No test cases - can't verify, return failure
+        if len(inputs) == 0 or len(outputs) == 0:
             return TestResult(
                 passed=0,
                 total=1,
@@ -191,72 +195,86 @@ class APPSStdinVerifier(CodeVerifier):
             )
 
         total = len(inputs)
+
+        # Scale container timeout with test count: base + per_test * n_tests
+        # Most tests complete in <1s; the per-test timeout handles hangs
+        container_timeout = self._base_timeout + self.PER_TEST_TIMEOUT * total
+        old_timeout = self.executor.config.timeout
+        self.executor.config.timeout = container_timeout
+        try:
+            bundled = self._build_bundled_test(code, inputs, outputs)
+            result = await self.executor.execute(bundled)
+        finally:
+            self.executor.config.timeout = old_timeout
+
+        # Parse "RLVR_RESULT: X/Y" from stdout
         passed = 0
-        all_stdout = []
-        all_stderr = []
-        total_duration = 0.0
-        any_timeout = False
-        last_result = None
-
-        for inp, expected_out in zip(inputs, outputs):
-            # Create code that reads from a string as if it were stdin
-            # This wraps the solution to feed it input
-            wrapped_code = self._wrap_with_input(code, inp)
-            result = await self.executor.execute(wrapped_code)
-            last_result = result
-            total_duration += result.duration_ms
-
-            if result.timed_out:
-                any_timeout = True
-                continue
-
-            if result.exit_code != 0:
-                all_stderr.append(result.stderr)
-                continue
-
-            # Compare output (normalize whitespace)
-            actual = result.stdout.strip()
-            expected = expected_out.strip()
-
-            if self._outputs_match(actual, expected):
-                passed += 1
-            else:
-                all_stderr.append(f"Expected:\n{expected}\nGot:\n{actual}")
-
-            all_stdout.append(result.stdout)
+        if not result.timed_out:
+            for line in result.stdout.strip().split('\n'):
+                if line.startswith('RLVR_RESULT:'):
+                    try:
+                        parts = line.split(':')[1].strip().split('/')
+                        passed = int(parts[0])
+                    except (ValueError, IndexError):
+                        pass
 
         return TestResult(
             passed=passed,
             total=total,
-            execution_result=ExecutionResult(
-                stdout="\n---\n".join(all_stdout),
-                stderr="\n---\n".join(all_stderr),
-                exit_code=0 if passed == total else 1,
-                timed_out=any_timeout,
-                duration_ms=total_duration,
-                actual_start_time=last_result.actual_start_time if last_result else None,
-            )
+            execution_result=result,
         )
 
-    def _wrap_with_input(self, code: str, stdin_input: str) -> str:
-        """Wrap code to provide stdin input."""
-        # Use StringIO to mock stdin
-        escaped_input = stdin_input.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
-        return f'''import sys
-from io import StringIO
+    def _build_bundled_test(self, code: str, inputs: list[str], outputs: list[str]) -> str:
+        """Build a single script that runs the solution against all test cases."""
+        import json as _json
+        test_cases_json = _json.dumps([
+            {"input": inp, "expected": out}
+            for inp, out in zip(inputs, outputs)
+        ])
 
-_INPUT = """{escaped_input}"""
-sys.stdin = StringIO(_INPUT)
+        return f'''import subprocess, sys, json, tempfile, os
 
-{code}
+_SOLUTION = {repr(code)}
+_TEST_CASES = json.loads({repr(test_cases_json)})
+_TIMEOUT = {self.PER_TEST_TIMEOUT}
+_MAX_CONSECUTIVE_FAILURES = 3  # bail early if code is broken/hanging
+
+# Write solution to a temp file once
+_tmpfile = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp')
+_tmpfile.write(_SOLUTION)
+_tmpfile.close()
+
+_passed = 0
+_total = len(_TEST_CASES)
+_consecutive_failures = 0
+
+for _tc in _TEST_CASES:
+    try:
+        _proc = subprocess.run(
+            [sys.executable, _tmpfile.name],
+            input=_tc["input"],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT,
+        )
+        if _proc.returncode == 0:
+            _actual = _proc.stdout.strip().split()
+            _expected = _tc["expected"].strip().split()
+            if _actual == _expected:
+                _passed += 1
+                _consecutive_failures = 0
+                continue
+        _consecutive_failures += 1
+    except subprocess.TimeoutExpired:
+        _consecutive_failures += 1
+    except Exception:
+        _consecutive_failures += 1
+    if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+        break
+
+os.unlink(_tmpfile.name)
+print(f"RLVR_RESULT:{{_passed}}/{{_total}}")
 '''
-
-    def _outputs_match(self, actual: str, expected: str) -> bool:
-        """Compare outputs with flexible whitespace handling."""
-        # Normalize: strip, split by whitespace, compare tokens
-        actual_tokens = actual.split()
-        expected_tokens = expected.split()
-        return actual_tokens == expected_tokens
 
 
 class APPSFunctionVerifier(CodeVerifier):
@@ -277,17 +295,17 @@ class APPSFunctionVerifier(CodeVerifier):
 
     def count_tests(self, problem: dict) -> int:
         """Count number of test cases."""
-        inputs = problem.get("inputs", [])
+        inputs = list(problem.get("inputs", []))
         return max(len(inputs), 1)
 
     async def verify(self, problem: dict, completion: str) -> TestResult:
         """Verify completion by calling the function with test inputs."""
         code = self.assemble_code(problem, completion)
-        inputs = problem.get("inputs", [])
-        outputs = problem.get("outputs", [])
+        inputs = list(problem.get("inputs", []))
+        outputs = list(problem.get("outputs", []))
         fn_name = problem.get("fn_name", "")
 
-        if not inputs or not outputs or not fn_name:
+        if len(inputs) == 0 or len(outputs) == 0 or not fn_name:
             return TestResult(
                 passed=0,
                 total=1,
