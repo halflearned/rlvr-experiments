@@ -285,7 +285,7 @@
             $$
 
             <p>
-                the <span style="color: #e8a030;">normalization factor</span> divides by total tokens across the group rather than by $G$, removing a length bias that would otherwise discount longer completions. The <span style="color: teal;">clipping bounds</span> are asymmetric ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$), allowing the policy more room to increase probability on rewarded completions than to decrease it on penalized ones.
+                the <span style="color: #e8a030;">normalization factor</span> divides by total tokens across the group rather than by $G$, removing a length bias that would otherwise discount longer completions. The <span style="color: teal;">clipping bounds</span> are asymmetric ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$). The latter allows the policy more room to increase probability on rewarded completions than to decrease it on penalized ones, however since most of our 
             </p>
 
             <p>
@@ -400,6 +400,20 @@
                     All runs set group size G=16, max completion tokens 2048, batch size 128. We evaluate models in two granularities: "prompt-level" accuracy means all constraints in that prompt are satisfied, "instruction-level" accuracy is the average number of instructions that were satified. During training, we use "instruction-level accuracy" so partial rewards are possible.
                 </p>
             
+                <h4>Results</h4>
+                <li>
+                    Overall, we can find combinations of hyperparameters that substantially improve instruction-following performance, as measured by our benchmarks.
+                </li>
+                <li>
+                    We have not completed a full ablation of GRPO vs DAPO over a grid of all (lr, beta) values, but comparing like-to-like values their performance seems similar. As in GSM8k, completion length is slightly smaller for DAPO. They have similarly in terms of entropy decay.
+                </li>
+                <li>
+                    Similarly to the GSM8k run, when SFT is introduced, it seems to increase performance for milder learning rates.
+                </li>
+                <li>
+
+                </li>
+
                 <!-- IFEval interactive plots -->
                 <div class="experiment-plots">
                     <div id="ifeval-preset-buttons" class="preset-buttons"></div>
@@ -438,8 +452,8 @@
         <section id="code">
             <h3>2.4 MBPP (Partial results)</h3>
             <p>
-                We train on MBPP train split (374 examples) using GRPO only. We set lr=1e-5, beta=0.001, group size G=8.
-                We compare a standard verifier against a truncated verifier that clips model output at the second top-level <code>def</code>/<code>class</code> before running tests.
+                We train on Mostly Basic Python Programs (<a href="https://huggingface.co/datasets/Muennighoff/mbpp">MBPP</a>) train split (n=374). This a limited run using GRPO only. We set lr=1e-5, beta=0.001, group size G=8.
+                We use a truncated verifier that clips model output at the second top-level <code>def</code>/<code>class</code> before running tests.
             </p>
 
             <div class="experiment-plots">
@@ -458,16 +472,10 @@
                 <h4>Training Dynamics</h4>
                 <div class="plot-row plot-row-1x4">
                     <div class="plot-container" id="code-plot-loss-grpo"></div>
-                    <div class="plot-container" id="code-plot-loss-sft"></div>
                     <div class="plot-container" id="code-plot-kl"></div>
                     <div class="plot-container" id="code-plot-entropy"></div>
                 </div>
 
-                <h4>Evaluation</h4>
-                <div class="plot-row plot-row-1x4">
-                    <div class="plot-container" id="code-plot-eval-mbpp_test"></div>
-                    <div class="plot-container" id="code-plot-eval-humaneval"></div>
-                </div>
             </div>
 
             <!-- Code comparison table (auto-generated) -->
@@ -480,7 +488,9 @@
 
             <h4>Distillation experiments (GKD / OPSD)</h4>
                 <p>
-                    We also explored on-policy self-distillation (OPSD) and generalized knowledge distillation (GKD),
+                    It would be interesting to see how the methods here compare to "dense" on-policy distillation methods like generalized knowledge distillation (GKD). In particular, there have been several papers recently that use a form of self-distillation were the self teacher is the same model with additional privilege information. 
+
+                     self-distillation (OPSD) and ,
                     using either the model's own earlier checkpoint or a stronger Qwen3 instruct model as teacher.
                     Pure OPSD (distillation-only, no reward signal) consistently degraded GSM8k performance,
                     confirming that reward signal is essential. GRPO+GKD (combining reward with JSD distillation
@@ -491,35 +501,19 @@
 
         <section id="appendix" class="appendix">
             <h2>Appendix</h2>
-
-            <section id="datasets">
-                <h3>Dataset, verifiers, benchmarks.</h3>
-                <p><strong>GSM8K:</strong> The MathVerifier achieves only 8-9% on base model completions compared to lm_eval's 66% strict-match accuracy. This discrepancy is intentional and correct. The base model often continues generating after providing the answer, producing additional unrelated Q&A pairs. MathVerifier extracts the <em>last</em> number in the response, which in these cases comes from the spurious continuation rather than the actual answer. lm_eval's strict-match, by contrast, extracts the <em>first</em> occurrence of "The answer is X." and ignores everything after. While lm_eval's approach is appropriate for evaluation (measuring whether the model <em>can</em> solve the problem), MathVerifier's stricter approach is the right training signal for RL: it rewards completions that both solve the problem correctly <em>and</em> terminate appropriately, rather than giving credit to responses that ramble indefinitely after stating the answer.</p>
-                <p><strong>MATH:</strong></p>
-            </section>
- 
         
             <section id="notes">
                 <h3>Notes</h3>
                 <ol>
-                    <li>Using a base model. We train from a base (pretrained-only) checkpoint to isolate the effect of our RL procedure from any prior alignment. Qwen3-1.7B-Base sits comfortably mid-range on all benchmarks of interest (55-60% GSM8k/MATH, 15-25% IFEval, 20-55% code), leaving headroom for improvement while remaining sensitive to degradation. In a production setting one would first distill chain-of-thought traces from a stronger model before applying RL (<a href="https://arxiv.org/pdf/2501.12948"></a>DeepSeek-R1</a> or <a href="https://arxiv.org/pdf/2203.14465">STaR</a>). </li>
-                    <li>Formatting: </li>
-                    <li>MFU</li>
-                    <li>Kernels: LIGER kernel probably faster than TP=2</li>
-                    <li>KL divergence: we use the Schulman "k3" estimator: given $r = \log(\pi_{\text{ref}} / \pi_\theta)$, the quantity $\exp(r) - r - 1$ is an unbiased estimator of $\text{KL}(\pi_\theta \| \pi_{\text{ref}})$, the "forward" KL (policy w.r.t. reference). This penalizes the policy for placing probability mass where the reference does not, which is the standard choice in RLHF/GRPO &mdash; it discourages the policy from straying too far from the reference in a mode-seeking direction.</li>
+                    <li>KL divergence: we use the Schulman "k3" estimator: given $r = \log(\pi_{\text{ref}} / \pi_\theta)$, the quantity $\exp(r) - r - 1$ is an unbiased estimator of $\text{KL}(\pi_\theta \| \pi_{\text{ref}})$, the KL (policy w.r.t. reference). This penalizes the policy for placing probability mass where the reference does not, which is the standard choice in RLHF/GRPO &mdash; it discourages the policy from straying too far from the reference in a mode-seeking direction.</li>
                     <li>Precision: we use float16 (with dynamic loss scaling) for training rather than bfloat16. On A100 GPUs, we observed that bfloat16 training ran approximately 2x slower for the 1.7B model due to reduced throughput in the GRPO loss computation. One GRPO run (lr=1e-5) was initially launched with bfloat16 and had to be restarted with float16 after observing the slowdown. We did not observe numerical instability from float16 at this model scale.</li>
                 </ol>
             </section>
         </section>
 
-        <section id="references">
-            <h2>References</h2>
-        </section>
-
-
-                   <section id="staleness-appendix">
+        
+        <section id="staleness-appendix">
                 <h3>Staleness conditions</h3>
-                <!-- EMBED: staleness-diagrams -->
                 <details class="staleness-details">
                     <summary>Staleness diagrams</summary>
                     <div class="staleness-diagrams-combined">
