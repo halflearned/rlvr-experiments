@@ -46795,12 +46795,13 @@ function gsm8kGenerateTable() {
     const baseModel = gsm8kData.base_model || null;
 
     const benchSet = new Set();
-    const exclude = new Set(gsm8kData.exclude_benchmarks || []);
+    const excludePrefixes = gsm8kData.exclude_benchmarks || [];
+    const shouldExclude = (b) => excludePrefixes.some(p => b === p || b.startsWith(p + ' '));
     runs.forEach(run => {
         const s = summaries[run.id];
-        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => { if (!exclude.has(b)) benchSet.add(b); });
+        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => { if (!shouldExclude(b)) benchSet.add(b); });
     });
-    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => { if (!exclude.has(b)) benchSet.add(b); });
+    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => { if (!shouldExclude(b)) benchSet.add(b); });
     const benchmarks = Array.from(benchSet).sort();
     if (benchmarks.length === 0) return;
 
@@ -46942,10 +46943,9 @@ function gsm8kActivatePreset(presetId) {
 
 const gsm8kPlotConfigs = [
     { id: 'gsm8k-plot-reward', title: 'Reward', yKey: 'reward_overall', format: '.3f' },
-    { id: 'gsm8k-plot-allcorr-allwrong', title: 'All Correct / All Wrong',
-       yKeys: ['frac_all_correct', 'frac_all_wrong'], yLabels: ['Correct', 'Wrong'],
-       multiLine: true, format: '.1%' },
     { id: 'gsm8k-plot-completion-len', title: 'Completion Length', yKey: 'completion_len', format: '.0f' },
+    { id: 'gsm8k-plot-allcorr', title: 'Frac All Correct', yKey: 'frac_all_correct', format: '.1%' },
+    { id: 'gsm8k-plot-allwrong', title: 'Frac All Wrong', yKey: 'frac_all_wrong', format: '.1%' },
     { id: 'gsm8k-plot-loss-grpo', title: 'GRPO Loss', yKey: 'loss_grpo', format: '.4f' },
     { id: 'gsm8k-plot-loss-sft', title: 'SFT Loss', yKey: 'loss_sft', format: '.4f' },
     { id: 'gsm8k-plot-kl', title: 'KL Divergence', yKey: 'kl_mean', format: '.4f' },
@@ -46983,9 +46983,9 @@ function gsm8kRedraw() {
 function gsm8kDrawPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
-    const margin = { top: 24, right: 12, bottom: 32, left: 48 };
+    const margin = { top: 16, right: 12, bottom: 28, left: 44 };
     const width = 280 - margin.left - margin.right;
-    const height = 170 - margin.top - margin.bottom;
+    const height = 160 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -47067,7 +47067,7 @@ function gsm8kDrawPlot(container, runs, config, highlightedSet) {
         .call(g => g.selectAll('.tick text').attr('fill', '#6b7280').attr('font-size', '10px').attr('font-family', 'Source Code Pro, monospace'));
 
     svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
-        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '10px')
         .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
 
     const line = d3.line()
@@ -47156,9 +47156,9 @@ function gsm8kDrawPlot(container, runs, config, highlightedSet) {
 function gsm8kDrawPassKPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
-    const margin = { top: 24, right: 12, bottom: 32, left: 48 };
+    const margin = { top: 16, right: 12, bottom: 28, left: 44 };
     const width = 280 - margin.left - margin.right;
-    const height = 170 - margin.top - margin.bottom;
+    const height = 160 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -47214,7 +47214,7 @@ function gsm8kDrawPassKPlot(container, runs, config, highlightedSet) {
 
     // Title
     svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
-        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '10px')
         .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
 
     // X-axis label

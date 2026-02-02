@@ -2627,7 +2627,11 @@ const ifevalData = {
         0.027289342135190964,
         0.10021079331636429,
         0.04544162005186081
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.390, 0.506, 0.610, 0.688, 0.752, 0.817, 0.852, 0.893],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.157, 0.237, 0.283, 0.417, 0.493, 0.603, 0.690, 0.733]
     },
     {
       "id": "dapo",
@@ -4652,7 +4656,11 @@ const ifevalData = {
         1.07682204246521,
         0.3612271547317505,
         1.1510210037231445
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.316, 0.427, 0.516, 0.627, 0.721, 0.789, 0.830, 0.872],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.133, 0.180, 0.257, 0.333, 0.400, 0.487, 0.570, 0.627]
     },
     {
       "id": "dapo-sft",
@@ -6677,7 +6685,11 @@ const ifevalData = {
         0.7731119394302368,
         0.3394756317138672,
         0.11793757230043411
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.322, 0.418, 0.534, 0.630, 0.723, 0.787, 0.830, 0.874],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.137, 0.193, 0.253, 0.340, 0.400, 0.500, 0.580, 0.630]
     },
     {
       "id": "grpo-sft",
@@ -8702,7 +8714,11 @@ const ifevalData = {
         0.22347892820835114,
         0.022368617355823517,
         0.018252797424793243
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.477, 0.595, 0.680, 0.749, 0.808, 0.839, 0.865, 0.885],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.213, 0.313, 0.377, 0.483, 0.543, 0.653, 0.717, 0.757]
     },
     {
       "id": "sm-lr1e5-beta1e4",
@@ -12727,7 +12743,11 @@ const ifevalData = {
         0.3434400260448456,
         0.17420949041843414,
         0.31497687101364136
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.493, 0.582, 0.660, 0.723, 0.778, 0.815, 0.835, 0.867],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.263, 0.323, 0.417, 0.497, 0.567, 0.637, 0.687, 0.720]
     },
     {
       "id": "sm-lr1e5-beta1e3",
@@ -16752,7 +16772,11 @@ const ifevalData = {
         0.36990252137184143,
         0.22046314179897308,
         0.35864514112472534
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.388, 0.529, 0.630, 0.732, 0.791, 0.843, 0.884, 0.904],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.163, 0.267, 0.360, 0.453, 0.520, 0.627, 0.690, 0.750]
     },
     {
       "id": "sm-lr75e5-beta1e4",
@@ -19377,7 +19401,11 @@ const ifevalData = {
         0.02855396270751953,
         0.009960337541997433,
         0.01755860075354576
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.309, 0.379, 0.447, 0.518, 0.590, 0.632, 0.689, 0.743],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.210, 0.257, 0.313, 0.383, 0.443, 0.490, 0.553, 0.593]
     },
     {
       "id": "sm-lr75e5-beta1e3",
@@ -22102,7 +22130,11 @@ const ifevalData = {
         0.011821798980236053,
         0.027403704822063446,
         0.028034590184688568
-      ]
+      ],
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.266, 0.353, 0.436, 0.499, 0.555, 0.597, 0.643, 0.680],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.223, 0.283, 0.340, 0.383, 0.417, 0.490, 0.533, 0.587]
     },
     {
       "id": "sm-dapo-sft-lr1e5-beta1e4",
@@ -28232,7 +28264,11 @@ const ifevalData = {
           "accuracy": 0.5948582822959693,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.390, 0.506, 0.610, 0.688, 0.752, 0.817, 0.852, 0.893],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.157, 0.237, 0.283, 0.417, 0.493, 0.603, 0.690, 0.733]
     },
     "dapo": {
       "id": "dapo",
@@ -28284,7 +28320,11 @@ const ifevalData = {
           "accuracy": 0.5977780942885629,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.316, 0.427, 0.516, 0.627, 0.721, 0.789, 0.830, 0.872],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.133, 0.180, 0.257, 0.333, 0.400, 0.487, 0.570, 0.627]
     },
     "dapo-sft": {
       "id": "dapo-sft",
@@ -28336,7 +28376,11 @@ const ifevalData = {
           "accuracy": 0.5941461330294829,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.322, 0.418, 0.534, 0.630, 0.723, 0.787, 0.830, 0.874],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.137, 0.193, 0.253, 0.340, 0.400, 0.500, 0.580, 0.630]
     },
     "grpo-sft": {
       "id": "grpo-sft",
@@ -28388,7 +28432,11 @@ const ifevalData = {
           "accuracy": 0.5881640791909984,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.477, 0.595, 0.680, 0.749, 0.808, 0.839, 0.865, 0.885],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.213, 0.313, 0.377, 0.483, 0.543, 0.653, 0.717, 0.757]
     },
     "sm-lr1e5-beta1e4": {
       "id": "sm-lr1e5-beta1e4",
@@ -28432,7 +28480,11 @@ const ifevalData = {
           "accuracy": 0.584816977638513,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.493, 0.582, 0.660, 0.723, 0.778, 0.815, 0.835, 0.867],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.263, 0.323, 0.417, 0.497, 0.567, 0.637, 0.687, 0.720]
     },
     "sm-lr1e5-beta1e3": {
       "id": "sm-lr1e5-beta1e3",
@@ -28476,7 +28528,11 @@ const ifevalData = {
           "accuracy": 0.5979205241418601,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.388, 0.529, 0.630, 0.732, 0.791, 0.843, 0.884, 0.904],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.163, 0.267, 0.360, 0.453, 0.520, 0.627, 0.690, 0.750]
     },
     "sm-lr75e5-beta1e4": {
       "id": "sm-lr75e5-beta1e4",
@@ -28520,7 +28576,11 @@ const ifevalData = {
           "accuracy": 0.5366756872240421,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.309, 0.379, 0.447, 0.518, 0.590, 0.632, 0.689, 0.743],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.210, 0.257, 0.313, 0.383, 0.443, 0.490, 0.553, 0.593]
     },
     "sm-lr75e5-beta1e3": {
       "id": "sm-lr75e5-beta1e3",
@@ -28564,7 +28624,11 @@ const ifevalData = {
           "accuracy": 0.585386697051702,
           "step": null
         }
-      }
+      },
+      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifeval_pass128_rate": [0.266, 0.353, 0.436, 0.499, 0.555, 0.597, 0.643, 0.680],
+      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
+      "passk_ifbench_test_pass128_rate": [0.223, 0.283, 0.340, 0.383, 0.417, 0.490, 0.533, 0.587]
     },
     "sm-dapo-sft-lr1e5-beta1e4": {
       "id": "sm-dapo-sft-lr1e5-beta1e4",
@@ -28924,12 +28988,13 @@ function ifevalGenerateTable() {
     const baseModel = ifevalData.base_model || null;
 
     const benchSet = new Set();
-    const exclude = new Set(ifevalData.exclude_benchmarks || []);
+    const excludePrefixes = ifevalData.exclude_benchmarks || [];
+    const shouldExclude = (b) => excludePrefixes.some(p => b === p || b.startsWith(p + ' '));
     runs.forEach(run => {
         const s = summaries[run.id];
-        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => { if (!exclude.has(b)) benchSet.add(b); });
+        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => { if (!shouldExclude(b)) benchSet.add(b); });
     });
-    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => { if (!exclude.has(b)) benchSet.add(b); });
+    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => { if (!shouldExclude(b)) benchSet.add(b); });
     const benchmarks = Array.from(benchSet).sort();
     if (benchmarks.length === 0) return;
 
@@ -29071,10 +29136,9 @@ function ifevalActivatePreset(presetId) {
 
 const ifevalPlotConfigs = [
     { id: 'ifeval-plot-reward', title: 'Reward', yKey: 'reward_overall', format: '.3f' },
-    { id: 'ifeval-plot-allcorr-allwrong', title: 'All Correct / All Wrong',
-       yKeys: ['frac_all_correct', 'frac_all_wrong'], yLabels: ['Correct', 'Wrong'],
-       multiLine: true, format: '.1%' },
     { id: 'ifeval-plot-completion-len', title: 'Completion Length', yKey: 'completion_len', format: '.0f' },
+    { id: 'ifeval-plot-allcorr', title: 'Frac All Correct', yKey: 'frac_all_correct', format: '.1%' },
+    { id: 'ifeval-plot-allwrong', title: 'Frac All Wrong', yKey: 'frac_all_wrong', format: '.1%' },
     { id: 'ifeval-plot-loss-grpo', title: 'GRPO Loss', yKey: 'loss_grpo', format: '.4f' },
     { id: 'ifeval-plot-loss-sft', title: 'SFT Loss', yKey: 'loss_sft', format: '.4f' },
     { id: 'ifeval-plot-kl', title: 'KL Divergence', yKey: 'kl_mean', format: '.4f' },
@@ -29094,6 +29158,8 @@ const ifevalPassKConfigs = [
     { id: 'ifeval-plot-passk-math', title: 'MATH Pass@k', kKey: 'passk_math_pass128_k', rateKey: 'passk_math_pass128_rate', format: '.1%' },
     { id: 'ifeval-plot-passk-aime', title: 'AIME Pass@k', kKey: 'passk_aime_pass32_k', rateKey: 'passk_aime_pass32_rate', format: '.1%' },
     { id: 'ifeval-plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' },
+    { id: 'ifeval-plot-passk-ifeval', title: 'IFEval Pass@k', kKey: 'passk_ifeval_pass128_k', rateKey: 'passk_ifeval_pass128_rate', format: '.1%' },
+    { id: 'ifeval-plot-passk-ifbench', title: 'IFBench Pass@k', kKey: 'passk_ifbench_test_pass128_k', rateKey: 'passk_ifbench_test_pass128_rate', format: '.1%' },
 ];
 
 function ifevalRedraw() {
@@ -29112,9 +29178,9 @@ function ifevalRedraw() {
 function ifevalDrawPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
-    const margin = { top: 24, right: 12, bottom: 32, left: 48 };
+    const margin = { top: 16, right: 12, bottom: 28, left: 44 };
     const width = 280 - margin.left - margin.right;
-    const height = 170 - margin.top - margin.bottom;
+    const height = 160 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -29196,7 +29262,7 @@ function ifevalDrawPlot(container, runs, config, highlightedSet) {
         .call(g => g.selectAll('.tick text').attr('fill', '#6b7280').attr('font-size', '10px').attr('font-family', 'Source Code Pro, monospace'));
 
     svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
-        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '10px')
         .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
 
     const line = d3.line()
@@ -29285,9 +29351,9 @@ function ifevalDrawPlot(container, runs, config, highlightedSet) {
 function ifevalDrawPassKPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
-    const margin = { top: 24, right: 12, bottom: 32, left: 48 };
+    const margin = { top: 16, right: 12, bottom: 28, left: 44 };
     const width = 280 - margin.left - margin.right;
-    const height = 170 - margin.top - margin.bottom;
+    const height = 160 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -29343,7 +29409,7 @@ function ifevalDrawPassKPlot(container, runs, config, highlightedSet) {
 
     // Title
     svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
-        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '10px')
         .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
 
     // X-axis label
