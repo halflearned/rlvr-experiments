@@ -1,4 +1,11 @@
 import os
+# Force NCCL to use TCP sockets (not EFA) for cross-node weight sync.
+# Disable OFI NCCL plugin which crashes without EFA hardware.
+os.environ["NCCL_NET"] = "Socket"
+os.environ["NCCL_SOCKET_IFNAME"] = "ens32"
+os.environ["NCCL_NET_PLUGIN"] = ""
+os.environ["NCCL_DEBUG"] = os.environ.get("NCCL_DEBUG", "WARN")
+
 import ray
 import torch
 

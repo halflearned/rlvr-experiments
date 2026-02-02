@@ -8,6 +8,25 @@ from dataclasses import dataclass
 from .code_executor import CodeExecutor, ExecutorConfig, ExecutionResult
 
 
+def truncate_to_first_block(text: str) -> str:
+    """Truncate code at the second top-level def/class.
+
+    Keeps only the first function/class definition, discarding any
+    subsequent top-level definitions the model may have generated.
+    This ensures the model is only rewarded for the quality of its
+    first answer, not for learning to stop generating.
+    """
+    lines = text.split('\n')
+    def_count = 0
+    for i, line in enumerate(lines):
+        # Top-level def or class (no indentation)
+        if re.match(r'^(def |class )\w', line):
+            def_count += 1
+            if def_count >= 2:
+                return '\n'.join(lines[:i]).rstrip()
+    return text
+
+
 def extract_code_from_markdown(text: str) -> str:
     """Extract Python code from ```python blocks, or return text as-is.
 
@@ -109,7 +128,17 @@ class HumanEvalVerifier(CodeVerifier):
 
     def assemble_code(self, problem: dict, completion: str) -> str:
         prompt, test, entry_point = problem["prompt"], problem["test"], problem["entry_point"]
+        # Strip markdown artifacts (``` etc) before processing
+        completion = re.sub(r'\n```[\s\S]*$', '', completion)
+        completion = re.sub(r'\s*```\s*$', '', completion)
         completion = self._clean_completion(completion, entry_point)
+        # Truncate at first top-level def/class — completion is a function body
+        # (indented), so any top-level def/class is extraneous generation
+        lines = completion.split('\n')
+        for i, line in enumerate(lines):
+            if re.match(r'^(def |class )\w', line):
+                completion = '\n'.join(lines[:i]).rstrip()
+                break
         return f"{prompt}{completion}\n\n{test}\n\ncheck({entry_point})\n"
 
     def _clean_completion(self, completion: str, entry_point: str) -> str:
@@ -136,8 +165,14 @@ class HumanEvalVerifier(CodeVerifier):
 class MBPPVerifier(CodeVerifier):
     """MBPP: model generates complete function, test_list has assertions."""
 
+    def __init__(self, truncate: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        self.truncate = truncate
+
     def assemble_code(self, problem: dict, completion: str) -> str:
         code = extract_code_from_markdown(completion)
+        if self.truncate:
+            code = truncate_to_first_block(code)
         tests = "\n".join(problem["test_list"])
         return f"{code.strip()}\n\n{tests}\n"
 

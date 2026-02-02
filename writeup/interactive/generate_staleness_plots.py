@@ -16,11 +16,38 @@ Config format (YAML):
 """
 
 import argparse
+import hashlib
 import json
+import os
+import pickle
 import sys
 from pathlib import Path
 
 import yaml
+
+CACHE_DIR = Path(__file__).parent / ".plot_cache"
+
+
+def _cache_key(trace_path: str) -> str:
+    """Cache key based on path, mtime, and size."""
+    st = os.stat(trace_path)
+    raw = f"{trace_path}:{st.st_mtime_ns}:{st.st_size}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def extract_metrics_cached(trace_path: str) -> tuple[list[dict], dict]:
+    """Extract metrics with file-based caching."""
+    CACHE_DIR.mkdir(exist_ok=True)
+    key = _cache_key(trace_path)
+    cache_file = CACHE_DIR / f"{key}.pkl"
+    if cache_file.exists():
+        print(f"  (cached) {trace_path}", file=sys.stderr)
+        with open(cache_file, "rb") as f:
+            return pickle.load(f)
+    result = extract_metrics(trace_path)
+    with open(cache_file, "wb") as f:
+        pickle.dump(result, f)
+    return result
 
 
 def extract_metrics(trace_path: str) -> tuple[list[dict], dict]:
@@ -266,7 +293,7 @@ def generate_plot_data(config: dict) -> dict:
             evals_path = Path(run["evals"]) if run.get("evals") else None
 
         print(f"Extracting from {trace_path}...", file=sys.stderr)
-        metrics, raw_events = extract_metrics(str(trace_path))
+        metrics, raw_events = extract_metrics_cached(str(trace_path))
 
         # Compute summary for inline metrics
         summaries[run_id] = compute_summary(metrics, raw_events, run_id)
@@ -547,12 +574,13 @@ function {var_prefix}GenerateTable() {{
     const baseModel = {var_prefix}Data.base_model || null;
 
     const benchSet = new Set();
-    const exclude = new Set({var_prefix}Data.exclude_benchmarks || []);
+    const excludePrefixes = {var_prefix}Data.exclude_benchmarks || [];
+    const shouldExclude = (b) => excludePrefixes.some(p => b === p || b.startsWith(p + ' '));
     runs.forEach(run => {{
         const s = summaries[run.id];
-        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => {{ if (!exclude.has(b)) benchSet.add(b); }});
+        if (s && s.benchmarks) Object.keys(s.benchmarks).forEach(b => {{ if (!shouldExclude(b)) benchSet.add(b); }});
     }});
-    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => {{ if (!exclude.has(b)) benchSet.add(b); }});
+    if (baseModel) Object.keys(baseModel.benchmarks).forEach(b => {{ if (!shouldExclude(b)) benchSet.add(b); }});
     const benchmarks = Array.from(benchSet).sort();
     if (benchmarks.length === 0) return;
 
@@ -694,10 +722,9 @@ function {var_prefix}ActivatePreset(presetId) {{
 
 const {var_prefix}PlotConfigs = [
     {{ id: '{id_prefix}plot-reward', title: 'Reward', yKey: 'reward_overall', format: '.3f' }},
-    {{ id: '{id_prefix}plot-allcorr-allwrong', title: 'All Correct / All Wrong',
-       yKeys: ['frac_all_correct', 'frac_all_wrong'], yLabels: ['Correct', 'Wrong'],
-       multiLine: true, format: '.1%' }},
     {{ id: '{id_prefix}plot-completion-len', title: 'Completion Length', yKey: 'completion_len', format: '.0f' }},
+    {{ id: '{id_prefix}plot-allcorr', title: 'Frac All Correct', yKey: 'frac_all_correct', format: '.1%' }},
+    {{ id: '{id_prefix}plot-allwrong', title: 'Frac All Wrong', yKey: 'frac_all_wrong', format: '.1%' }},
     {{ id: '{id_prefix}plot-loss-grpo', title: 'GRPO Loss', yKey: 'loss_grpo', format: '.4f' }},
     {{ id: '{id_prefix}plot-loss-sft', title: 'SFT Loss', yKey: 'loss_sft', format: '.4f' }},
     {{ id: '{id_prefix}plot-kl', title: 'KL Divergence', yKey: 'kl_mean', format: '.4f' }},
@@ -735,9 +762,9 @@ function {var_prefix}Redraw() {{
 function {var_prefix}DrawPlot(container, runs, config, highlightedSet) {{
     container.innerHTML = '';
 
-    const margin = {{ top: 24, right: 12, bottom: 32, left: 48 }};
+    const margin = {{ top: 16, right: 12, bottom: 28, left: 44 }};
     const width = 280 - margin.left - margin.right;
-    const height = 170 - margin.top - margin.bottom;
+    const height = 160 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -819,7 +846,7 @@ function {var_prefix}DrawPlot(container, runs, config, highlightedSet) {{
         .call(g => g.selectAll('.tick text').attr('fill', '#6b7280').attr('font-size', '10px').attr('font-family', 'Source Code Pro, monospace'));
 
     svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
-        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '10px')
         .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
 
     const line = d3.line()
@@ -908,9 +935,9 @@ function {var_prefix}DrawPlot(container, runs, config, highlightedSet) {{
 function {var_prefix}DrawPassKPlot(container, runs, config, highlightedSet) {{
     container.innerHTML = '';
 
-    const margin = {{ top: 24, right: 12, bottom: 32, left: 48 }};
+    const margin = {{ top: 16, right: 12, bottom: 28, left: 44 }};
     const width = 280 - margin.left - margin.right;
-    const height = 170 - margin.top - margin.bottom;
+    const height = 160 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -966,7 +993,7 @@ function {var_prefix}DrawPassKPlot(container, runs, config, highlightedSet) {{
 
     // Title
     svg.append('text').attr('x', margin.left + width / 2).attr('y', 14)
-        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '12px')
+        .attr('text-anchor', 'middle').attr('fill', '#1f2937').attr('font-size', '10px')
         .attr('font-weight', '600').attr('font-family', 'Lora, serif').text(config.title);
 
     // X-axis label

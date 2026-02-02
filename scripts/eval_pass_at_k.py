@@ -414,7 +414,7 @@ def run_generation_and_verification(
         model=model_path,
         tensor_parallel_size=1,  # Always TP=1 as per CLAUDE.md
         max_model_len=max_model_len,
-        gpu_memory_utilization=0.90,
+        gpu_memory_utilization=float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.90")),
         dtype="bfloat16",
         enable_prefix_caching=True,
         trust_remote_code=True,

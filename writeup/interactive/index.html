@@ -32,22 +32,27 @@
             <h1>RLVR Experiments</h1>
         </header>
 
+        <p>
+            Github repo: <a href="https://github.com/halflearned/rlvr-experiments">halflearned/rlvr-experiments</a>
+        </p>
+
         <section class="intro">
-            <p>The first post has two parts. Part 1 gives an overview of our RLVR experiments package. Part 2 presents a few experiments we ran with it.</p>
+            <p>The post has two parts. Part 1 gives an overview of the package and typical usage. Part 2 presents a few experiments we ran with it.</p>
         </section>
 
         <section id="system-architecture">
             <h3>System overview</h3>
 
-            <p>The main type of problem this package focuses on is Monte Carlo-based RLVR algorithm such as Group Relative Policy Optimzation (GRPO) and its variants. For this sort of problem, the canonical setup is a system that runs in a <b>producer-consumer pipeline</b>: 
-            <ul>
-                <li>PRODUCER LOOP: samples prompts, generates completions using a copy of the model, verifies these completions, and puts all results in a buffer</li>
-                <li>CONSUMER LOOP: pops from the buffer, waits until there are enough samples, batches samples together and trains its own model copy</li>
-                <li>WEIGHT SYNC: once the model weights are updated, trainer's new weights may be synced to the producer's weights to keep generations on policy</li>
-            </ul>
-            This sort of design, decoupling generation from training, has been used in <a href=https://arxiv.org/pdf/2501.12599>Kimi 1.5</a> and taken up by modern RLVR packages like <a href="https://pytorch.org/blog/introducing-torchforge/">torchforge</a>. 
+            <p>The main type of problem this package focuses on is Monte Carlo-based RLVR algorithm such as Group Relative Policy Optimzation (GRPO) and its variants. For this sort of problem, the canonical setup is a system that runs in a <b>producer-consumer pipeline</b>:
+            </p>
+            <p>The "producer" is a loop that samples prompts, generates completions using a copy of the model, verifies these completions, and puts all results in a buffer. </p>
+                <p>The "consumer" pops from the buffer, waits until there are enough samples, batches samples together and trains its own model copy. </p>
+                <p>Once the model weights are updated, trainer's new weights may be synced to the producer's weights to keep generations on policy</p>   
+            <p>This sort of design, decoupling generation from training, has been used in <a href=https://arxiv.org/pdf/2501.12599>Kimi 1.5</a> and taken up by modern RLVR packages like <a href="https://pytorch.org/blog/introducing-torchforge/">torchforge</a>. 
 
+            <p>Let's work through a typical flow.</p>
 
+            </p>
             <h3>Components</h3>
 
             <p>A typical GRPO-like flow will have the following components</p>
@@ -70,7 +75,7 @@
             </p>
 
             <figure>
-                <img src="figures/producer.jpg" alt="Producer loop diagram">
+                <img src="figures/producer.png" alt="Producer loop diagram">
             </figure>
 
             <details class="code-details">
@@ -114,12 +119,17 @@
 
             <h3>Consumer loop</h3>
             <p>
-                The consumer is a standard training loop: pull samples, batch them, forward/backward, optimizer step. Only two things are different. First, samples are checked for <em>staleness</em>: if the trainer has moved too far ahead of the weights used for generation, the sample is (lazily) evicted and the prompt is re-queued for generation within this epoch. Note this is a second source of inefficiency. Second, after each optimizer step the trainer version increments, and consumed prompts are marked done so they won't be sampled again this epoch.
+                The consumer is a standard training loop: pull samples, batch them, forward/backward, optimizer step. Only two things are different. First, samples are checked for <em>staleness</em>: if the trainer has moved too far ahead of the weights used for generation a particular sample, that sample is (lazily) evicted and its prompt is re-queued for generation within this epoch. Second, after each optimizer step the trainer version increments, and consumed prompts are marked done so they won't be sampled again this epoch. Training usually happens in micro-batches that depend on the samples sequence length.
             </p>
 
             <figure>
                 <img src="figures/consumer.png" alt="Consumer loop diagram">
             </figure>
+
+            <p>A wrinkle: moving data both the forward and backward must happen within the same call.
+
+
+            </p>
 
             <details class="code-details">
                 <summary>Consumer code (<code>train_grpo_minimal.py</code>)</summary>
@@ -196,10 +206,10 @@
 
             <h3>Weight sync</h3>
             <p>
-                This is how the trainer's updated weights get to the rollout engine and reference model. The main challenge is copying efficiently when the trainer and rollout models may have weights sharded differently—the trainer might use FSDP-style sharding across 8 GPUs while the rollout uses tensor parallelism across 2. Different packages handle this differently. For example, <a href="#">torchforge</a> uses a fast filesystem, while tlr has a double-buffer scheme...
+                This is how the trainer's updated weights get to the rollout engine and reference model. The main challenge is copying efficiently when the trainer and rollout models may have weights sharded differently—the trainer might use FSDP-style sharding across 8 GPUs while the rollout uses tensor parallelism across 2. Different packages handle this differently. For example, <a href="#">torchforge</a> is developing a fast filesystem (<a href="https://github.com/meta-pytorch/torchstore">torchstore</a>) to save and load weights efficiently.
             </p>
             <p>
-                Our strategy is to avoid disk entirely, relying on NCCL communication channels to broadcast weights directly between GPU memory. At initialization time, we create NCCL communicator groups (borrowing vLLM's StatelessProcessGroup class). This allows us to create overlapping "worlds" shared by each trainer-receiver pair.
+                Our strategy is to avoid disk entirely, relying on NCCL communication channels to broadcast weights directly between GPU memory. At initialization time, we create NCCL communicator groups (borrowing vLLM's StatelessProcessGroup class). This allows us to create overlapping "worlds" shared by each trainer-receiver pair. 
             </p>
             <ol>
                 <li>Pause the rollout engine: block new requests behind an asyncio Event, and either wait for in-flight requests to drain (default) or abort them.</li>
@@ -209,59 +219,23 @@
                 <li>Resume generation: set the Event, blocked workers continue.</li>
             </ol>
             <p>
-                With this strategy we complete the entire weight transfer for Qwen3-32B in 3 seconds (compare to torchforge which reportedly takes 52 seconds).
+                With this strategy we complete the entire weight transfer for Qwen3-32B in 4.9s seconds or under (or a total of 7.5s if including waiting time for rollout engines to abort). For comparison, torchforge [reportedly](https://github.com/meta-pytorch/torchforge/issues/626) takes about 58 seconds with torchstore enabled.
             </p>
 
-            <h3>Visualization</h3>
+            <h3>Visualization</h3> We keep optional but extensive tracing capabilities that track the evolution of average rewards, generation speed, trainer effective MFU, and other quantities useful for debugging.
 
-            <h3>Putting it together</h3>
 
-            <!-- EMBED: pipeline-animation -->
-            <details class="visualization-details">
-                <summary>Pipeline animation</summary>
-                <section class="visualization">
-                    <div class="controls">
-                        <button id="prev-btn" title="Previous step">&larr;</button>
-                        <input type="range" id="time-slider" min="0" max="100" value="0">
-                        <button id="next-btn" title="Next step">&rarr;</button>
-                        <span id="time-display">0.0s</span>
-                        <button id="play-btn" title="Play/Pause">&#9654;</button>
-                    </div>
+            <h3>Production-level run</h3> We tested a "production-level" run with Qwen3-32B (dense) using 2 nodes.... 
 
-                    <div class="graphs">
-                        <div class="graph-container">
-                            <h3>Pipeline Timeline</h3>
-                            <canvas id="timeline-canvas"></canvas>
-                        </div>
-
-                        <div class="graph-container">
-                            <h3>Buffer Dynamics</h3>
-                            <canvas id="buffer-canvas"></canvas>
-                        </div>
-
-                        <div class="graph-container">
-                            <h3>Sample Fates</h3>
-                            <canvas id="fates-canvas"></canvas>
-                        </div>
-                    </div>
-
-                    <div class="legend">
-                        <div class="legend-item"><span class="color-box" style="background: #3fb950;"></span> Generation</div>
-                        <div class="legend-item"><span class="color-box" style="background: #58a6ff;"></span> Reference</div>
-                        <div class="legend-item"><span class="color-box" style="background: #a371f7;"></span> Training</div>
-                        <div class="legend-item"><span class="color-box" style="background: #f0883e;"></span> Verifier</div>
-                        <div class="legend-item"><span class="color-box" style="background: #f85149;"></span> Sync Event</div>
-                    </div>
-                </section>
-            </details>
         </section>
 
         <section id="experiments">
             <h2>2. Basic experiment setup</h2>
             <p>
-                In this section, all experiments use one of two algorithm variants.
+            All experiments use <a href="https://huggingface.co/Qwen/Qwen3-1.7B-Base">Qwen3-1.7B-Base</a> as the initial model. We'll train this model on simple math tasks (GSM8k), instruction-following (IFBench), and code (MBPP/APPS).
             </p>
 
+            
             <p>For <a href="https://arxiv.org/abs/2503.20783">GRPO</a>, given a prompt $p$, we generate $G$ completions $o_{i}$ from the current model $\pi_{\theta}$, and compute:</p>
 
             $$
@@ -315,72 +289,98 @@
             </p>
 
             <p>
-                We keep a small penalty for divergence with respect to a frozen reference policy $\text{KL}(\pi_\theta \| \pi_{\text{ref}})$. This is implemented using the "<a href="http://joschu.net/blog/kl-approx.html">Schulman</a>" approximation to the forward divergence.
+                We keep a small penalty for divergence with respect to a frozen reference policy. This is implemented using the "<a href="http://joschu.net/blog/kl-approx.html">Schulman</a>" approximation to the forward divergence $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$.
             </p>
 
-            <!-- TODO: EMBED: table with hyperparameters -->
+            <p>
+To construct supervised fine-tuning targets, we apply rejection sampling fine-tuning (RFT; Yuan et al., 2023) from the base model itself. For each training problem, we sample 128 completions at temperature 1.0 and compute the per-problem pass rate. We retain only problems the model solves less than half the time and select one random correct completion per problem. Because the completions come from the base model rather than a stronger teacher, this is a form of self-distillation. When used as an auxiliary loss alongside GRPO or DAPO, the SFT term is weighted at 0.001.
+            </p>
 
-            <section id="staleness">
-                <h3>2.1 Staleness</h3>
-                <p>
-                    If we allow completions generated from earlier model versions to be used, we can reduce...
-                </p>
-                <p>
-                    After <span class="metric" data-run="dapo-lr5e6" data-key="total_steps"></span> steps, the strict on-policy run (<code>max_staleness=0</code>) achieves a final reward of <span class="metric" data-run="dapo-lr5e6" data-key="final_reward"></span>, while allowing one step of staleness (<code>max_staleness=1</code>) reaches <span class="metric" data-run="dapo-stale1" data-key="final_reward"></span> over <span class="metric" data-run="dapo-stale1" data-key="total_steps"></span> steps.
-                </p>
-
-
-
-            </section>
+            <p>
+                We have not experimented with adding an entropy bonus or other forms of reward shaping (e.g. length-based rewards).
+            </p>
 
             <section id="gsm8k">
                 <h3>2.2 GSM8K results</h3>
                 <p>
-                    We train on the GSM8K training set (7,473 problems) and evaluate on the test set (1,319 problems).
-                    All runs use Qwen3-1.7B-Base, group size $G=16$, and 2 epochs (300 steps). We ablate algorithm
+                    We train on the GSM8K training set (n=7473).
+                    All runs use Qwen3-1.7B-Base, group size $G=8$, and 200 steps. We ablate algorithm
                     (DAPO vs GRPO), auxiliary SFT loss, learning rate, and max staleness.
+                </p>
+                <p>
+
+                </p>
+                <p>
+                    We have: (a) ablations under GSM8k -- GRPO vs DAPO, either vs SFT, staleness vs not.  Let's ignore staleness for now. The results there, as far as I can see, are: GRPO and DAPO when lr=1e-5 have the best results on GSM8k, however both see a decrease in MATH ability, and the decrease is much more pronounced for DAPO. However, DAPO+SFT maintains a high GSM8k score but also maintains MATH, the same is true for GRPO+SFT. For lre5-6, within the 200 step budget we still see a moderate increase in GSM8k ability, without a corresponding drop in MATH; there, the effect of an additional SFT boost is nothing. (b) We're missing a true "SFT only" run, the results presented there are not correct. It's also strange tha even when SFT is there, the SFT loss seems to be going *up*. (c) It's somewhat well documented that, for some models like Qwen2.5-xx-MATH, the pass-at-k does not increase with GRPO only for sufficiently large k. We see the same results here, and this is true regardless of SFT (d) For the ablation that ran so far, Staleness=0 vs Staleness > 0 seems to produce essentially the same results. Staleness=1 is particularly attractive because it means we can raise the MFU slightly for ~free.
+                </p>
+                <p>
+                <ul>
+                    <li>
+                        GRPO vs DAPO: For a given set of hyperparameters, both perform very similarly. With the more aggressive learning rate lr=1e-5, rewards increase faster during training and achieve our best results on the GSM8k test set. However, MATH ability degrades, in particular for DAPO. Also, entropy decreases more rapidly with a higher learning rate, but generic performance as measured by MMLU remains essentially unchanged.</li>
+                    <li>
+                        Adding SFT: The effect of the auxiliary reward is somewhat ambiguous. For the more aggresive learning rate 1e-5, it mitigates some of the loss in MATH performance, in particular for DAPO. However for the slower learning rate 5e-6 it results in a further decrease in MATH performance. Perhaps it works as a regularizer for more aggressive learning rates, preventing it from overfitting on GSM8k. It does not prevent fast entropy decay in either case.
+                    </li>
+                    <li>
+                        Pass@k: There have been several papers noting that performance in math capability, as measured by pass@k for some large k, doesn't improve with RVLR; see e.g., <a href="https://arxiv.org/pdf/2504.13837">Yue, Chen et al, 2015</a>. This would suggest that RLVR isn't well-suited for forcing a base model to learn new skills, only to reinforce those that it already has -- the "elicitation" theory. We also observe this here, as pass@128 seems to match the base model for both GSM8k and MATH for all model variations (see graph below). This may be a quirk of the Qwen family of models, as described <a href="https://www.interconnects.ai/p/reinforcement-learning-with-random">here</a>.
+                    </li>
+                    <li>
+                        Staleness: In case generation is fast relative to training, our system allows for using older samples -- this can be done by simply not evicting samples older than a certain value of max_staleness. Since our weight sync mechanism is quite fast even for relatively sizable models.
+                    </li>
+                </ul>
                 </p>
 
                 <!-- GSM8K interactive plots -->
                 <div class="experiment-plots">
                     <div id="gsm8k-preset-buttons" class="preset-buttons"></div>
                     <div id="gsm8k-run-legend" class="run-legend"></div>
+                    <div id="gsm8k-preset-explanation" class="preset-explanation"></div>
 
                     <h4>Rewards</h4>
-                    <div class="plot-row">
+                    <div class="plot-row plot-row-2x2">
                         <div class="plot-container" id="gsm8k-plot-reward"></div>
-                        <div class="plot-container" id="gsm8k-plot-allcorr-allwrong"></div>
                         <div class="plot-container" id="gsm8k-plot-completion-len"></div>
+                        <div class="plot-container" id="gsm8k-plot-allcorr"></div>
+                        <div class="plot-container" id="gsm8k-plot-allwrong"></div>
                     </div>
 
                     <h4>Training Dynamics</h4>
-                    <div class="plot-row">
+                    <div class="plot-row plot-row-2x2">
                         <div class="plot-container" id="gsm8k-plot-loss-grpo"></div>
                         <div class="plot-container" id="gsm8k-plot-loss-sft"></div>
                         <div class="plot-container" id="gsm8k-plot-kl"></div>
                         <div class="plot-container" id="gsm8k-plot-entropy"></div>
                     </div>
-
-                    <h4>Evaluation</h4>
-                    <div class="plot-row">
-                        <div class="plot-container" id="gsm8k-plot-eval-gsm8k"></div>
-                        <div class="plot-container" id="gsm8k-plot-eval-math"></div>
-                    </div>
-
-                    <h4>Pass@k (step 200)</h4>
-                    <div class="plot-row">
-                        <div class="plot-container" id="gsm8k-plot-passk-gsm8k"></div>
-                        <div class="plot-container" id="gsm8k-plot-passk-math"></div>
-                        <div class="plot-container" id="gsm8k-plot-passk-aime"></div>
-                        <div class="plot-container" id="gsm8k-plot-passk-beyondaime"></div>
-                    </div>
-
-                    <div id="gsm8k-preset-explanation" class="preset-explanation"></div>
                 </div>
 
                 <!-- GSM8K comparison table (auto-generated) -->
                 <div id="gsm8k-comparison-table" class="results-table-container"></div>
 
+                <p> We computed pass@k curves show the probability that at least one of $k$ independent samples solves the problem, estimated from 128 completions per problem at temperature 1.0.
+                </p>
+                <p>
+                    It's somewhat well documented that, for some models like Qwen2.5-xx-MATH, the pass-at-k does not increase with GRPO only for sufficiently large k. We see the same results here, and this is true regardless of SFT
+                </p>
+
+                <div class="experiment-plots">
+                    <h4>Pass@k (step 200)</h4>
+                    <div class="plot-row plot-row-2x2">
+                        <div class="plot-container" id="gsm8k-plot-passk-gsm8k"></div>
+                        <div class="plot-container" id="gsm8k-plot-passk-math"></div>
+                        <div class="plot-container" id="gsm8k-plot-passk-aime"></div>
+                        <div class="plot-container" id="gsm8k-plot-passk-beyondaime"></div>
+                    </div>
+                </div>
+
+
+            <section id="staleness">
+                <h3>Staleness</h3>
+                <p>
+                    If we allow completions generated from earlier model versions to be used, we can reduce...
+                </p>
+                <p>
+                    After <span class="metric" data-run="dapo-lr5e6" data-key="total_steps"></span> steps, the strict on-policy run (<code>max_staleness=0</code>) achieves a final reward of <span class="metric" data-run="dapo-lr5e6" data-key="final_reward"></span>, while allowing one step of staleness (<code>max_staleness=1</code>) reaches <span class="metric" data-run="dapo-stale1" data-key="final_reward"></span> over <span class="metric" data-run="dapo-stale1" data-key="total_steps"></span> steps.
+                </p>
+            </section>
 
             </section>
 
@@ -401,7 +401,8 @@
                     <h4>Rewards</h4>
                     <div class="plot-row">
                         <div class="plot-container" id="ifeval-plot-reward"></div>
-                        <div class="plot-container" id="ifeval-plot-allcorr-allwrong"></div>
+                        <div class="plot-container" id="ifeval-plot-allcorr"></div>
+                        <div class="plot-container" id="ifeval-plot-allwrong"></div>
                         <div class="plot-container" id="ifeval-plot-completion-len"></div>
                     </div>
 
@@ -419,6 +420,12 @@
                         <div class="plot-container" id="ifeval-plot-eval-gsm8k"></div>
                     </div>
 
+                    <h4>Pass@k (step 200)</h4>
+                    <div class="plot-row">
+                        <div class="plot-container" id="ifeval-plot-passk-ifeval"></div>
+                        <div class="plot-container" id="ifeval-plot-passk-ifbench"></div>
+                    </div>
+
                     <div id="ifeval-preset-explanation" class="preset-explanation"></div>
                 </div>
 
@@ -429,6 +436,7 @@
 
         <section id="code">
             <h3>2.3 Code</h3>
+
         </section>
 
         <section id="going-further">
@@ -456,6 +464,8 @@
             <section id="notes">
                 <h3>Notes</h3>
                 <ol>
+                    <li>Using a base model. We train from a base (pretrained-only) checkpoint to isolate the effect of our RL procedure from any prior alignment. Qwen3-1.7B-Base sits comfortably mid-range on all benchmarks of interest (55-60% GSM8k/MATH, 15-25% IFEval, 20-55% code), leaving headroom for improvement while remaining sensitive to degradation. In a production setting one would first distill chain-of-thought traces from a stronger model before applying RL (<a href="https://arxiv.org/pdf/2501.12948"></a>DeepSeek-R1</a> or <a href="https://arxiv.org/pdf/2203.14465">STaR</a>). </li>
+                    <li>Formatting: </li>
                     <li>MFU</li>
                     <li>Kernels: LIGER kernel probably faster than TP=2</li>
                     <li>KL divergence: we use the Schulman "k3" estimator: given $r = \log(\pi_{\text{ref}} / \pi_\theta)$, the quantity $\exp(r) - r - 1$ is an unbiased estimator of $\text{KL}(\pi_\theta \| \pi_{\text{ref}})$, the "forward" KL (policy w.r.t. reference). This penalizes the policy for placing probability mass where the reference does not, which is the standard choice in RLHF/GRPO &mdash; it discourages the policy from straying too far from the reference in a mode-seeking direction.</li>

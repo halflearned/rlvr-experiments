@@ -121,7 +121,7 @@ def main():
         weight_decay=0.01,
         warmup_steps=10,
         logging_steps=1,
-        save_strategy="no",
+        save_strategy="epoch",
         fp16=args.fp16 and not args.bf16,
         bf16=args.bf16,
         gradient_checkpointing=True,
@@ -140,7 +140,13 @@ def main():
     print(f"\nStarting training: lr={args.lr}, batch={args.batch_size}x{args.grad_accum}, max_len={args.max_len}")
     print(f"Dataset: {len(dataset)} examples, epochs={training_args.num_train_epochs}")
     trainer.train()
-    print("\nDone!")
+
+    # Save final model
+    final_dir = os.path.join(args.output_dir, "final")
+    print(f"\nSaving final model to {final_dir}")
+    trainer.save_model(final_dir)
+    tokenizer.save_pretrained(final_dir)
+    print("Done!")
 
 
 if __name__ == "__main__":

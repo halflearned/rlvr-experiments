@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclasses_field
 from datetime import datetime
 from typing import Any, Dict
 
@@ -64,6 +64,7 @@ class Runtime:
     run_name: str = ""                  # run folder name (config + timestamp)
     run_dir: str = ""                   # absolute path to run folder
     run_timestamp: str = ""             # unique timestamp for this run (YYYYMMDD_HHMMSS)
+    _gpus_used_on_node: Dict[str, int] = dataclasses_field(default_factory=dict)
 
     @property
     def tracer(self):
@@ -287,6 +288,13 @@ class Runtime:
         # Spawn Titan roles in parallel
         if titan_roles:
             await asyncio.gather(*[self.spawn_role(name) for name in titan_roles])
+            # Track Titan GPU usage for node placement of vLLM roles
+            for name in titan_roles:
+                role = self.plan.roles[name]
+                # Titan actors request num_gpus=1 each; Ray places them greedily.
+                # Approximate: all ranks land on the same node (true for single-node TP).
+                # Use head node as best guess; Ray packs there first.
+                self._gpus_used_on_node[self.host] = self._gpus_used_on_node.get(self.host, 0) + role.world_size
 
         # Spawn vLLM roles after Titan has claimed its GPUs
         for name in vllm_roles:
@@ -301,28 +309,30 @@ class Runtime:
 
     def _find_node_with_free_gpus(self, min_gpus: int) -> str | None:
         """
-        Find a node with at least min_gpus available GPUs.
+        Find a node with at least min_gpus *available* GPUs.
+        Uses internal bookkeeping (_gpus_used_on_node) to track allocations
+        since ray.nodes() only reports total resources, not available.
         Prefers head node to pack GPUs together and minimize cross-node communication.
         """
-        head_ip = self.host  # Head node IP
+        head_ip = self.host
         candidates = []
 
         for node in ray.nodes():
             if not node.get("Alive", False):
                 continue
             node_ip = node.get("NodeManagerAddress")
-            resources = node.get("Resources", {})
-            total_gpu = resources.get("GPU", 0)
-            if total_gpu >= min_gpus:
-                # Prefer head node to pack GPUs together
+            total_gpu = node.get("Resources", {}).get("GPU", 0)
+            already_used = self._gpus_used_on_node.get(node_ip, 0)
+            free_gpu = total_gpu - already_used
+            if free_gpu >= min_gpus:
                 is_head = (node_ip == head_ip)
-                candidates.append((not is_head, node_ip))  # False sorts before True
+                candidates.append((not is_head, free_gpu, node_ip))
 
-        # Sort so head node comes first
-        candidates.sort(key=lambda x: x[0])
+        # Sort: prefer head node first, then most free GPUs
+        candidates.sort(key=lambda x: (x[0], -x[1]))
 
         if candidates:
-            return candidates[0][1]
+            return candidates[0][2]
         return None
 
     async def spawn_role(self, name: str) -> None:
@@ -363,6 +373,8 @@ class Runtime:
                 scheduling_opts = {"num_gpus": 0}
                 if target_node:
                     scheduling_opts["resources"] = {f"node:{target_node}": 0.001}
+                    # Track GPU usage for subsequent placement decisions
+                    self._gpus_used_on_node[target_node] = self._gpus_used_on_node.get(target_node, 0) + tp_size
                     print(f"[runtime] scheduling vllm role={name} replica={replica_id} on node {target_node}")
 
                 actor = VLLMEngineRank.options(**scheduling_opts).remote(

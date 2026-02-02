@@ -7,6 +7,13 @@ Provides NCCL-based weight transfer between:
 
 import asyncio
 import logging
+import os
+
+# Force NCCL to use TCP sockets for cross-node communication.
+# Without this, the AWS OFI NCCL plugin tries EFA and crashes on non-EFA instances.
+os.environ["NCCL_NET"] = "Socket"
+os.environ["NCCL_SOCKET_IFNAME"] = "ens32"
+os.environ["NCCL_NET_PLUGIN"] = ""
 
 import ray
 import torch
