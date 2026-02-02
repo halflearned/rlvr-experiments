@@ -2627,11 +2627,7 @@ const ifevalData = {
         0.027289342135190964,
         0.10021079331636429,
         0.04544162005186081
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.390, 0.506, 0.610, 0.688, 0.752, 0.817, 0.852, 0.893],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.157, 0.237, 0.283, 0.417, 0.493, 0.603, 0.690, 0.733]
+      ]
     },
     {
       "id": "dapo",
@@ -4656,11 +4652,7 @@ const ifevalData = {
         1.07682204246521,
         0.3612271547317505,
         1.1510210037231445
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.316, 0.427, 0.516, 0.627, 0.721, 0.789, 0.830, 0.872],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.133, 0.180, 0.257, 0.333, 0.400, 0.487, 0.570, 0.627]
+      ]
     },
     {
       "id": "dapo-sft",
@@ -6685,11 +6677,7 @@ const ifevalData = {
         0.7731119394302368,
         0.3394756317138672,
         0.11793757230043411
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.322, 0.418, 0.534, 0.630, 0.723, 0.787, 0.830, 0.874],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.137, 0.193, 0.253, 0.340, 0.400, 0.500, 0.580, 0.630]
+      ]
     },
     {
       "id": "grpo-sft",
@@ -8714,11 +8702,7 @@ const ifevalData = {
         0.22347892820835114,
         0.022368617355823517,
         0.018252797424793243
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.477, 0.595, 0.680, 0.749, 0.808, 0.839, 0.865, 0.885],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.213, 0.313, 0.377, 0.483, 0.543, 0.653, 0.717, 0.757]
+      ]
     },
     {
       "id": "sm-lr1e5-beta1e4",
@@ -12743,11 +12727,7 @@ const ifevalData = {
         0.3434400260448456,
         0.17420949041843414,
         0.31497687101364136
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.493, 0.582, 0.660, 0.723, 0.778, 0.815, 0.835, 0.867],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.263, 0.323, 0.417, 0.497, 0.567, 0.637, 0.687, 0.720]
+      ]
     },
     {
       "id": "sm-lr1e5-beta1e3",
@@ -16772,11 +16752,7 @@ const ifevalData = {
         0.36990252137184143,
         0.22046314179897308,
         0.35864514112472534
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.388, 0.529, 0.630, 0.732, 0.791, 0.843, 0.884, 0.904],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.163, 0.267, 0.360, 0.453, 0.520, 0.627, 0.690, 0.750]
+      ]
     },
     {
       "id": "sm-lr75e5-beta1e4",
@@ -19401,11 +19377,7 @@ const ifevalData = {
         0.02855396270751953,
         0.009960337541997433,
         0.01755860075354576
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.309, 0.379, 0.447, 0.518, 0.590, 0.632, 0.689, 0.743],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.210, 0.257, 0.313, 0.383, 0.443, 0.490, 0.553, 0.593]
+      ]
     },
     {
       "id": "sm-lr75e5-beta1e3",
@@ -22130,11 +22102,7 @@ const ifevalData = {
         0.011821798980236053,
         0.027403704822063446,
         0.028034590184688568
-      ],
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.266, 0.353, 0.436, 0.499, 0.555, 0.597, 0.643, 0.680],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.223, 0.283, 0.340, 0.383, 0.417, 0.490, 0.533, 0.587]
+      ]
     },
     {
       "id": "sm-dapo-sft-lr1e5-beta1e4",
@@ -28264,11 +28232,7 @@ const ifevalData = {
           "accuracy": 0.5948582822959693,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.390, 0.506, 0.610, 0.688, 0.752, 0.817, 0.852, 0.893],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.157, 0.237, 0.283, 0.417, 0.493, 0.603, 0.690, 0.733]
+      }
     },
     "dapo": {
       "id": "dapo",
@@ -28320,11 +28284,7 @@ const ifevalData = {
           "accuracy": 0.5977780942885629,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.316, 0.427, 0.516, 0.627, 0.721, 0.789, 0.830, 0.872],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.133, 0.180, 0.257, 0.333, 0.400, 0.487, 0.570, 0.627]
+      }
     },
     "dapo-sft": {
       "id": "dapo-sft",
@@ -28376,11 +28336,7 @@ const ifevalData = {
           "accuracy": 0.5941461330294829,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.322, 0.418, 0.534, 0.630, 0.723, 0.787, 0.830, 0.874],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.137, 0.193, 0.253, 0.340, 0.400, 0.500, 0.580, 0.630]
+      }
     },
     "grpo-sft": {
       "id": "grpo-sft",
@@ -28432,11 +28388,7 @@ const ifevalData = {
           "accuracy": 0.5881640791909984,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.477, 0.595, 0.680, 0.749, 0.808, 0.839, 0.865, 0.885],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.213, 0.313, 0.377, 0.483, 0.543, 0.653, 0.717, 0.757]
+      }
     },
     "sm-lr1e5-beta1e4": {
       "id": "sm-lr1e5-beta1e4",
@@ -28480,11 +28432,7 @@ const ifevalData = {
           "accuracy": 0.584816977638513,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.493, 0.582, 0.660, 0.723, 0.778, 0.815, 0.835, 0.867],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.263, 0.323, 0.417, 0.497, 0.567, 0.637, 0.687, 0.720]
+      }
     },
     "sm-lr1e5-beta1e3": {
       "id": "sm-lr1e5-beta1e3",
@@ -28528,11 +28476,7 @@ const ifevalData = {
           "accuracy": 0.5979205241418601,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.388, 0.529, 0.630, 0.732, 0.791, 0.843, 0.884, 0.904],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.163, 0.267, 0.360, 0.453, 0.520, 0.627, 0.690, 0.750]
+      }
     },
     "sm-lr75e5-beta1e4": {
       "id": "sm-lr75e5-beta1e4",
@@ -28576,11 +28520,7 @@ const ifevalData = {
           "accuracy": 0.5366756872240421,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.309, 0.379, 0.447, 0.518, 0.590, 0.632, 0.689, 0.743],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.210, 0.257, 0.313, 0.383, 0.443, 0.490, 0.553, 0.593]
+      }
     },
     "sm-lr75e5-beta1e3": {
       "id": "sm-lr75e5-beta1e3",
@@ -28624,11 +28564,7 @@ const ifevalData = {
           "accuracy": 0.585386697051702,
           "step": null
         }
-      },
-      "passk_ifeval_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifeval_pass128_rate": [0.266, 0.353, 0.436, 0.499, 0.555, 0.597, 0.643, 0.680],
-      "passk_ifbench_test_pass128_k": [1, 2, 4, 8, 16, 32, 64, 128],
-      "passk_ifbench_test_pass128_rate": [0.223, 0.283, 0.340, 0.383, 0.417, 0.490, 0.533, 0.587]
+      }
     },
     "sm-dapo-sft-lr1e5-beta1e4": {
       "id": "sm-dapo-sft-lr1e5-beta1e4",
@@ -28854,6 +28790,28 @@ const ifevalData = {
           0.65
         ]
       },
+      "ifeval_pass128": {
+        "k": [
+          1,
+          2,
+          4,
+          8,
+          16,
+          32,
+          64,
+          128
+        ],
+        "rate": [
+          0.24953789279112754,
+          0.3512014787430684,
+          0.43068391866913125,
+          0.5360443622920518,
+          0.6358595194085028,
+          0.7005545286506469,
+          0.7541589648798521,
+          0.8096118299445472
+        ]
+      },
       "math_pass128": {
         "k": [
           1,
@@ -28875,10 +28833,6 @@ const ifevalData = {
           0.8918666666666667,
           0.9196
         ]
-      },
-      "ifeval_pass128": {
-        "k": [1, 2, 4, 8, 16, 32, 64, 128],
-        "rate": [0.2495, 0.3512, 0.4307, 0.5360, 0.6359, 0.7006, 0.7542, 0.8096]
       }
     }
   },
@@ -29006,7 +28960,7 @@ function ifevalGenerateTable() {
     html += '<thead><tr><th>Benchmark (step 200)</th>';
     if (baseModel) html += `<th style="color:#999">${baseModel.label}</th>`;
     runs.forEach(run => {
-        html += `<th style="color: ${run.color}">${run.label}</th>`;
+        html += `<th data-run-id="${run.id}" style="color: ${run.color}">${run.label}</th>`;
     });
     html += '</tr></thead><tbody>';
 
@@ -29022,9 +28976,9 @@ function ifevalGenerateTable() {
             const s = summaries[run.id];
             const bdata = s && s.benchmarks && s.benchmarks[bench];
             if (bdata && bdata.accuracy !== null && bdata.accuracy !== undefined) {
-                html += `<td>${d3.format('.1%')(bdata.accuracy)}</td>`;
+                html += `<td data-run-id="${run.id}">${d3.format('.1%')(bdata.accuracy)}</td>`;
             } else {
-                html += '<td>&mdash;</td>';
+                html += `<td data-run-id="${run.id}">&mdash;</td>`;
             }
         });
         html += '</tr>';
@@ -29073,6 +29027,24 @@ function ifevalBuildPresets() {
         btn.addEventListener('click', () => ifevalActivatePreset(preset.id));
         container.appendChild(btn);
     });
+
+    // "Clear all" button
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear all';
+    clearBtn.addEventListener('click', () => {
+        document.querySelectorAll('#ifeval-preset-buttons button').forEach(b => b.classList.remove('active'));
+        clearBtn.classList.add('active');
+        ifevalVisible.clear();
+        document.querySelectorAll('#ifeval-run-legend label').forEach(label => {
+            const cb = label.querySelector('input');
+            cb.checked = false;
+            label.classList.add('unchecked');
+        });
+        const explEl = document.getElementById('ifeval-preset-explanation');
+        if (explEl) explEl.textContent = '';
+        ifevalRedraw();
+    });
+    container.appendChild(clearBtn);
 }
 
 function ifevalBuildLegend() {
@@ -29162,9 +29134,16 @@ const ifevalPassKConfigs = [
     { id: 'ifeval-plot-passk-math', title: 'MATH Pass@k', kKey: 'passk_math_pass128_k', rateKey: 'passk_math_pass128_rate', format: '.1%' },
     { id: 'ifeval-plot-passk-aime', title: 'AIME Pass@k', kKey: 'passk_aime_pass32_k', rateKey: 'passk_aime_pass32_rate', format: '.1%' },
     { id: 'ifeval-plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' },
-    { id: 'ifeval-plot-passk-ifeval', title: 'IFEval Pass@k', kKey: 'passk_ifeval_pass128_k', rateKey: 'passk_ifeval_pass128_rate', format: '.1%' },
-    { id: 'ifeval-plot-passk-ifbench', title: 'IFBench Pass@k', kKey: 'passk_ifbench_test_pass128_k', rateKey: 'passk_ifbench_test_pass128_rate', format: '.1%' },
 ];
+
+function ifevalUpdateTableHighlight() {
+    const table = document.querySelector('#ifeval-comparison-table table');
+    if (!table) return;
+    table.querySelectorAll('[data-run-id]').forEach(cell => {
+        cell.classList.toggle('col-selected', ifevalVisible.has(cell.dataset.runId));
+        cell.classList.toggle('col-dimmed', !ifevalVisible.has(cell.dataset.runId));
+    });
+}
 
 function ifevalRedraw() {
     ifevalPlotConfigs.forEach(config => {
@@ -29177,6 +29156,7 @@ function ifevalRedraw() {
         if (!container) return;
         ifevalDrawPassKPlot(container, ifevalData.runs, config, ifevalVisible);
     });
+    ifevalUpdateTableHighlight();
 }
 
 function ifevalDrawPlot(container, runs, config, highlightedSet) {

@@ -370,23 +370,13 @@
                 </div>
 
 
-            <section id="staleness">
-                <h3>Staleness</h3>
-                <p>
-                    If we allow completions generated from earlier model versions to be used, we can reduce...
-                </p>
-                <p>
-                    After <span class="metric" data-run="dapo-lr5e6" data-key="total_steps"></span> steps, the strict on-policy run (<code>max_staleness=0</code>) achieves a final reward of <span class="metric" data-run="dapo-lr5e6" data-key="final_reward"></span>, while allowing one step of staleness (<code>max_staleness=1</code>) reaches <span class="metric" data-run="dapo-stale1" data-key="final_reward"></span> over <span class="metric" data-run="dapo-stale1" data-key="total_steps"></span> steps.
-                </p>
-            </section>
-
             </section>
 
             <section id="instruction-following">
                 <h3>2.3 Instruction-following results</h3>
                 <p>
                     We train on IFEval-multi-constraints (up to 5 constraints per prompt) and evaluate on
-                    <a href="https://github.com/google-research/google-research/tree/master/instruction_following_eval">IFEval</a>
+                    <a href="https://huggingface.co/datasets/google/IFEval">IFEval</a>
                     and <a href="https://huggingface.co/datasets/allenai/IFBench_test">IFBench_test</a>.
                     All runs use Qwen3-1.7B-Base, group size $G=16$, and 200 steps.
                 </p>
@@ -410,12 +400,6 @@
                         <div class="plot-container" id="ifeval-plot-loss-sft"></div>
                         <div class="plot-container" id="ifeval-plot-kl"></div>
                         <div class="plot-container" id="ifeval-plot-entropy"></div>
-                    </div>
-
-                    <h4>Evaluation</h4>
-                    <div class="plot-row plot-row-2x2">
-                        <div class="plot-container" id="ifeval-plot-eval-ifeval"></div>
-                        <div class="plot-container" id="ifeval-plot-eval-ifbench_test"></div>
                     </div>
 
                     <h4>Pass@k (step 200)</h4>
