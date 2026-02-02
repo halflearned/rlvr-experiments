@@ -89,8 +89,8 @@ DATASET_REGISTRY = {
     },
     "ifeval": {
         "loader": "load_ifeval",
-        "verifier": "IFEvalVerifier",
-        "verifier_module": "rlvr_experiments.verifiers.ifeval",
+        "verifier": "IFMultiConstraintsVerifier",
+        "verifier_module": "rlvr_experiments.verifiers.if_multi_constraints",
         "answer_key": "ground_truth",
     },
     "if_multi_constraints": {
@@ -294,6 +294,72 @@ def _load_hf_beyondaime(split: str) -> list[dict]:
     return results
 
 
+def _load_hf_ifeval(split: str) -> list[dict]:
+    """Load Google IFEval (541 prompts) without Ray.
+
+    Uses google/IFEval (the eval benchmark), NOT allenai/RLVR-IFeval (14973 training prompts).
+    """
+    from datasets import load_dataset as hf_load_dataset
+    import json as _json
+
+    hf_dataset = hf_load_dataset("google/IFEval", split="train")
+    items = list(hf_dataset)
+    print(f"[load_ifeval] Loaded {len(items)} prompts from google/IFEval")
+
+    results = []
+    for i, row in enumerate(items):
+        prompt = row["prompt"]
+        # Parse instruction_id_list and kwargs from the row
+        instruction_id_list = row.get("instruction_id_list", [])
+        kwargs_raw = row.get("kwargs", [])
+        # kwargs may be JSON strings or dicts
+        kwargs = []
+        for k in kwargs_raw:
+            if isinstance(k, str):
+                kwargs.append(_json.loads(k))
+            else:
+                kwargs.append(k)
+
+        prompt_id = f"ifeval_{i}"
+        # Build ground_truth in the format IFMultiConstraintsVerifier expects
+        ground_truth = [{"instruction_id": instruction_id_list, "kwargs": kwargs}]
+        results.append({
+            "prompt": prompt,
+            "problem": {
+                "prompt_id": prompt_id,
+                "instruction_id_list": instruction_id_list,
+                "kwargs": kwargs,
+                "ground_truth": ground_truth,
+                "verifier_type": "ifeval",
+                "dataset_name": "ifeval",
+            },
+        })
+    return results
+
+
+def _load_hf_ifbench(split: str) -> list[dict]:
+    """Load IFBench without Ray."""
+    from datasets import load_dataset as hf_load_dataset
+
+    hf_dataset = hf_load_dataset("allenai/IFBench_test", split="train")
+    items = list(hf_dataset)
+
+    results = []
+    for i, row in enumerate(items):
+        prompt_id = f"ifbench_{i}"
+        results.append({
+            "prompt": row["prompt"],
+            "problem": {
+                "prompt_id": prompt_id,
+                "instruction_id_list": row.get("instruction_id_list", []),
+                "kwargs": row.get("kwargs", []),
+                "verifier_type": "ifbench",
+                "dataset_name": "ifbench",
+            },
+        })
+    return results
+
+
 def _load_dataset_items_no_ray(dataset_name: str, split: str, **loader_kwargs) -> list[dict]:
     """Dispatch to Ray-free loaders for known datasets, fall back to Ray for others."""
     if dataset_name == "gsm8k":
@@ -304,6 +370,10 @@ def _load_dataset_items_no_ray(dataset_name: str, split: str, **loader_kwargs) -
         return _load_hf_aime(split)
     elif dataset_name == "beyondaime":
         return _load_hf_beyondaime(split)
+    elif dataset_name == "ifeval":
+        return _load_hf_ifeval(split)
+    elif dataset_name == "ifbench":
+        return _load_hf_ifbench(split)
     else:
         # Fall back to Ray-based loader for other datasets
         from rlvr_experiments import data
@@ -349,7 +419,10 @@ async def verify_completions_batch(
         result = await verifier.verify_completions(problem, completions)
         # CodeVerifier returns (scores, durations_ms) tuple; extract just scores
         if isinstance(result, tuple):
-            return result[0]
+            result = result[0]
+        # For ifeval/ifbench: binarize scores (1.0 only if ALL constraints pass)
+        if dataset_name in ("ifeval", "ifbench"):
+            result = [1.0 if s >= 1.0 else 0.0 for s in result]
         return result
 
     # Fall back to individual verification

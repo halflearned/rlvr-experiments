@@ -205,6 +205,9 @@ class TitanModel(torch.distributed.checkpoint.stateful.Stateful):
         _, self._num_flops_per_token = self.model_args.get_nparams_and_flops(
             self.model_parts[0], job_config.training.seq_len
         )
+        # With TP, DTensor's .numel() returns full logical sizes, so num_flops_per_token
+        # is for the entire model. Divide by TP degree to get per-GPU FLOPs.
+        self._num_flops_per_token /= self.parallel_dims.tp
         self._gpu_peak_flops = utils.get_peak_flops(torch.cuda.get_device_name(self.device))
         self._metrics_log_freq = job_config.metrics.log_freq
         self._ntokens_since_last_log = 0

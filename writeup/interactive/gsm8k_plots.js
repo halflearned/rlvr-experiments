@@ -2580,6 +2580,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5959265061956986
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.022222222222222223,
+        0.03333333333333333,
+        0.044444444444444446,
+        0.07777777777777778,
+        0.07777777777777778,
+        0.13333333333333333,
+        0.17777777777777778,
+        0.2222222222222222
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -2595,6 +2615,26 @@ const gsm8kData = {
         0.08406695948965139,
         0.12232466204173897,
         0.17777777777777778
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.0,
+        0.0,
+        0.01,
+        0.02,
+        0.05,
+        0.1,
+        0.15,
+        0.2
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -5751,6 +5791,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5972795898020226
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.011111111111111112,
+        0.03333333333333333,
+        0.03333333333333333,
+        0.05555555555555555,
+        0.12222222222222222,
+        0.13333333333333333,
+        0.2222222222222222,
+        0.32222222222222224
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -5766,6 +5826,26 @@ const gsm8kData = {
         0.07137313063898158,
         0.11104931401568062,
         0.17777777777777778
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.0,
+        0.0,
+        0.0,
+        0.01,
+        0.03,
+        0.1,
+        0.14,
+        0.23
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -8082,6 +8162,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5878080045577553
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.03333333333333333,
+        0.044444444444444446,
+        0.05555555555555555,
+        0.06666666666666667,
+        0.07777777777777778,
+        0.14444444444444443,
+        0.17777777777777778,
+        0.3
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -8097,6 +8197,26 @@ const gsm8kData = {
         0.07139107396949444,
         0.10177714010378322,
         0.14444444444444443
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.01,
+        0.02,
+        0.02,
+        0.03,
+        0.05,
+        0.1,
+        0.15,
+        0.21
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -11233,6 +11353,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5992023928215354
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.011111111111111112,
+        0.03333333333333333,
+        0.06666666666666667,
+        0.08888888888888889,
+        0.1111111111111111,
+        0.17777777777777778,
+        0.2222222222222222,
+        0.34444444444444444
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -11248,6 +11388,26 @@ const gsm8kData = {
         0.08022273455680945,
         0.12039179020814689,
         0.18888888888888888
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.02,
+        0.03,
+        0.04,
+        0.04,
+        0.06,
+        0.12,
+        0.16,
+        0.25
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -13424,6 +13584,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.596994730095428
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.022222222222222223,
+        0.022222222222222223,
+        0.044444444444444446,
+        0.06666666666666667,
+        0.1,
+        0.16666666666666666,
+        0.23333333333333334,
+        0.3111111111111111
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -13439,6 +13619,26 @@ const gsm8kData = {
         0.07998319859461868,
         0.11136996615193,
         0.15555555555555556
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.0,
+        0.0,
+        0.02,
+        0.03,
+        0.06,
+        0.11,
+        0.13,
+        0.24
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -16575,6 +16775,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5953567867825096
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.022222222222222223,
+        0.044444444444444446,
+        0.05555555555555555,
+        0.07777777777777778,
+        0.1,
+        0.15555555555555556,
+        0.23333333333333334,
+        0.34444444444444444
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -16590,6 +16810,26 @@ const gsm8kData = {
         0.06846221453192161,
         0.09571806060750043,
         0.13333333333333333
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.02,
+        0.02,
+        0.03,
+        0.04,
+        0.07,
+        0.09,
+        0.17,
+        0.25
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -19726,6 +19966,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5870246403646204
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.011111111111111112,
+        0.044444444444444446,
+        0.06666666666666667,
+        0.08888888888888889,
+        0.1,
+        0.12222222222222222,
+        0.17777777777777778,
+        0.23333333333333334
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -19741,6 +20001,26 @@ const gsm8kData = {
         0.08290132435849899,
         0.11478801534905061,
         0.15555555555555556
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.01,
+        0.02,
+        0.03,
+        0.05,
+        0.07,
+        0.09,
+        0.19,
+        0.25
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -22877,6 +23157,26 @@ const gsm8kData = {
       "eval_mmlu_accuracy": [
         0.5940037031761858
       ],
+      "passk_aime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_aime_pass128_rate": [
+        0.011111111111111112,
+        0.03333333333333333,
+        0.05555555555555555,
+        0.06666666666666667,
+        0.07777777777777778,
+        0.1111111111111111,
+        0.18888888888888888,
+        0.28888888888888886
+      ],
       "passk_aime_pass32_k": [
         1,
         2,
@@ -22892,6 +23192,26 @@ const gsm8kData = {
         0.06454117743995386,
         0.09767016133510305,
         0.14444444444444443
+      ],
+      "passk_beyondaime_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_beyondaime_pass128_rate": [
+        0.0,
+        0.01,
+        0.05,
+        0.08,
+        0.1,
+        0.17,
+        0.18,
+        0.26
       ],
       "passk_beyondaime_pass32_k": [
         1,
@@ -22929,6 +23249,21 @@ const gsm8kData = {
         0.9857356836563647,
         0.9909021986353298
       ]
+    },
+    {
+      "id": "sft-only",
+      "label": "SFT only lr=5e-6",
+      "color": "#94a3b8",
+      "steps": [],
+      "reward_overall": [],
+      "frac_all_correct": [],
+      "frac_all_wrong": [],
+      "completion_len": [],
+      "loss": [],
+      "loss_grpo": [],
+      "loss_sft": [],
+      "kl_mean": [],
+      "entropy_mean": []
     },
     {
       "id": "dapo-stale1",
@@ -40070,6 +40405,42 @@ const gsm8kData = {
         }
       }
     },
+    "sft-only": {
+      "id": "sft-only",
+      "final_reward": null,
+      "final_loss": null,
+      "final_kl": null,
+      "final_entropy": null,
+      "final_completion_len": null,
+      "final_frac_all_correct": null,
+      "final_frac_all_wrong": null,
+      "avg_reward": null,
+      "avg_loss": null,
+      "avg_completion_len": null,
+      "total_steps": 0,
+      "median_mfu": null,
+      "total_training_time": null,
+      "avg_mean_lag": null,
+      "total_filtered": 0,
+      "total_wasted": 0,
+      "median_time_per_step": null,
+      "label": "SFT only lr=5e-6",
+      "color": "#94a3b8",
+      "benchmarks": {
+        "gsm8k": {
+          "accuracy": 0.6413949962092494,
+          "step": null
+        },
+        "math": {
+          "accuracy": 0.5686,
+          "step": null
+        },
+        "mmlu": {
+          "accuracy": 0.59585529126905,
+          "step": null
+        }
+      }
+    },
     "dapo-stale1": {
       "id": "dapo-stale1",
       "final_reward": 0.7721631205673759,
@@ -40303,7 +40674,8 @@ const gsm8kData = {
       "ifbench_test (inst)": 0.14825581395348839,
       "ifeval (prompt)": 0.21256931608133087,
       "ifeval (inst)": 0.328537170263789,
-      "math": 0.5268
+      "math": 0.5268,
+      "mmlu": 0.599
     },
     "passk": {
       "aime_pass32": {
@@ -40446,9 +40818,10 @@ const gsm8kPresets = [
       "grpo-lr1e5",
       "grpo-lr5e6",
       "dapo-lr1e5",
-      "dapo-lr5e6"
+      "dapo-lr5e6",
+      "sft-only"
     ],
-    "text": "GRPO vs DAPO at two learning rates. Both algorithms reach ~83% GSM8k at lr=1e-5, but trade off MATH accuracy. At lr=5e-6, both preserve MATH (~56%) with similar GSM8k (~79%)."
+    "text": "GRPO vs DAPO at two learning rates. Both algorithms reach ~83% GSM8k at lr=1e-5, but trade off MATH accuracy. At lr=5e-6, both preserve MATH (~56%) with similar GSM8k (~79%). SFT-only baseline at 64.1%."
   },
   {
     "id": "grpo-sft",
@@ -40730,10 +41103,34 @@ const gsm8kPlotConfigs = [
 ];
 
 const gsm8kPassKConfigs = [
-    { id: 'gsm8k-plot-passk-gsm8k', title: 'GSM8K Pass@k', kKey: 'passk_gsm8k_pass128_k', rateKey: 'passk_gsm8k_pass128_rate', format: '.1%' },
-    { id: 'gsm8k-plot-passk-math', title: 'MATH Pass@k', kKey: 'passk_math_pass128_k', rateKey: 'passk_math_pass128_rate', format: '.1%' },
-    { id: 'gsm8k-plot-passk-aime', title: 'AIME Pass@k', kKey: 'passk_aime_pass32_k', rateKey: 'passk_aime_pass32_rate', format: '.1%' },
-    { id: 'gsm8k-plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' },
+  {
+    "id": "gsm8k-plot-passk-aime",
+    "title": "AIME Pass@k",
+    "kKey": "passk_aime_pass128_k",
+    "rateKey": "passk_aime_pass128_rate",
+    "format": ".1%"
+  },
+  {
+    "id": "gsm8k-plot-passk-beyondaime",
+    "title": "BeyondAIME Pass@k",
+    "kKey": "passk_beyondaime_pass128_k",
+    "rateKey": "passk_beyondaime_pass128_rate",
+    "format": ".1%"
+  },
+  {
+    "id": "gsm8k-plot-passk-gsm8k",
+    "title": "GSM8K Pass@k",
+    "kKey": "passk_gsm8k_pass128_k",
+    "rateKey": "passk_gsm8k_pass128_rate",
+    "format": ".1%"
+  },
+  {
+    "id": "gsm8k-plot-passk-math",
+    "title": "MATH Pass@k",
+    "kKey": "passk_math_pass128_k",
+    "rateKey": "passk_math_pass128_rate",
+    "format": ".1%"
+  }
 ];
 
 function gsm8kUpdateTableHighlight() {
@@ -40763,8 +41160,8 @@ function gsm8kDrawPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
     const margin = { top: 16, right: 12, bottom: 28, left: 44 };
-    const width = 280 - margin.left - margin.right;
-    const height = 160 - margin.top - margin.bottom;
+    const width = 336 - margin.left - margin.right;
+    const height = 192 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -40936,8 +41333,8 @@ function gsm8kDrawPassKPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
     const margin = { top: 16, right: 12, bottom: 28, left: 44 };
-    const width = 280 - margin.left - margin.right;
-    const height = 160 - margin.top - margin.bottom;
+    const width = 336 - margin.left - margin.right;
+    const height = 192 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')

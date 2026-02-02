@@ -54,6 +54,13 @@ runs:
     color: "#c084fc"
     family: grpo-sft
 
+  # ── SFT only ──
+  - id: sft-only
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-sft-only-hf-lr5e6
+    label: "SFT only lr=5e-6"
+    color: "#94a3b8"
+    family: sft
+
   # ── Staleness ablation (DAPO, lr=5e-6) ──
   # stale0 = dapo-lr5e6 above
   - id: dapo-stale1
@@ -99,8 +106,8 @@ exclude_benchmarks: [ifeval, ifbench_test, if_multi_constraints]
 presets:
   - id: grpo-vs-dapo
     label: "GRPO vs DAPO"
-    runs: [grpo-lr1e5, grpo-lr5e6, dapo-lr1e5, dapo-lr5e6]
-    text: "GRPO vs DAPO at two learning rates. Both algorithms reach ~83% GSM8k at lr=1e-5, but trade off MATH accuracy. At lr=5e-6, both preserve MATH (~56%) with similar GSM8k (~79%)."
+    runs: [grpo-lr1e5, grpo-lr5e6, dapo-lr1e5, dapo-lr5e6, sft-only]
+    text: "GRPO vs DAPO at two learning rates. Both algorithms reach ~83% GSM8k at lr=1e-5, but trade off MATH accuracy. At lr=5e-6, both preserve MATH (~56%) with similar GSM8k (~79%). SFT-only baseline at 64.1%."
 
   - id: grpo-sft
     label: "GRPO vs GRPO+SFT"

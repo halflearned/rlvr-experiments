@@ -75,15 +75,8 @@ def _compute_logprobs_dtensor(
         group_logprobs = group_logprobs.reshape(end - start, target_len)
         logprob_results.append(group_logprobs)
 
-        # Compute entropy
-        with torch.no_grad():
-            log_p = F.log_softmax(group_logits.float().reshape(-1, vocab_size), dim=-1)
-            p = log_p.exp()
-            ent = -(p * log_p).sum(dim=-1)
-            ent = ent.reshape(end - start, target_len)
-            if isinstance(ent, DTensor):
-                ent = ent.to_local()
-            entropy_results.append(ent)
+        # Entropy computation skipped for MFU optimization (expensive full-vocab softmax)
+        entropy_results.append(torch.zeros(end - start, target_len, device=input_ids.device, dtype=torch.float32))
 
     # Concatenate results
     logprobs = torch.cat(logprob_results, dim=0)
@@ -215,9 +208,7 @@ def compute_logprobs(
 
     logprobs_out = logprobs.reshape(batch_size, seq_len)
 
-    with torch.no_grad():
-        log_p = F.log_softmax(sliced_logits.float(), dim=-1)  # [B, T, V]
-        p = log_p.exp()
-        entropy = -(p * log_p).sum(dim=-1).reshape(batch_size, seq_len)  # [B, T]
+    # Entropy computation skipped for MFU optimization (expensive full-vocab softmax)
+    entropy = torch.zeros_like(logprobs_out)
 
     return logprobs_out, entropy

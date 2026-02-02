@@ -31,6 +31,13 @@ runs:
     color: "#a855f7"
     family: grpo-sft
 
+  # ── SFT only ──
+  - id: sft-only
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-if-sft-only-hf-lr5e6
+    label: "SFT only lr=5e-6"
+    color: "#94a3b8"
+    family: sft
+
   # ── SageMaker LR / beta sweep (all DAPO) ──
   - id: sm-lr1e5-beta1e4
     run_dir: /efs/rlvr-experiments/results/annotations-adhoc-20260130-181815
@@ -75,7 +82,7 @@ runs:
     color: "#c084fc"
     family: sm-feb1
 
-exclude_benchmarks: [gsm8k, math]
+exclude_benchmarks: [gsm8k, math, aime, beyondaime, ifbench]
 
 base_model:
   label: "Qwen3-1.7B-Base"
@@ -84,13 +91,13 @@ base_model:
 presets:
   - id: best
     label: "Best of each"
-    runs: [sm-grpo-sft-lr1e5-beta1e4, sm-grpo-lr1e5-beta1e4, sm-lr1e5-beta1e4, sm-dapo-sft-lr1e5-beta1e4, grpo-sft]
-    text: "Best run from each algo family. GRPO+SFT lr=1e-5/β=1e-4 leads at 54.5% IFEval / 35.0% IFBench prompt-strict."
+    runs: [sm-grpo-sft-lr1e5-beta1e4, sm-grpo-lr1e5-beta1e4, sm-lr1e5-beta1e4, sm-dapo-sft-lr1e5-beta1e4, grpo-sft, sft-only]
+    text: "Best run from each algo family. GRPO+SFT lr=1e-5/β=1e-4 leads at 54.5% IFEval / 35.0% IFBench prompt-strict. SFT-only baseline at 30.9%."
 
   - id: local
     label: "Local (lr=5e-6)"
-    runs: [grpo, dapo, dapo-sft, grpo-sft]
-    text: "DAPO vs GRPO at lr=5e-6, with and without SFT auxiliary loss. GRPO+SFT dominates at 27.0% IFBench / 50.6% IFEval prompt-strict."
+    runs: [grpo, dapo, dapo-sft, grpo-sft, sft-only]
+    text: "DAPO vs GRPO at lr=5e-6, with and without SFT auxiliary loss. GRPO+SFT dominates at 27.0% IFBench / 50.6% IFEval prompt-strict. SFT-only baseline at 30.9%."
 
   - id: algo-compare
     label: "Algo comparison (lr=1e-5)"

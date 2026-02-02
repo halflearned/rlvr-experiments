@@ -360,22 +360,33 @@ class Runtime:
 
         if role.kind == "vllm":
             # Find nodes with enough free GPUs for vLLM's TP workers.
-            # vLLM creates its own placement group internally, so we just need
-            # to schedule the coordinator actor on the right node.
+            # Create a placement group per replica so vLLM's internal Ray
+            # executor finds GPUs on the correct node.
             tp_size = role.config.get("tensor_parallel_size", 1)
             dp_size = role.data_parallel_size
 
             # Spawn all actors first, then wait for all to be ready in parallel
             actors = []
+            placement_groups = []
             for replica_id in range(dp_size):
                 target_node = self._find_node_with_free_gpus(tp_size)
 
-                scheduling_opts = {"num_gpus": 0}
-                if target_node:
-                    scheduling_opts["resources"] = {f"node:{target_node}": 0.001}
-                    # Track GPU usage for subsequent placement decisions
+                if target_node and tp_size > 1:
+                    # Create a placement group pinned to target_node with tp_size GPU bundles
+                    # plus one non-GPU bundle for the coordinator process
+                    bundles = [{f"node:{target_node}": 0.001, "GPU": 1, "CPU": 1}] + [{"GPU": 1}] * (tp_size - 1)
+                    pg = ray.util.placement_group(bundles, strategy="STRICT_PACK")
+                    ray.get(pg.ready())
                     self._gpus_used_on_node[target_node] = self._gpus_used_on_node.get(target_node, 0) + tp_size
-                    print(f"[runtime] scheduling vllm role={name} replica={replica_id} on node {target_node}")
+                    print(f"[runtime] scheduling vllm role={name} replica={replica_id} on node {target_node} (pg={pg.id.hex()[:8]})")
+                    scheduling_opts = {"num_gpus": 0, "placement_group": pg, "placement_group_bundle_index": 0}
+                    placement_groups.append(pg)
+                else:
+                    scheduling_opts = {"num_gpus": 0}
+                    if target_node:
+                        scheduling_opts["resources"] = {f"node:{target_node}": 0.001}
+                        self._gpus_used_on_node[target_node] = self._gpus_used_on_node.get(target_node, 0) + tp_size
+                        print(f"[runtime] scheduling vllm role={name} replica={replica_id} on node {target_node}")
 
                 actor = VLLMEngineRank.options(**scheduling_opts).remote(
                     engine_kwargs=role.config,
