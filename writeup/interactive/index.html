@@ -233,7 +233,7 @@
             <h3>Visualization</h3> We keep optional but extensive tracing capabilities that track the evolution of average rewards, generation speed, trainer effective MFU, and other quantities useful for debugging (max kl divergence, logprob ratio, etc). These are shown in our visualization tool <a href="#TODO">RLVR Heartbeat</a>.
 
 
-            <h3>Production-level run</h3> We mock something closer to a larger, production-level run with Qwen3-32B (dense) using three 8xA100 80GB nodes. [LINK]
+            <h3>Production-level run</h3> We mock something closer to a larger, production-level run with Qwen3-32B (dense) using three 8xA100 80GB nodes. 
 
         </section>
 
@@ -383,14 +383,16 @@
 
             <h4>Going forward</h4>
                 <ul>
-                    <li>Preventing entropy collapse</li>
-                    <li>GSM8k is more or less saturated, but still an interesting testing ground</li>
-                    <li><a href="https://arxiv.org/pdf/2601.18779">Privileged on-policy guidance</a> and <a href="https://arxiv.org/pdf/2203.14465">Self-Taught Reasoner (STaR)</a>, but can the base model do it?</li>
-                    <li>Warm-start CoT training like DeepSeek-R1 was not used here</li>
-                    <li>Templates, thinking</li>
-                    <li>Training with CoT during RL (<a href="https://arxiv.org/pdf/2411.15124">Tulu 3</a>)</li>
-                    <li>Curriculum, adaptive training</li>
-                    <li>Variations of GSM8k (platinum, symbolic)</li>
+                    <li>GSM8k is more or less saturated, further experiments should use GSM8k as a sanity check then move on to newer, harder math-related tasks such as <a href="https://huggingface.co/datasets/agentica-org/DeepScaleR-Preview-Dataset">DeepScaleR-40k</a>.
+                    </li>
+                    <li>We ran preliminary but unsuccessful experiments with two variations of the above. First, setting a "curriculum", based on decreasing pass-at-k for some moderate large k (32-128); second, allowing the model to sample until it has a certain number of successes/failures or reaches a maximum number of tries (following <a href="https://arxiv.org/abs/2510.04996">Reinforce-Ada</a>). These experiments might be worth revisiting with larger datasets or other models.
+                    </li>
+                    <li>We haven't explored certain post-training techniques such as a warm-start CoT training, or templates (including <code>&lt;think&gt;</code> tags), which are becoming standard in the literature.</li>
+                    <li>
+                        Other forms of distillations and self-distillation such as 
+                        <a href="https://arxiv.org/pdf/2601.18779">Privileged on-policy guidance</a> and <a href="https://arxiv.org/pdf/2203.14465">Self-Taught Reasoner (STaR)</a> (more on this at the bottom of this report)
+                    </li>
+
                 </ul>
 
             </section>
