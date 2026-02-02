@@ -3788,7 +3788,7 @@ function codeGenerateTable() {
     html += '<thead><tr><th>Benchmark (step 200)</th>';
     if (baseModel) html += `<th style="color:#999">${baseModel.label}</th>`;
     runs.forEach(run => {
-        html += `<th style="color: ${run.color}">${run.label}</th>`;
+        html += `<th data-run-id="${run.id}" style="color: ${run.color}">${run.label}</th>`;
     });
     html += '</tr></thead><tbody>';
 
@@ -3804,9 +3804,9 @@ function codeGenerateTable() {
             const s = summaries[run.id];
             const bdata = s && s.benchmarks && s.benchmarks[bench];
             if (bdata && bdata.accuracy !== null && bdata.accuracy !== undefined) {
-                html += `<td>${d3.format('.1%')(bdata.accuracy)}</td>`;
+                html += `<td data-run-id="${run.id}">${d3.format('.1%')(bdata.accuracy)}</td>`;
             } else {
-                html += '<td>&mdash;</td>';
+                html += `<td data-run-id="${run.id}">&mdash;</td>`;
             }
         });
         html += '</tr>';
@@ -3855,6 +3855,24 @@ function codeBuildPresets() {
         btn.addEventListener('click', () => codeActivatePreset(preset.id));
         container.appendChild(btn);
     });
+
+    // "Clear all" button
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear all';
+    clearBtn.addEventListener('click', () => {
+        document.querySelectorAll('#code-preset-buttons button').forEach(b => b.classList.remove('active'));
+        clearBtn.classList.add('active');
+        codeVisible.clear();
+        document.querySelectorAll('#code-run-legend label').forEach(label => {
+            const cb = label.querySelector('input');
+            cb.checked = false;
+            label.classList.add('unchecked');
+        });
+        const explEl = document.getElementById('code-preset-explanation');
+        if (explEl) explEl.textContent = '';
+        codeRedraw();
+    });
+    container.appendChild(clearBtn);
 }
 
 function codeBuildLegend() {
@@ -3937,18 +3955,18 @@ const codePlotConfigs = [
        yKey: 'eval_ifeval_accuracy', format: '.1%', linear: true },
     { id: 'code-plot-eval-ifbench_test', title: 'IFBench Accuracy', stepsKey: 'eval_ifbench_test_steps',
        yKey: 'eval_ifbench_test_accuracy', format: '.1%', linear: true },
-    { id: 'code-plot-eval-mbpp_test', title: 'MBPP Test Accuracy', stepsKey: 'eval_mbpp_test_steps',
-       yKey: 'eval_mbpp_test_accuracy', format: '.1%', linear: true },
-    { id: 'code-plot-eval-humaneval', title: 'HumanEval Accuracy', stepsKey: 'eval_humaneval_steps',
-       yKey: 'eval_humaneval_accuracy', format: '.1%', linear: true },
 ];
 
-const codePassKConfigs = [
-    { id: 'code-plot-passk-gsm8k', title: 'GSM8K Pass@k', kKey: 'passk_gsm8k_pass128_k', rateKey: 'passk_gsm8k_pass128_rate', format: '.1%' },
-    { id: 'code-plot-passk-math', title: 'MATH Pass@k', kKey: 'passk_math_pass128_k', rateKey: 'passk_math_pass128_rate', format: '.1%' },
-    { id: 'code-plot-passk-aime', title: 'AIME Pass@k', kKey: 'passk_aime_pass32_k', rateKey: 'passk_aime_pass32_rate', format: '.1%' },
-    { id: 'code-plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' },
-];
+const codePassKConfigs = [];
+
+function codeUpdateTableHighlight() {
+    const table = document.querySelector('#code-comparison-table table');
+    if (!table) return;
+    table.querySelectorAll('[data-run-id]').forEach(cell => {
+        cell.classList.toggle('col-selected', codeVisible.has(cell.dataset.runId));
+        cell.classList.toggle('col-dimmed', !codeVisible.has(cell.dataset.runId));
+    });
+}
 
 function codeRedraw() {
     codePlotConfigs.forEach(config => {
@@ -3961,14 +3979,15 @@ function codeRedraw() {
         if (!container) return;
         codeDrawPassKPlot(container, codeData.runs, config, codeVisible);
     });
+    codeUpdateTableHighlight();
 }
 
 function codeDrawPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
     const margin = { top: 16, right: 12, bottom: 28, left: 44 };
-    const width = 280 - margin.left - margin.right;
-    const height = 160 - margin.top - margin.bottom;
+    const width = 336 - margin.left - margin.right;
+    const height = 192 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -4140,8 +4159,8 @@ function codeDrawPassKPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
     const margin = { top: 16, right: 12, bottom: 28, left: 44 };
-    const width = 280 - margin.left - margin.right;
-    const height = 160 - margin.top - margin.bottom;
+    const width = 336 - margin.left - margin.right;
+    const height = 192 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')

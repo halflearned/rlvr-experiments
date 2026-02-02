@@ -2627,6 +2627,106 @@ const ifevalData = {
         0.027289342135190964,
         0.10021079331636429,
         0.04544162005186081
+      ],
+      "passk_gsm8k_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_gsm8k_pass128_rate": [
+        0.34040940106141016,
+        0.5170583775587566,
+        0.6868840030326004,
+        0.8097043214556482,
+        0.9014404852160728,
+        0.9492039423805914,
+        0.9757391963608795,
+        0.9871114480667172
+      ],
+      "passk_ifbench_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_pass128_rate": [
+        0.17333333333333334,
+        0.26666666666666666,
+        0.37,
+        0.47333333333333333,
+        0.5333333333333333,
+        0.6166666666666667,
+        0.69,
+        0.7733333333333333
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.15666666666666668,
+        0.23666666666666666,
+        0.2833333333333333,
+        0.4166666666666667,
+        0.49333333333333335,
+        0.6033333333333334,
+        0.69,
+        0.7333333333333333
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.3900184842883549,
+        0.5064695009242144,
+        0.609981515711645,
+        0.6876155268022182,
+        0.7523105360443623,
+        0.8170055452865065,
+        0.8521256931608133,
+        0.8927911275415896
+      ],
+      "passk_math_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_math_pass128_rate": [
+        0.3307322929171669,
+        0.48259303721488594,
+        0.620048019207683,
+        0.7214885954381752,
+        0.7973189275710284,
+        0.8565426170468188,
+        0.8907563025210085,
+        0.9197679071628652
       ]
     },
     {
@@ -4652,6 +4752,86 @@ const ifevalData = {
         1.07682204246521,
         0.3612271547317505,
         1.1510210037231445
+      ],
+      "passk_gsm8k_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_gsm8k_pass128_rate": [
+        0.4783927217589083,
+        0.6573161485974223,
+        0.796057619408643,
+        0.8809704321455648,
+        0.9370735405610311,
+        0.9704321455648218,
+        0.9878695981804397,
+        0.9946929492039424
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.13333333333333333,
+        0.18,
+        0.25666666666666665,
+        0.3333333333333333,
+        0.4,
+        0.4866666666666667,
+        0.57,
+        0.6266666666666667
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.31608133086876156,
+        0.4269870609981516,
+        0.5157116451016636,
+        0.6266173752310537,
+        0.7208872458410351,
+        0.789279112754159,
+        0.8299445471349353,
+        0.8724584103512015
+      ],
+      "passk_math_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_math_pass128_rate": [
+        0.38795518207282914,
+        0.5434173669467787,
+        0.6674669867947179,
+        0.7527010804321729,
+        0.820328131252501,
+        0.868547418967587,
+        0.9011604641856743,
+        0.927170868347339
       ]
     },
     {
@@ -6677,6 +6857,66 @@ const ifevalData = {
         0.7731119394302368,
         0.3394756317138672,
         0.11793757230043411
+      ],
+      "passk_gsm8k_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_gsm8k_pass128_rate": [
+        0.46853677028051555,
+        0.643669446550417,
+        0.7899924184988628,
+        0.8771796815769523,
+        0.9302501895375285,
+        0.9620924943138741,
+        0.9787717968157695,
+        0.9878695981804397
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.13666666666666666,
+        0.19333333333333333,
+        0.25333333333333335,
+        0.34,
+        0.4,
+        0.5,
+        0.58,
+        0.63
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.32162661737523107,
+        0.4177449168207024,
+        0.5341959334565619,
+        0.6303142329020333,
+        0.722735674676525,
+        0.7874306839186691,
+        0.8299445471349353,
+        0.8743068391866913
       ]
     },
     {
@@ -8702,7 +8942,102 @@ const ifevalData = {
         0.22347892820835114,
         0.022368617355823517,
         0.018252797424793243
+      ],
+      "passk_gsm8k_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_gsm8k_pass128_rate": [
+        0.38286580742987114,
+        0.5610310841546626,
+        0.7088703563305534,
+        0.8256254738438211,
+        0.9021986353297953,
+        0.9484457922668689,
+        0.9704321455648218,
+        0.9818043972706596
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.21333333333333335,
+        0.31333333333333335,
+        0.37666666666666665,
+        0.48333333333333334,
+        0.5433333333333333,
+        0.6533333333333333,
+        0.7166666666666667,
+        0.7566666666666667
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.47689463955637706,
+        0.5951940850277264,
+        0.6802218114602587,
+        0.7486136783733827,
+        0.8077634011090573,
+        0.8391866913123844,
+        0.8650646950092421,
+        0.8853974121996303
+      ],
+      "passk_math_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_math_pass128_rate": [
+        0.40596238495398157,
+        0.5530212084833933,
+        0.6754701880752301,
+        0.7593037214885955,
+        0.8227290916366546,
+        0.8681472589035614,
+        0.9017607042817127,
+        0.923969587835134
       ]
+    },
+    {
+      "id": "sft-only",
+      "label": "SFT only lr=5e-6",
+      "color": "#94a3b8",
+      "steps": [],
+      "reward_overall": [],
+      "frac_all_correct": [],
+      "frac_all_wrong": [],
+      "completion_len": [],
+      "loss": [],
+      "loss_grpo": [],
+      "loss_sft": [],
+      "kl_mean": [],
+      "entropy_mean": []
     },
     {
       "id": "sm-lr1e5-beta1e4",
@@ -12727,6 +13062,46 @@ const ifevalData = {
         0.3434400260448456,
         0.17420949041843414,
         0.31497687101364136
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.2633333333333333,
+        0.3233333333333333,
+        0.4166666666666667,
+        0.49666666666666665,
+        0.5666666666666667,
+        0.6366666666666667,
+        0.6866666666666666,
+        0.72
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.49353049907578556,
+        0.5822550831792976,
+        0.6598890942698706,
+        0.722735674676525,
+        0.7781885397412199,
+        0.8151571164510166,
+        0.8354898336414048,
+        0.866913123844732
       ]
     },
     {
@@ -16752,6 +17127,46 @@ const ifevalData = {
         0.36990252137184143,
         0.22046314179897308,
         0.35864514112472534
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.16333333333333333,
+        0.26666666666666666,
+        0.36,
+        0.4533333333333333,
+        0.52,
+        0.6266666666666667,
+        0.69,
+        0.75
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.38817005545286504,
+        0.5286506469500925,
+        0.6303142329020333,
+        0.7319778188539742,
+        0.7911275415896488,
+        0.8428835489833642,
+        0.8835489833641405,
+        0.9038817005545287
       ]
     },
     {
@@ -19377,6 +19792,46 @@ const ifevalData = {
         0.02855396270751953,
         0.009960337541997433,
         0.01755860075354576
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.21,
+        0.25666666666666665,
+        0.31333333333333335,
+        0.38333333333333336,
+        0.44333333333333336,
+        0.49,
+        0.5533333333333333,
+        0.5933333333333334
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.30868761552680224,
+        0.3789279112754159,
+        0.44731977818853974,
+        0.5175600739371534,
+        0.589648798521257,
+        0.6321626617375231,
+        0.6894639556377079,
+        0.7430683918669131
       ]
     },
     {
@@ -22102,6 +22557,46 @@ const ifevalData = {
         0.011821798980236053,
         0.027403704822063446,
         0.028034590184688568
+      ],
+      "passk_ifbench_test_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifbench_test_pass128_rate": [
+        0.22333333333333333,
+        0.2833333333333333,
+        0.34,
+        0.38333333333333336,
+        0.4166666666666667,
+        0.49,
+        0.5333333333333333,
+        0.5866666666666667
+      ],
+      "passk_ifeval_pass128_k": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128
+      ],
+      "passk_ifeval_pass128_rate": [
+        0.266173752310536,
+        0.35304990757855825,
+        0.43622920517560076,
+        0.49907578558225507,
+        0.5545286506469501,
+        0.5970425138632163,
+        0.6432532347504621,
+        0.6802218114602587
       ]
     },
     {
@@ -28390,6 +28885,50 @@ const ifevalData = {
         }
       }
     },
+    "sft-only": {
+      "id": "sft-only",
+      "final_reward": null,
+      "final_loss": null,
+      "final_kl": null,
+      "final_entropy": null,
+      "final_completion_len": null,
+      "final_frac_all_correct": null,
+      "final_frac_all_wrong": null,
+      "avg_reward": null,
+      "avg_loss": null,
+      "avg_completion_len": null,
+      "total_steps": 0,
+      "median_mfu": null,
+      "total_training_time": null,
+      "avg_mean_lag": null,
+      "total_filtered": 0,
+      "total_wasted": 0,
+      "median_time_per_step": null,
+      "label": "SFT only lr=5e-6",
+      "color": "#94a3b8",
+      "benchmarks": {
+        "ifbench_test (prompt)": {
+          "accuracy": 0.15666666666666668,
+          "step": null
+        },
+        "ifbench_test (inst)": {
+          "accuracy": 0.1686046511627907,
+          "step": null
+        },
+        "ifeval (prompt)": {
+          "accuracy": 0.30868761552680224,
+          "step": null
+        },
+        "ifeval (inst)": {
+          "accuracy": 0.4364508393285372,
+          "step": null
+        },
+        "mmlu": {
+          "accuracy": 0.5890186583107819,
+          "step": null
+        }
+      }
+    },
     "sm-lr1e5-beta1e4": {
       "id": "sm-lr1e5-beta1e4",
       "final_reward": 0.6622908383035119,
@@ -28707,7 +29246,8 @@ const ifevalData = {
       "ifbench_test (inst)": 0.14825581395348839,
       "ifeval (prompt)": 0.21256931608133087,
       "ifeval (inst)": 0.328537170263789,
-      "math": 0.5268
+      "math": 0.5268,
+      "mmlu": 0.599
     },
     "passk": {
       "aime_pass32": {
@@ -28838,7 +29378,10 @@ const ifevalData = {
   },
   "exclude_benchmarks": [
     "gsm8k",
-    "math"
+    "math",
+    "aime",
+    "beyondaime",
+    "ifbench"
   ]
 };
 const ifevalPresets = [
@@ -28850,9 +29393,10 @@ const ifevalPresets = [
       "sm-grpo-lr1e5-beta1e4",
       "sm-lr1e5-beta1e4",
       "sm-dapo-sft-lr1e5-beta1e4",
-      "grpo-sft"
+      "grpo-sft",
+      "sft-only"
     ],
-    "text": "Best run from each algo family. GRPO+SFT lr=1e-5/\u03b2=1e-4 leads at 54.5% IFEval / 35.0% IFBench prompt-strict."
+    "text": "Best run from each algo family. GRPO+SFT lr=1e-5/\u03b2=1e-4 leads at 54.5% IFEval / 35.0% IFBench prompt-strict. SFT-only baseline at 30.9%."
   },
   {
     "id": "local",
@@ -28861,9 +29405,10 @@ const ifevalPresets = [
       "grpo",
       "dapo",
       "dapo-sft",
-      "grpo-sft"
+      "grpo-sft",
+      "sft-only"
     ],
-    "text": "DAPO vs GRPO at lr=5e-6, with and without SFT auxiliary loss. GRPO+SFT dominates at 27.0% IFBench / 50.6% IFEval prompt-strict."
+    "text": "DAPO vs GRPO at lr=5e-6, with and without SFT auxiliary loss. GRPO+SFT dominates at 27.0% IFBench / 50.6% IFEval prompt-strict. SFT-only baseline at 30.9%."
   },
   {
     "id": "algo-compare",
@@ -29130,10 +29675,20 @@ const ifevalPlotConfigs = [
 ];
 
 const ifevalPassKConfigs = [
-    { id: 'ifeval-plot-passk-gsm8k', title: 'GSM8K Pass@k', kKey: 'passk_gsm8k_pass128_k', rateKey: 'passk_gsm8k_pass128_rate', format: '.1%' },
-    { id: 'ifeval-plot-passk-math', title: 'MATH Pass@k', kKey: 'passk_math_pass128_k', rateKey: 'passk_math_pass128_rate', format: '.1%' },
-    { id: 'ifeval-plot-passk-aime', title: 'AIME Pass@k', kKey: 'passk_aime_pass32_k', rateKey: 'passk_aime_pass32_rate', format: '.1%' },
-    { id: 'ifeval-plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' },
+  {
+    "id": "ifeval-plot-passk-ifbench_test",
+    "title": "IFBench (prompt) Pass@k",
+    "kKey": "passk_ifbench_test_pass128_k",
+    "rateKey": "passk_ifbench_test_pass128_rate",
+    "format": ".1%"
+  },
+  {
+    "id": "ifeval-plot-passk-ifeval",
+    "title": "IFEval (prompt) Pass@k",
+    "kKey": "passk_ifeval_pass128_k",
+    "rateKey": "passk_ifeval_pass128_rate",
+    "format": ".1%"
+  }
 ];
 
 function ifevalUpdateTableHighlight() {
@@ -29163,8 +29718,8 @@ function ifevalDrawPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
     const margin = { top: 16, right: 12, bottom: 28, left: 44 };
-    const width = 280 - margin.left - margin.right;
-    const height = 160 - margin.top - margin.bottom;
+    const width = 336 - margin.left - margin.right;
+    const height = 192 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
@@ -29336,8 +29891,8 @@ function ifevalDrawPassKPlot(container, runs, config, highlightedSet) {
     container.innerHTML = '';
 
     const margin = { top: 16, right: 12, bottom: 28, left: 44 };
-    const width = 280 - margin.left - margin.right;
-    const height = 160 - margin.top - margin.bottom;
+    const width = 336 - margin.left - margin.right;
+    const height = 192 - margin.top - margin.bottom;
 
     const svg = d3.select(container)
         .append('svg')
