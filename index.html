@@ -43,15 +43,14 @@
         <section id="system-architecture">
             <h3>System overview</h3>
 
-            <p>The main type of problem this package focuses on is Monte Carlo-based RLVR algorithm such as Group Relative Policy Optimization (GRPO) and its variants. For this sort of problem, the canonical setup is a system that runs in a <b>producer-consumer pipeline</b>:
+            <p>The main type of problem this package focuses on is Monte Carlo-based RLVR algorithms such as Group Relative Policy Optimization (GRPO) and its variants. For this sort of problem, the canonical setup is a system that runs in a <b>producer-consumer pipeline</b>:
             </p>
-            <p>The "producer" is a loop that samples prompts, generates completions using a copy of the model, verifies these completions, and puts all results in a buffer. The "consumer" pops from the buffer, waits until there are enough samples, batches samples together and trains its own model copy. Once the model weights are updated, trainer's new weights may be synced to the producer's weights to keep generations on policy</p>   
-            <p>This sort of design, decoupling generation from training, has been used in <a href=https://arxiv.org/pdf/2501.12599>Kimi 1.5</a> and taken up by modern RLVR packages like <a href="https://pytorch.org/blog/introducing-torchforge/">torchforge</a>.  Let's work through a typical flow.
-
+            <p>The "producer" is a loop that samples prompts, generates completions using a copy of the model, verifies these completions, and puts all results in a buffer. The "consumer" pops from the buffer, waits until there are enough samples, batches samples together, and trains its own model copy. Once the model weights are updated, the trainer's new weights may be synced to the producer's weights to keep generations on policy.</p>
+            <p>This sort of design, decoupling generation from training, has been used in <a href="https://arxiv.org/pdf/2501.12599">Kimi 1.5</a> and taken up by modern RLVR packages like <a href="https://pytorch.org/blog/introducing-torchforge/">torchforge</a>. Let's work through a typical flow.
             </p>
             <h3>Components</h3>
 
-            <p>A typical GRPO-like flow will have the following components</p>
+            <p>A typical GRPO-like flow will have the following components:</p>
 
             <ul>
                 <li><strong>Trainer</strong> (TorchTitan): holds one copy of model weights, gets updated at every optimizer step</li>
@@ -61,7 +60,7 @@
                 <li><strong>Data iterator</strong>: serves prompts, tracks which are pending/in-flight/done/failed</li>
             </ul>
 
-            <p>The trainer's and vLLM engines's weights can be sharded across GPUs for different parallelism strategies. Weight sync happens periodically over NCCL, transferring updated policy weights from the trainer to the rollout and reference models.</p>
+            <p>The trainer's and vLLM engine's weights can be sharded across GPUs for different parallelism strategies. Weight sync happens periodically over NCCL, transferring updated policy weights from the trainer to the rollout and reference models.</p>
             <h3>Producer loop</h3>
             <p>
                 The producer loop runs dozens of async workers concurrently, all competing for prompts from the data iterator. Each worker independently shepherds one prompt through the full pipeline: generation, verification, reference logprobs, then buffer.
@@ -115,16 +114,14 @@
 
             <h3>Consumer loop</h3>
             <p>
-                The consumer is a standard training loop: pull samples, batch them, forward/backward, optimizer step. Only two things are different. First, samples are checked for <em>staleness</em>: if the trainer has moved too far ahead of the weights used for generation a particular sample, that sample is (lazily) evicted and its prompt is re-queued for generation within this epoch. Second, after each optimizer step the trainer version increments, and consumed prompts are marked done so they won't be sampled again this epoch. Training usually happens in micro-batches that depend on the samples sequence length.
+                The consumer is a standard training loop: pull samples, batch them, forward/backward, optimizer step. Only two things are different. First, samples are checked for <em>staleness</em>: if the trainer has moved too far ahead of the weights used to generate a particular sample, that sample is (lazily) evicted and its prompt is re-queued for generation within this epoch. Second, after each optimizer step the trainer version increments, and consumed prompts are marked done so they won't be sampled again this epoch. Training usually happens in micro-batches that depend on the sample's sequence length.
             </p>
 
             <figure>
                 <img src="figures/consumer.png" alt="Consumer loop diagram">
             </figure>
 
-            <p>A wrinkle: moving data both the forward and backward must happen within the same call.
-
-
+            <p>A wrinkle: moving data for both the forward and backward pass must happen within the same call.
             </p>
 
             <details class="code-details">
@@ -215,8 +212,23 @@
                 <li>Resume generation: set the Event, blocked workers continue.</li>
             </ol>
             <p>
-                With this strategy we complete the entire weight transfer for Qwen3-32B in under six seconds (or nice seconds if including waiting time for rollout engines to abort). This is a relatively small number relative to generation, since one vllm engine takes over 60 seconds to produce 16 completions for 16 prompts.  For comparison to other implementations, torchforge <a href="https://github.com/meta-pytorch/torchforge/issues/626">reportedly</a> takes about 58 seconds for the weight sync with torchstore. 
+                With this strategy we complete the entire weight transfer for Qwen3-32B in under six seconds (or nine seconds if including waiting time for rollout engines to abort). This is a relatively small number relative to generation, since one vLLM engine takes over 60 seconds to produce 16 completions for 16 prompts. For comparison to other implementations, torchforge <a href="https://github.com/meta-pytorch/torchforge/issues/626">reportedly</a> takes about 58 seconds for the weight sync with torchstore.
             </p>
+
+            <figure class="figure-stepper" id="weight-sync-stepper">
+                <div class="stepper-viewport">
+                    <img src="figures/weight-1.jpg" alt="Weight sync step 1" class="stepper-img active">
+                    <img src="figures/weight-2.jpg" alt="Weight sync step 2" class="stepper-img">
+                    <img src="figures/weight-3.jpg" alt="Weight sync step 3" class="stepper-img">
+                    <img src="figures/weight-4.jpg" alt="Weight sync step 4" class="stepper-img">
+                    <img src="figures/weight-5.jpg" alt="Weight sync step 5" class="stepper-img">
+                </div>
+                <div class="stepper-controls">
+                    <button class="stepper-btn stepper-prev" aria-label="Previous">&larr;</button>
+                    <span class="stepper-counter">1 / 5</span>
+                    <button class="stepper-btn stepper-next" aria-label="Next">&rarr;</button>
+                </div>
+            </figure>
 
             <h3>Visualization</h3> We keep optional but extensive tracing capabilities that track the evolution of average rewards, generation speed, trainer effective MFU, and other quantities useful for debugging (max kl divergence, logprob ratio, etc). These are shown in our visualization tool <a href="#TODO">RLVR Heartbeat</a>.
 
@@ -285,7 +297,7 @@
             $$
 
             <p>
-                the <span style="color: #e8a030;">normalization factor</span> divides by total tokens across the group rather than by $G$, removing a length bias that would otherwise discount longer completions. The <span style="color: teal;">clipping bounds</span> are asymmetric ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$). The latter allows the policy more room to increase probability on rewarded completions than to decrease it on penalized ones, however since most of our 
+                The <span style="color: #e8a030;">normalization factor</span> divides by total tokens across the group rather than by $G$, removing a length bias that would otherwise discount longer completions. The <span style="color: teal;">clipping bounds</span> are asymmetric ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$). The latter should technically allow the policy more room to increase probability on rewarded completions than to decrease it on penalized ones. However, since most of our experiments are strictly on-policy, the clipping matters little.
             </p>
 
             <p>
@@ -300,7 +312,7 @@
 
             <h4>Supervised fine tuning</h4>    
             <p>
-                To construct supervised fine-tuning targets, we first evaluate the base model on the training set using pass@128 sampling with temperature=1.0. We then filter to "hard" problems, defined as those where the base model's pass rate falls strictly between 0 and 0.5 — representing problems the model can occasionally solve but not reliably. For each qualifying problem, we select one random correct completion as the SFT target. This yields 2,742 examples from GSM8k (out of 7,473 training problems) and 12,245 examples from IFEval. This construction can be seen as a form rejection sampling fine-tuning (see e.g., <a href="https://arxiv.org/pdf/2308.01825">Yuan et al., 2023</a>), and because the completions come from the base model rather than a stronger teacher, this is a form of self-distillation. During training, we draw from this offline dataset a batch of the same size as the one used for the RL objective. For all our experiments, the SFT term is  weighted at $\alpha_{\text{SFT}} = 0.001$. We have not yet experimented with increasing the dataset.
+                To construct supervised fine-tuning targets, we first evaluate the base model on the training set using pass@128 sampling with temperature=1.0. We then filter to "hard" problems, defined as those where the base model's pass rate falls strictly between 0 and 0.5 — representing problems the model can occasionally solve but not reliably. For each qualifying problem, we select one random correct completion as the SFT target. This yields 2,742 examples from GSM8k (out of 7,473 training problems) and 12,245 examples from IFEval. This construction can be seen as a form of rejection sampling fine-tuning (see e.g., <a href="https://arxiv.org/pdf/2308.01825">Yuan et al., 2023</a>), and because the completions come from the base model rather than a stronger teacher, this is a form of self-distillation. During training, we draw from this offline dataset a batch of the same size as the one used for the RL objective. For all our experiments, the SFT term is weighted at $\alpha_{\text{SFT}} = 0.001$. We have not yet experimented with increasing the dataset.
             </p>
 
             <p>
@@ -313,18 +325,16 @@
                     We train on the GSM8K training set (n=7473). We set group size G=8, batch size 64, max completion tokens 512, and run for 200 steps. We ablate algorithm (DAPO vs GRPO), auxiliary SFT loss, learning rate, and max staleness. Our verifiers take the last number extracted in various ways (<code>\boxed{X}</code>, <code>The answer is X</code>, etc) and compare it to the ground truth via string matching (all GSM8k answers are integers).
                 </p>
                 <h4>Results</h4>
-                <p>
                 <ul>
                     <li>
                         GRPO vs DAPO: For a given set of hyperparameters, both perform very similarly. With the more aggressive learning rate lr=1e-5, rewards increase faster during training and achieve our best results on the GSM8k test set. However, MATH ability degrades, in particular for DAPO. Also, entropy decreases more rapidly with a higher learning rate, but generic performance as measured by MMLU remains essentially unchanged.</li>
                     <li>
-                        Adding SFT: The effect of the auxiliary reward is somewhat ambiguous. For the more aggresive learning rate 1e-5, it mitigates some of the loss in MATH performance, in particular for DAPO. However for the slower learning rate 5e-6 it results in a further decrease in MATH performance. Perhaps it works as a regularizer for more aggressive learning rates, preventing it from overfitting on GSM8k. It does not prevent fast entropy decay in either case.
+                        Adding SFT: The effect of the auxiliary SFT loss is somewhat ambiguous. For the more aggressive learning rate 1e-5, it mitigates some of the loss in MATH performance, in particular for DAPO. However, for the slower learning rate 5e-6 it results in a further decrease in MATH performance. Perhaps it works as a regularizer for more aggressive learning rates, preventing overfitting on GSM8k. It does not prevent fast entropy decay in either case.
                     </li>
                     <li>
-                        Staleness: our system naturally allows for using older samples -- this can be done by simply not evicting samples older than a certain value of max_staleness. In our  code <code>max_staleness = 0</code> means the model is strictly on-policy, and <code>max_staleness = n</code> allows for samples generated with weights from n optimization steps ago.  In case generation is fast relative to training, setting <code>max_staleness=1</code> often makes training run moderately faster (20% faster on GSM8k), because as soon as the sync ends the trainer can start consuming old data, before any new generation has completed. When generation is indeed the bottleneck, though, the speed gains are very small. Since our weight sync mechanism is quite fast even for relatively sizable models, there may be little need for this feature. Still, out of completeness we tested the effect of increasing staleness in a limited manner. We also note that with more exotic weight update schemes and allowance for higher max staleness, it might be possible to keep trainer hot. For example, with "gossip"-style updates where the trainer updates only one vllm engine, and that vllm engine updates others as they finish, it'd be in principle possible to allow for extremely long completions, straddling many optimizer steps; trainer would then receive a mix of data in various states of staleness.
+                        Staleness: our system naturally allows for using older samples — this can be done by simply not evicting samples older than a certain value of max_staleness. In our code, <code>max_staleness = 0</code> means the model is strictly on-policy, and <code>max_staleness = n</code> allows for samples generated with weights from n optimization steps ago. When generation is fast relative to training, setting <code>max_staleness=1</code> often makes training run moderately faster (20% faster on GSM8k), because as soon as the sync ends the trainer can start consuming old data before any new generation has completed. When generation is the bottleneck, though, the speed gains are very small. Since our weight sync mechanism is quite fast even for relatively sizable models, there may be little need for this feature. Still, for completeness we tested the effect of increasing staleness in a limited manner.
                     </li>
                 </ul>
-                </p>
 
                 <!-- GSM8K interactive plots -->
                 <div class="experiment-plots">
@@ -352,12 +362,14 @@
                 <!-- GSM8K comparison table (auto-generated) -->
                 <div id="gsm8k-comparison-table" class="results-table-container"></div>
 
+                <ul>
                 <li>
-                    SFT-only: we also experimented with trying to improve the model using only SFT, without an RL component. In that case, the gains farily were modest, and remained small even if we ran it for more epochs than we did for the RL runs. 
+                    SFT-only: we also experimented with trying to improve the model using only SFT, without an RL component. In that case, the gains were fairly modest, and remained small even when we ran it for more epochs than we did for the RL runs.
                 </li>
                 <li>
-                    Pass@k: There have been several papers noting that performance in math capability, as measured by pass@k for some large k, doesn't improve with RVLR; see e.g., <a href="https://arxiv.org/pdf/2504.13837">Yue, Chen et al, 2015</a>. This would suggest that RLVR isn't well-suited for forcing a base model to learn new skills, only to reinforce those that it already has -- the "elicitation" theory. We also observe this here, as pass@128 seems to match the base model for both GSM8k and MATH for all model variations (see graph below). This may be a quirk of the Qwen family of models, as described <a href="https://www.interconnects.ai/p/reinforcement-learning-with-random">here</a>.
+                    Pass@k: There have been several papers noting that performance in math capability, as measured by pass@k for some large k, doesn't improve with RLVR; see e.g., <a href="https://arxiv.org/pdf/2504.13837">Yue, Chen et al., 2025</a>. This would suggest that RLVR isn't well-suited for forcing a base model to learn new skills, only to reinforce those that it already has — the "elicitation" theory. We also observe this here, as pass@128 seems to match the base model for both GSM8k and MATH for all model variations (see graph below). This may be a quirk of the Qwen family of models, as described <a href="https://www.interconnects.ai/p/reinforcement-learning-with-random">here</a>.
                 </li>
+                </ul>
 
                 <div class="experiment-plots">
                     <h4>Pass@k (step 200)</h4>
@@ -370,49 +382,49 @@
                 </div>
 
             <h4>Going forward</h4>
-            <p>
                 <ul>
                     <li>Preventing entropy collapse</li>
-                    <li>GSM8k more or less saturated, but still an interesting testing ground</li>
-                    <li><a href="https://arxiv.org/pdf/2601.18779">Privileged on-policy guidance</a> and <a href="https://arxiv.org/pdf/2203.14465">Self-Taught Reasoner" (STaR)</a>, but can the base model do it?</li>
-                    <li>Typically warm start CoT training like DeepSeek-R1 wasn't used here</li>
+                    <li>GSM8k is more or less saturated, but still an interesting testing ground</li>
+                    <li><a href="https://arxiv.org/pdf/2601.18779">Privileged on-policy guidance</a> and <a href="https://arxiv.org/pdf/2203.14465">Self-Taught Reasoner (STaR)</a>, but can the base model do it?</li>
+                    <li>Warm-start CoT training like DeepSeek-R1 was not used here</li>
                     <li>Templates, thinking</li>
-                    <li>Training with CoT during RL <a href="https://arxiv.org/pdf/2411.15124">Tulu 3</a></li>
+                    <li>Training with CoT during RL (<a href="https://arxiv.org/pdf/2411.15124">Tulu 3</a>)</li>
                     <li>Curriculum, adaptive training</li>
                     <li>Variations of GSM8k (platinum, symbolic)</li>
                 </ul>
-            </p>
 
             </section>
 
             <section id="instruction-following">
                 <h3>2.3 Instruction-following results</h3>
                 <p>
-                    In this section we train to model to follow verifiable formatting and structural constraints in prompts — such as "write exactly 3 paragraphs" or "include the keyword 'ocean' at least twice." 
+                    In this section we train the model to follow verifiable formatting and structural constraints in prompts — such as "write exactly 3 paragraphs" or "include the keyword 'ocean' at least twice."
                 </p>
                 <p>
                     We train on about 40k examples from Ai2's <a href="https://huggingface.co/datasets/allenai/IF_multi_constraints_upto5">IFEval-multi-constraints</a> and evaluate on <a href="https://huggingface.co/datasets/google/IFEval">IFEval</a> and <a href="https://huggingface.co/datasets/allenai/IFBench_test">IFBench_test</a> (<a href="https://arxiv.org/pdf/2507.02833">Pyatkin et al, 2025</a>). There's no overlap in prompts across these three datasets, but the training set contains 25 constraints from IFEval and 29 new ones. IFBench_test has 58 new constraints that are entirely unseen.
                 </p>
                 <p>
-                    Note this instruction following and is purely mechanical, and while training against it the model may learn to follow constraints while outputting gibberish (in fact, some of the constraints force the model away from typical natural language. Here's how <a href="https://chatgpt.com/share/6980456e-cb08-8005-bb85-ebe43b4a2b39">GPT 5.2</a> and <a href="https://claude.ai/share/a79b587a-20d5-4b66-ae67-f093a92a8d0d">Claude Opus 5.2</a> handle an example from IFBench).
+                    Note that this instruction following is purely mechanical, and while training against it the model may learn to follow constraints while outputting gibberish (in fact, some of the constraints force the model away from typical natural language). Here's how <a href="https://chatgpt.com/share/6980456e-cb08-8005-bb85-ebe43b4a2b39">GPT 5.2</a> and <a href="https://claude.ai/share/a79b587a-20d5-4b66-ae67-f093a92a8d0d">Claude Opus 5.2</a> handle an example from IFBench.
                 </p>
                 <p>
-                    All runs set group size G=16, max completion tokens 2048, batch size 128. We evaluate models in two granularities: "prompt-level" accuracy means all constraints in that prompt are satisfied, "instruction-level" accuracy is the average number of instructions that were satified. During training, we use "instruction-level accuracy" so partial rewards are possible.
+                    All runs set group size G=16, max completion tokens 2048, batch size 128. We evaluate models at two granularities: "prompt-level" accuracy means all constraints in that prompt are satisfied; "instruction-level" accuracy is the fraction of individual instructions that were satisfied. During training, we use instruction-level accuracy so partial rewards are possible.
                 </p>
             
                 <h4>Results</h4>
+                <ul>
                 <li>
                     Overall, we can find combinations of hyperparameters that substantially improve instruction-following performance, as measured by our benchmarks.
                 </li>
                 <li>
-                    We have not completed a full ablation of GRPO vs DAPO over a grid of all (lr, beta) values, but comparing like-to-like values their performance seems similar. As in GSM8k, completion length is slightly smaller for DAPO. They have similarly in terms of entropy decay.
+                    We have not completed a full ablation of GRPO vs DAPO over a grid of all (lr, beta) values, but comparing like-to-like values their performance seems similar. As in GSM8k, completion length is slightly smaller for DAPO. They behave similarly in terms of entropy decay.
                 </li>
                 <li>
-                    Similarly to the GSM8k run, when SFT is introduced, it seems to increase performance for milder learning rates.
+                    Similarly to the GSM8k runs, when SFT is introduced it seems to increase performance for higher learning rates.
                 </li>
                 <li>
-
+                   Pass@k rates similarly trend toward convergence with the base model.
                 </li>
+                </ul>
 
                 <!-- IFEval interactive plots -->
                 <div class="experiment-plots">
@@ -452,8 +464,9 @@
         <section id="code">
             <h3>2.4 MBPP (Partial results)</h3>
             <p>
-                We train on Mostly Basic Python Programs (<a href="https://huggingface.co/datasets/Muennighoff/mbpp">MBPP</a>) train split (n=374). This a limited run using GRPO only. We set lr=1e-5, beta=0.001, group size G=8.
-                We use a truncated verifier that clips model output at the second top-level <code>def</code>/<code>class</code> before running tests.
+                We train on Mostly Basic Python Programs (<a href="https://huggingface.co/datasets/Muennighoff/mbpp">MBPP</a>) train split (n=374). This is a limited run using GRPO only. We set lr=1e-5, beta=0.001, group size G=8.
+                </p>
+                <p>Since the base model will continue writing new functions after it's output the (often correct) answer, we use a truncated verifier that clips model output at the second top-level <code>def</code>/<code>class</code> before running tests.
             </p>
 
             <div class="experiment-plots">
@@ -484,18 +497,12 @@
 
         <section id="going-further">
             <h3>2.5 Going further</h3>
-            <h4></h4>
 
             <h4>Distillation experiments (GKD / OPSD)</h4>
                 <p>
-                    It would be interesting to see how the methods here compare to "dense" on-policy distillation methods like generalized knowledge distillation (GKD). In particular, there have been several papers recently that use a form of self-distillation were the self teacher is the same model with additional privilege information. 
-
-                     self-distillation (OPSD) and ,
-                    using either the model's own earlier checkpoint or a stronger Qwen3 instruct model as teacher.
-                    Pure OPSD (distillation-only, no reward signal) consistently degraded GSM8k performance,
-                    confirming that reward signal is essential. GRPO+GKD (combining reward with JSD distillation
-                    in a single forward pass) maintained reward while adding the distillation term, and is a
-                    promising direction for future work.
+                    It would be interesting to see how the methods here compare to "dense" on-policy distillation methods like generalized knowledge distillation, or <a href="https://arxiv.org/pdf/2306.13649">GKD</a> (in particular in conjunction with RL methods; see Section 3.2 in that paper). </p>
+                    <p>In the past couple of years, several papers have used a form of self-distillation where the self-teacher is the same model with additional privileged information (<a href="https://arxiv.org/pdf/2601.20802">Reinforcement Learning via Self-Distillation</a>, <a href="https://arxiv.org/pdf/2601.18734">On-policy self-distillation</a>). </p>
+                    <p>We ran preliminary tests using these methods on GSM8k and IFEval without success. Further investigation likely requires more hyperparameter tuning or a more capable initial model. We should also note that for this sort of exercise, the benefits of the efficient generation machinery in this package are less clear. On the one hand, we can generate completions and compute logprobs for the trainer and (self-)teacher using vLLM. On the other hand, when computing the trainer forward_backward we might need to pass logprobs not only for the selected tokens as we do here, but for the entire vocab, or at least some truncated version of it, and passing payload to the Ray actor via RPC can be slow.
                 </p>
         </section>        
 
@@ -678,5 +685,35 @@
     <script src="ifeval_plots.js?v=1"></script>
     <script src="code_plots.js?v=1"></script>
     <script>hljs.highlightAll();</script>
+    <script>
+    // Figure stepper widgets
+    document.querySelectorAll('.figure-stepper').forEach(stepper => {
+        const imgs = stepper.querySelectorAll('.stepper-img');
+        const prev = stepper.querySelector('.stepper-prev');
+        const next = stepper.querySelector('.stepper-next');
+        const counter = stepper.querySelector('.stepper-counter');
+        let idx = 0;
+        const n = imgs.length;
+
+        function update() {
+            imgs.forEach((img, i) => img.classList.toggle('active', i === idx));
+            counter.textContent = (idx + 1) + ' / ' + n;
+            prev.disabled = idx === 0;
+            next.disabled = idx === n - 1;
+        }
+
+        prev.addEventListener('click', () => { if (idx > 0) { idx--; update(); } });
+        next.addEventListener('click', () => { if (idx < n - 1) { idx++; update(); } });
+
+        // Keyboard: left/right arrows when stepper is in viewport
+        stepper.setAttribute('tabindex', '0');
+        stepper.addEventListener('keydown', e => {
+            if (e.key === 'ArrowLeft') { prev.click(); e.preventDefault(); }
+            if (e.key === 'ArrowRight') { next.click(); e.preventDefault(); }
+        });
+
+        update();
+    });
+    </script>
 </body>
 </html>

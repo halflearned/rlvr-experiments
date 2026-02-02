@@ -29523,51 +29523,26 @@ const ifevalData = {
 };
 const ifevalPresets = [
   {
-    "id": "best",
-    "label": "Best of each",
-    "runs": [
-      "sm-grpo-sft-lr1e5-beta1e4",
-      "sm-grpo-lr1e5-beta1e4",
-      "sm-lr1e5-beta1e4",
-      "sm-dapo-sft-lr1e5-beta1e4",
-      "grpo-sft",
-      "sft-only"
-    ],
-    "text": "Best run from each algo family. GRPO+SFT lr=1e-5/\u03b2=1e-4 leads at 54.5% IFEval / 35.0% IFBench prompt-strict. SFT-only baseline at 30.9%."
-  },
-  {
-    "id": "local",
-    "label": "Local (lr=5e-6)",
+    "id": "grpo-vs-grpo-sft",
+    "label": "GRPO vs GRPO+SFT",
     "runs": [
       "grpo",
-      "dapo",
-      "dapo-sft",
       "grpo-sft",
-      "sft-only"
-    ],
-    "text": "DAPO vs GRPO at lr=5e-6, with and without SFT auxiliary loss. GRPO+SFT dominates at 27.0% IFBench / 50.6% IFEval prompt-strict. SFT-only baseline at 30.9%."
-  },
-  {
-    "id": "algo-compare",
-    "label": "Algo comparison (lr=1e-5)",
-    "runs": [
-      "sm-lr1e5-beta1e4",
-      "sm-dapo-sft-lr1e5-beta1e4",
       "sm-grpo-lr1e5-beta1e4",
       "sm-grpo-sft-lr1e5-beta1e4"
     ],
-    "text": "DAPO vs GRPO, \u00b1SFT, all at lr=1e-5 \u03b2=1e-4. GRPO+SFT best (54.5% IFEval), SFT helps both algos, GRPO >> DAPO."
+    "text": "GRPO vs GRPO+SFT at two learning rates. SFT consistently helps GRPO."
   },
   {
-    "id": "sm-sweep",
-    "label": "DAPO LR / \u03b2 sweep",
+    "id": "dapo-vs-dapo-sft",
+    "label": "DAPO vs DAPO+SFT",
     "runs": [
       "sm-lr1e5-beta1e4",
-      "sm-lr1e5-beta1e3",
-      "sm-lr75e5-beta1e4",
-      "sm-lr75e5-beta1e3"
+      "sm-dapo-sft-lr1e5-beta1e4",
+      "dapo",
+      "dapo-sft"
     ],
-    "text": "DAPO hyperparameter sweep: LR \u2208 {1e-5, 7.5e-5}, KL penalty \u03b2 \u2208 {1e-4, 1e-3}. Lower LR with lower \u03b2 works best (50.3% IFEval prompt-strict)."
+    "text": "DAPO vs DAPO+SFT at two learning rates."
   }
 ];
 
