@@ -588,7 +588,7 @@ function {var_prefix}GenerateTable() {{
     html += '<thead><tr><th>Benchmark (step 200)</th>';
     if (baseModel) html += `<th style="color:#999">${{baseModel.label}}</th>`;
     runs.forEach(run => {{
-        html += `<th style="color: ${{run.color}}">${{run.label}}</th>`;
+        html += `<th data-run-id="${{run.id}}" style="color: ${{run.color}}">${{run.label}}</th>`;
     }});
     html += '</tr></thead><tbody>';
 
@@ -604,9 +604,9 @@ function {var_prefix}GenerateTable() {{
             const s = summaries[run.id];
             const bdata = s && s.benchmarks && s.benchmarks[bench];
             if (bdata && bdata.accuracy !== null && bdata.accuracy !== undefined) {{
-                html += `<td>${{d3.format('.1%')(bdata.accuracy)}}</td>`;
+                html += `<td data-run-id="${{run.id}}">${{d3.format('.1%')(bdata.accuracy)}}</td>`;
             }} else {{
-                html += '<td>&mdash;</td>';
+                html += `<td data-run-id="${{run.id}}">&mdash;</td>`;
             }}
         }});
         html += '</tr>';
@@ -655,6 +655,24 @@ function {var_prefix}BuildPresets() {{
         btn.addEventListener('click', () => {var_prefix}ActivatePreset(preset.id));
         container.appendChild(btn);
     }});
+
+    // "Clear all" button
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear all';
+    clearBtn.addEventListener('click', () => {{
+        document.querySelectorAll('#{id_prefix}preset-buttons button').forEach(b => b.classList.remove('active'));
+        clearBtn.classList.add('active');
+        {var_prefix}Visible.clear();
+        document.querySelectorAll('#{id_prefix}run-legend label').forEach(label => {{
+            const cb = label.querySelector('input');
+            cb.checked = false;
+            label.classList.add('unchecked');
+        }});
+        const explEl = document.getElementById('{id_prefix}preset-explanation');
+        if (explEl) explEl.textContent = '';
+        {var_prefix}Redraw();
+    }});
+    container.appendChild(clearBtn);
 }}
 
 function {var_prefix}BuildLegend() {{
@@ -746,6 +764,15 @@ const {var_prefix}PassKConfigs = [
     {{ id: '{id_prefix}plot-passk-beyondaime', title: 'BeyondAIME Pass@k', kKey: 'passk_beyondaime_pass32_k', rateKey: 'passk_beyondaime_pass32_rate', format: '.1%' }},
 ];
 
+function {var_prefix}UpdateTableHighlight() {{
+    const table = document.querySelector('#{id_prefix}comparison-table table');
+    if (!table) return;
+    table.querySelectorAll('[data-run-id]').forEach(cell => {{
+        cell.classList.toggle('col-selected', {var_prefix}Visible.has(cell.dataset.runId));
+        cell.classList.toggle('col-dimmed', !{var_prefix}Visible.has(cell.dataset.runId));
+    }});
+}}
+
 function {var_prefix}Redraw() {{
     {var_prefix}PlotConfigs.forEach(config => {{
         const container = document.getElementById(config.id);
@@ -757,6 +784,7 @@ function {var_prefix}Redraw() {{
         if (!container) return;
         {var_prefix}DrawPassKPlot(container, {var_prefix}Data.runs, config, {var_prefix}Visible);
     }});
+    {var_prefix}UpdateTableHighlight();
 }}
 
 function {var_prefix}DrawPlot(container, runs, config, highlightedSet) {{

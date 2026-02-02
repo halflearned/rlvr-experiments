@@ -736,6 +736,41 @@ span.metric {
     /* Color is set dynamically via JS based on run color */
 }
 
+/* Column highlighting for selected runs */
+.comparison-table {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+/* Replicate thead/tbody borders on cells for border-collapse: separate */
+.comparison-table thead th {
+    border-top: 2px solid #333;
+    border-bottom: 1px solid #333;
+}
+
+.comparison-table tbody tr:last-child td {
+    border-bottom: 2px solid #333;
+}
+
+.comparison-table th.col-selected,
+.comparison-table td.col-selected {
+    background: rgba(59, 130, 246, 0.06);
+}
+
+.comparison-table th.col-dimmed,
+.comparison-table td.col-dimmed {
+    opacity: 0.35;
+}
+
+/* Rounded top/bottom edges on selected columns */
+.comparison-table thead th.col-selected {
+    border-radius: 6px 6px 0 0;
+}
+
+.comparison-table tbody tr:last-child td.col-selected {
+    border-radius: 0 0 6px 6px;
+}
+
 /* Comparison table */
 .comparison-table .section-header td {
     background: #f3f4f6;

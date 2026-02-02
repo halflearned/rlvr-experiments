@@ -54,18 +54,6 @@ runs:
     color: "#c084fc"
     family: grpo-sft
 
-  # ── SFT only (best LR) ──
-  - id: sft-only-lr5e6
-    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-sft-only-lr5e6_20260131-170927
-    label: "SFT-only lr=5e-6"
-    color: "#78716c"
-    family: sft-only
-  - id: sft-only-lr1e5
-    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-gsm8k-sft-only-lr1e5_20260131-170435
-    label: "SFT-only lr=1e-5"
-    color: "#a8a29e"
-    family: sft-only
-
   # ── Staleness ablation (DAPO, lr=5e-6) ──
   # stale0 = dapo-lr5e6 above
   - id: dapo-stale1
@@ -109,28 +97,22 @@ base_model:
 exclude_benchmarks: [ifeval, ifbench_test, if_multi_constraints]
 
 presets:
-  - id: best
-    label: "Best of each"
-    # Best GSM8k pass@1 at step 200 per family
-    runs: [dapo-lr1e5, grpo-lr1e5, dapo-sft-lr1e5, grpo-sft-lr1e5, sft-only-lr5e6]
-    text: "Best GSM8k run from each algorithm family at step 200. DAPO 1e-5 leads at 83.9% but trades off MATH accuracy; +SFT variants preserve MATH better."
+  - id: grpo-vs-dapo
+    label: "GRPO vs DAPO"
+    runs: [grpo-lr1e5, grpo-lr5e6, dapo-lr1e5, dapo-lr5e6]
+    text: "GRPO vs DAPO at two learning rates. Both algorithms reach ~83% GSM8k at lr=1e-5, but trade off MATH accuracy. At lr=5e-6, both preserve MATH (~56%) with similar GSM8k (~79%)."
 
-  - id: dapo
-    label: "DAPO"
-    runs: [dapo-lr1e5, dapo-lr5e6]
-    text: "DAPO at two learning rates. lr=1e-5 achieves higher GSM8k (83.9%) but lower MATH (43.3%); lr=5e-6 is more conservative (79.5% GSM8k, 56.2% MATH)."
+  - id: grpo-sft
+    label: "GRPO vs GRPO+SFT"
+    runs: [grpo-lr1e5, grpo-sft-lr1e5, grpo-lr5e6, grpo-sft-lr5e6]
+    text: "Effect of SFT auxiliary loss on GRPO. At lr=1e-5, +SFT slightly lowers GSM8k (83.2→81.4%) but preserves MATH better."
 
-  - id: grpo
-    label: "GRPO"
-    runs: [grpo-lr1e5, grpo-lr5e6]
-    text: "GRPO at two learning rates. Similar pattern to DAPO: lr=1e-5 wins on GSM8k (83.2%) but loses MATH (49.6%); lr=5e-6 preserves both (78.9% / 56.4%)."
-
-  - id: sft-effect
-    label: "+SFT"
-    runs: [dapo-lr1e5, dapo-sft-lr1e5, grpo-lr1e5, grpo-sft-lr1e5, sft-only-lr5e6]
-    text: "Effect of adding SFT as auxiliary loss (alpha=0.001) at lr=1e-5, plus SFT-only baseline. SFT alone barely moves GSM8k from base model (62.6% vs 62.8%)."
+  - id: dapo-sft
+    label: "DAPO vs DAPO+SFT"
+    runs: [dapo-lr1e5, dapo-sft-lr1e5, dapo-lr5e6, dapo-sft-lr5e6]
+    text: "Effect of SFT auxiliary loss on DAPO. At lr=1e-5, +SFT trades 1.3pp GSM8k (83.9→82.6%) for +10pp MATH (43.3→53.7%)."
 
   - id: staleness
     label: "Staleness"
     runs: [dapo-lr5e6, dapo-stale1, dapo-stale2, dapo-stale4, grpo-lr5e6, grpo-stale1, grpo-stale2, grpo-stale4]
-    text: "Staleness ablation at lr=5e-6. max_staleness=0 (on-policy) vs 1, 2, 4 steps of allowed staleness for both DAPO and GRPO."
+    text: "Staleness ablation at lr=5e-6. max_staleness=0 (on-policy) vs 1, 2, 4 steps of allowed staleness for both DAPO and GRPO. Minimal impact on final accuracy."
