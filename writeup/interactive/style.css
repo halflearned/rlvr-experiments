@@ -797,3 +797,87 @@ span.metric {
     padding: 8px 12px;
     border-top: 1px solid #e5e5e5;
 }
+
+/* Figure stepper */
+.figure-stepper {
+    margin: 24px 0;
+    border: 1px solid #e5e5e5;
+    border-radius: 6px;
+    background: #fafafa;
+    overflow: hidden;
+}
+
+.stepper-viewport {
+    position: relative;
+    overflow: hidden;
+    /* Crop bottom 40% of 1920x1080 images — show top 60% → 648/1920 ≈ 33.75% */
+    max-height: 0;
+    padding-bottom: 33.75%;
+}
+
+.stepper-img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: auto;
+    display: block;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+}
+
+.stepper-img.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.stepper-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 8px 0;
+    border-top: 1px solid #e5e5e5;
+    background: #fff;
+}
+
+.stepper-btn {
+    font-family: 'Lora', serif;
+    font-size: 18px;
+    width: 36px;
+    height: 36px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #fff;
+    color: #374151;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+    line-height: 1;
+}
+
+.stepper-btn:hover {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+}
+
+.stepper-btn:disabled {
+    opacity: 0.3;
+    cursor: default;
+}
+
+.stepper-btn:disabled:hover {
+    background: #fff;
+    border-color: #d1d5db;
+}
+
+.stepper-counter {
+    font-family: 'Source Code Pro', monospace;
+    font-size: 13px;
+    color: #666;
+    min-width: 40px;
+    text-align: center;
+}
