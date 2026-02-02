@@ -416,13 +416,16 @@ def generate_plot_data(config: dict) -> dict:
                     if "_pass" in bench_name:
                         merged = bench_dir / "step200" / "merged_summary.json"
                     else:
-                        passk_dir = bench_dir / "pass-at-k"
-                        if passk_dir.exists():
-                            merged = passk_dir / "merged_summary.json"
-                            if not merged.exists():
-                                merged = passk_dir / "summary.json"
-                            # Use mapped name to match base model convention
-                            # Will be set after reading max_k below
+                        # Check pass-at-k-512 first (higher k), then pass-at-k
+                        for passk_subdir in ["pass-at-k-512-v2", "pass-at-k-512", "pass-at-k"]:
+                            passk_dir = bench_dir / passk_subdir
+                            if passk_dir.exists():
+                                merged = passk_dir / "merged_summary.json"
+                                if not merged.exists():
+                                    merged = passk_dir / "summary.json"
+                                if merged.exists():
+                                    break
+                                merged = None
 
                     if merged is None or not merged.exists():
                         continue
@@ -474,11 +477,16 @@ def generate_plot_data(config: dict) -> dict:
             for bench_dir in sorted(evals_dir.iterdir()):
                 if not bench_dir.is_dir():
                     continue
-                passk_dir = bench_dir / "pass-at-k"
-                merged = passk_dir / "merged_summary.json"
-                if not merged.exists():
-                    merged = passk_dir / "summary.json"
-                if not merged.exists():
+                merged = None
+                for passk_subdir in ["pass-at-k-512-v2", "pass-at-k-512", "pass-at-k"]:
+                    passk_dir = bench_dir / passk_subdir
+                    m = passk_dir / "merged_summary.json"
+                    if not m.exists():
+                        m = passk_dir / "summary.json"
+                    if m.exists():
+                        merged = m
+                        break
+                if not merged or not merged.exists():
                     continue
                 with open(merged) as f:
                     pdata = json.load(f)
