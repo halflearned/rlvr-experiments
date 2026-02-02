@@ -73,7 +73,11 @@ p {
 }
 
 strong {
-    font-weight: 500;
+    font-weight: 700;
+}
+
+section {
+    margin-bottom: 48px;
 }
 
 section.intro {

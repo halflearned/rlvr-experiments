@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
     <!-- D3.js for plots -->
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <!-- Highlight.js for code syntax highlighting -->
@@ -219,7 +219,7 @@
                 <li>Resume generation: set the Event, blocked workers continue.</li>
             </ol>
             <p>
-                With this strategy we complete the entire weight transfer for Qwen3-32B in 4.9s seconds or under (or a total of 7.5s if including waiting time for rollout engines to abort). For comparison, torchforge [reportedly](https://github.com/meta-pytorch/torchforge/issues/626) takes about 58 seconds with torchstore enabled.
+                With this strategy we complete the entire weight transfer for Qwen3-32B in 4.9s seconds or under (or a total of 7.5s if including waiting time for rollout engines to abort). For comparison, torchforge <a href="https://github.com/meta-pytorch/torchforge/issues/626">reportedly</a> takes about 58 seconds with torchstore enabled.
             </p>
 
             <h3>Visualization</h3> We keep optional but extensive tracing capabilities that track the evolution of average rewards, generation speed, trainer effective MFU, and other quantities useful for debugging.
@@ -235,6 +235,7 @@
             All experiments use <a href="https://huggingface.co/Qwen/Qwen3-1.7B-Base">Qwen3-1.7B-Base</a> as the initial model. We'll train this model on simple math tasks (GSM8k), instruction-following (IFBench), and code (MBPP/APPS).
             </p>
 
+            <h4>Reinforcement-learning objective</h4>  
             
             <p>For <a href="https://arxiv.org/abs/2503.20783">GRPO</a>, given a prompt $p$, we generate $G$ completions $o_{i}$ from the current model $\pi_{\theta}$, and compute:</p>
 
@@ -288,12 +289,15 @@
                 In either implementation, when rewards are constant, we discard the entire prompt. In addition, we ensure that every batch has the same number of prompts per step.
             </p>
 
+
+            <h4>KL penalty</h4>  
             <p>
                 We keep a small penalty for divergence with respect to a frozen reference policy. This is implemented using the "<a href="http://joschu.net/blog/kl-approx.html">Schulman</a>" approximation to the forward divergence $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$.
             </p>
 
+            <h4>Supervised fine tuning</h4>    
             <p>
-To construct supervised fine-tuning targets, we apply rejection sampling fine-tuning (RFT; Yuan et al., 2023) from the base model itself. For each training problem, we sample 128 completions at temperature 1.0 and compute the per-problem pass rate. We retain only problems the model solves less than half the time and select one random correct completion per problem. Because the completions come from the base model rather than a stronger teacher, this is a form of self-distillation. When used as an auxiliary loss alongside GRPO or DAPO, the SFT term is weighted at 0.001.
+                 To construct supervised fine-tuning targets, we apply rejection sampling fine-tuning (RFT; Yuan et al., 2023) from the base model itself. For each training problem, we sample 128 completions at temperature 1.0 and compute the per-problem pass rate. We retain only problems the model solves less than half the time and select one random correct completion per problem. Because the completions come from the base model rather than a stronger teacher, this is a form of self-distillation. When used as an auxiliary loss alongside GRPO or DAPO, the SFT term is weighted at 0.001.
             </p>
 
             <p>
@@ -306,12 +310,6 @@ To construct supervised fine-tuning targets, we apply rejection sampling fine-tu
                     We train on the GSM8K training set (n=7473).
                     All runs use Qwen3-1.7B-Base, group size $G=8$, and 200 steps. We ablate algorithm
                     (DAPO vs GRPO), auxiliary SFT loss, learning rate, and max staleness.
-                </p>
-                <p>
-
-                </p>
-                <p>
-                    We have: (a) ablations under GSM8k -- GRPO vs DAPO, either vs SFT, staleness vs not.  Let's ignore staleness for now. The results there, as far as I can see, are: GRPO and DAPO when lr=1e-5 have the best results on GSM8k, however both see a decrease in MATH ability, and the decrease is much more pronounced for DAPO. However, DAPO+SFT maintains a high GSM8k score but also maintains MATH, the same is true for GRPO+SFT. For lre5-6, within the 200 step budget we still see a moderate increase in GSM8k ability, without a corresponding drop in MATH; there, the effect of an additional SFT boost is nothing. (b) We're missing a true "SFT only" run, the results presented there are not correct. It's also strange tha even when SFT is there, the SFT loss seems to be going *up*. (c) It's somewhat well documented that, for some models like Qwen2.5-xx-MATH, the pass-at-k does not increase with GRPO only for sufficiently large k. We see the same results here, and this is true regardless of SFT (d) For the ablation that ran so far, Staleness=0 vs Staleness > 0 seems to produce essentially the same results. Staleness=1 is particularly attractive because it means we can raise the MFU slightly for ~free.
                 </p>
                 <p>
                 <ul>
@@ -399,25 +397,25 @@ To construct supervised fine-tuning targets, we apply rejection sampling fine-tu
                     <div id="ifeval-run-legend" class="run-legend"></div>
 
                     <h4>Rewards</h4>
-                    <div class="plot-row">
+                    <div class="plot-row plot-row-2x2">
                         <div class="plot-container" id="ifeval-plot-reward"></div>
+                        <div class="plot-container" id="ifeval-plot-completion-len"></div>
                         <div class="plot-container" id="ifeval-plot-allcorr"></div>
                         <div class="plot-container" id="ifeval-plot-allwrong"></div>
-                        <div class="plot-container" id="ifeval-plot-completion-len"></div>
                     </div>
 
                     <h4>Training Dynamics</h4>
-                    <div class="plot-row">
+                    <div class="plot-row plot-row-2x2">
                         <div class="plot-container" id="ifeval-plot-loss-grpo"></div>
+                        <div class="plot-container" id="ifeval-plot-loss-sft"></div>
                         <div class="plot-container" id="ifeval-plot-kl"></div>
                         <div class="plot-container" id="ifeval-plot-entropy"></div>
                     </div>
 
                     <h4>Evaluation</h4>
-                    <div class="plot-row">
+                    <div class="plot-row plot-row-2x2">
                         <div class="plot-container" id="ifeval-plot-eval-ifeval"></div>
                         <div class="plot-container" id="ifeval-plot-eval-ifbench_test"></div>
-                        <div class="plot-container" id="ifeval-plot-eval-gsm8k"></div>
                     </div>
 
                     <h4>Pass@k (step 200)</h4>
@@ -435,8 +433,42 @@ To construct supervised fine-tuning targets, we apply rejection sampling fine-tu
         </section>
 
         <section id="code">
-            <h3>2.3 Code</h3>
+            <h3>2.4 Code</h3>
+            <p>
+                We train on MBPP train split (374 examples) using GRPO with Qwen3-1.7B-Base, lr=1e-5, beta=0.001, group size $G=8$.
+                We compare a standard verifier against a truncated verifier that clips model output at the second top-level <code>def</code>/<code>class</code> before running tests.
+            </p>
 
+            <div class="experiment-plots">
+                <div id="code-preset-buttons" class="preset-buttons"></div>
+                <div id="code-run-legend" class="run-legend"></div>
+                <div id="code-preset-explanation" class="preset-explanation"></div>
+
+                <h4>Rewards</h4>
+                <div class="plot-row plot-row-2x2">
+                    <div class="plot-container" id="code-plot-reward"></div>
+                    <div class="plot-container" id="code-plot-completion-len"></div>
+                    <div class="plot-container" id="code-plot-allcorr"></div>
+                    <div class="plot-container" id="code-plot-allwrong"></div>
+                </div>
+
+                <h4>Training Dynamics</h4>
+                <div class="plot-row plot-row-2x2">
+                    <div class="plot-container" id="code-plot-loss-grpo"></div>
+                    <div class="plot-container" id="code-plot-loss-sft"></div>
+                    <div class="plot-container" id="code-plot-kl"></div>
+                    <div class="plot-container" id="code-plot-entropy"></div>
+                </div>
+
+                <h4>Evaluation</h4>
+                <div class="plot-row plot-row-2x2">
+                    <div class="plot-container" id="code-plot-eval-mbpp_test"></div>
+                    <div class="plot-container" id="code-plot-eval-humaneval"></div>
+                </div>
+            </div>
+
+            <!-- Code comparison table (auto-generated) -->
+            <div id="code-comparison-table" class="results-table-container"></div>
         </section>
 
         <section id="going-further">
@@ -644,6 +676,7 @@ To construct supervised fine-tuning targets, we apply rejection sampling fine-tu
     <script src="viewer.js"></script>
     <script src="gsm8k_plots.js?v=1"></script>
     <script src="ifeval_plots.js?v=1"></script>
+    <script src="code_plots.js?v=1"></script>
     <script>hljs.highlightAll();</script>
 </body>
 </html>

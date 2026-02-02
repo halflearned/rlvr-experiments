@@ -1,0 +1,25 @@
+# Code experiment plots config
+# Run: python generate_staleness_plots.py code_experiments.yaml
+# GRPO on MBPP train split (374 examples), Qwen3-1.7B-Base
+
+output: code_plots.js
+html_prefix: code
+
+runs:
+  - id: original
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-code-mbpp-grpo-lr1e5-small_20260201-103106
+    label: "Standard verifier"
+    color: "#3b82f6"
+    family: code
+
+  - id: truncated
+    run_dir: /efs/rlvr-experiments/results/qwen3-1.7B-code-mbpp-grpo-lr1e5-small_20260201-214439
+    label: "Truncated verifier"
+    color: "#f97316"
+    family: code
+
+presets:
+  - id: both
+    label: "Both runs"
+    runs: [original, truncated]
+    text: "Standard vs truncated verifier. Truncation clips model output at second top-level def/class before running tests."
